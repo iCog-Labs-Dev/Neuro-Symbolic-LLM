@@ -13,7 +13,7 @@ on:
 
 jobs:
 
-  # ── Code quality checks ──────────────────────────────────────────────
+  # Code quality checks
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest
@@ -37,10 +37,8 @@ jobs:
         env:
           SKIP: no-commit-to-branch
         run: pre-commit run --all-files
-        # This runs black, ruff, mypy, and all file hygiene checks.
-        # If any fail, the job fails and the PR cannot be merged.
 
-  # ── Tests ────────────────────────────────────────────────────────────
+  # Unit tests
   test:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -75,9 +73,8 @@ jobs:
           fi
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
-        # Installs the project in editable mode with dev dependencies.
-        # Does NOT install hyperon or GPU JAX — CI runs CPU only.
+        run: |
+          pip install -v -e .[dev]
 
       - name: Run unit tests
         run: |
