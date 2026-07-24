@@ -87,6 +87,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install -v -e .[dev]
+
+      - name: Run unit tests
+        run: |
           if [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
             PYTHONPATH=. pytest tests/unit/ -v --tb=short
           else
