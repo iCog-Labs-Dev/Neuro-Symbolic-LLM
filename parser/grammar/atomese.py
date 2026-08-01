@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Union
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -104,7 +103,7 @@ class LinkAtom:
         return hash((self.predicate, self.children))
 
 
-Atom = Union[SymbolAtom, LinkAtom]
+Atom = SymbolAtom | LinkAtom
 
 
 # ── Parser: string → Atom ─────────────────────────────────────────────────────
