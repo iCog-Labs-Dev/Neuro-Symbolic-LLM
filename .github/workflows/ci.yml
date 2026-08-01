@@ -1,11 +1,9 @@
-# Both checks must pass before a PR can be merged.
-
 name: CI
 
 on:
   push:
     branches:
-      - '**'        # Run on all branches
+      - '**'
   pull_request:
     branches:
       - main
@@ -34,8 +32,6 @@ jobs:
         run: pip install pre-commit
 
       - name: Run all pre-commit hooks
-        env:
-          SKIP: no-commit-to-branch
         env:
           SKIP: no-commit-to-branch
         run: pre-commit run --all-files
@@ -78,29 +74,11 @@ jobs:
           else
             echo "No unit tests found. Skipping."
           fi
-        run: pip install -e ".[dev]"
-        # Installs the project in editable mode with dev dependencies.
-        # Does NOT install hyperon or GPU JAX — CI runs CPU only.
-
-      - name: Run unit tests
-        run: |
-          if [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
-            pytest tests/unit/ -v --tb=short
-          else
-            echo "No unit tests found. Skipping."
-          fi
 
       - name: Run grammar integration tests (if they exist)
         run: |
           if [ -f "tests/unit/test_atomese.py" ]; then
             PYTHONPATH=. pytest tests/unit/test_atomese.py -v
-          else
-            echo "No grammar tests found. Skipping."
-          fi
-      - name: Run grammar integration tests
-        run: |
-          if [ -f "tests/unit/test_atomese.py" ]; then
-            pytest tests/unit/test_atomese.py -v
           else
             echo "No grammar tests found. Skipping."
           fi
