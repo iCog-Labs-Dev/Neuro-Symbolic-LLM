@@ -1,3 +1,54 @@
 env/
 venv/
 .venv/
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Type checking
+.mypy_cache/
+
+# Linting / Formatting
+.ruff_cache/
+.black_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project data (large files)
+data/
+models/
+checkpoints/
+logs/
+
+# Environment
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
