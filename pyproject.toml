@@ -127,6 +127,7 @@ ignore_missing_imports = true   # JAX and FabricPC stubs are incomplete
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning:jax",
