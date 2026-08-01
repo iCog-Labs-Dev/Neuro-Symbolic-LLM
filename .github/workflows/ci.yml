@@ -1,11 +1,9 @@
-# Both checks must pass before a PR can be merged.
-
 name: CI
 
 on:
   push:
     branches:
-      - '**'        # Run on all branches
+      - '**'
   pull_request:
     branches:
       - main
