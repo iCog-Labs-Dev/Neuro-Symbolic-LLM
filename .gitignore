@@ -1,3 +1,88 @@
-env/
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache/
+
+# Python compiled files
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+*.dylib
+*.dll
+
+# Python egg files
+*.egg
+*.egg-info/
+*.egg-info
+*.egg-info/*
+
+# MyPy cache
+.mypy_cache/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff cache
+.ruff_cache/
+
+# Black cache
+.black_cache/
+
+# Virtual environments
 venv/
+env/
 .venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project data
+data/
+models/
+checkpoints/
+logs/
+
+# Environment
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Type checking
+.mypy_cache/
+.pytype/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Temporary
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# OS
+Thumbs.db
+.DS_Store

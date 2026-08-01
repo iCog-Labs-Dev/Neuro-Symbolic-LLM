@@ -67,7 +67,7 @@ jobs:
       - name: Run unit tests (if they exist)
         run: |
           if [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
-            pytest tests/unit/ -v --tb=short
+            PYTHONPATH=. pytest tests/unit/ -v --tb=short
           else
             echo "No unit tests found. Skipping."
           fi
@@ -75,7 +75,7 @@ jobs:
       - name: Run grammar integration tests (if they exist)
         run: |
           if [ -f "tests/unit/test_atomese.py" ]; then
-            pytest tests/unit/test_atomese.py -v
+            PYTHONPATH=. pytest tests/unit/test_atomese.py -v
           else
             echo "No grammar tests found. Skipping."
           fi
