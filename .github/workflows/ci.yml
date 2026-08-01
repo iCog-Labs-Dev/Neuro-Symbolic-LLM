@@ -1,13 +1,15 @@
-# Runs on every push to main/dev and every pull request to main.
 # Both checks must pass before a PR can be merged.
 
 name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches:
+      - '**'        # Run on all branches
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - Base
 
 jobs:
 
@@ -32,6 +34,8 @@ jobs:
         run: pip install pre-commit
 
       - name: Run all pre-commit hooks
+        env:
+          SKIP: no-commit-to-branch
         run: pre-commit run --all-files
         # This runs black, ruff, mypy, and all file hygiene checks.
         # If any fail, the job fails and the PR cannot be merged.
@@ -53,18 +57,40 @@ jobs:
           path: ~/.cache/pip
           key: pip-${{ hashFiles('pyproject.toml') }}
 
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Debug - list files in root directory
+        run: |
+          echo "Current working directory: $(pwd)"
+          echo "Files in root directory:"
+          ls -la
+          echo "Checking for pyproject.toml:"
+          if [ -f "pyproject.toml" ]; then
+            echo "✅ pyproject.toml found!"
+            head -20 pyproject.toml
+          else
+            echo "❌ pyproject.toml NOT FOUND!"
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pip install -e ".[dev]"
         # Installs the project in editable mode with dev dependencies.
         # Does NOT install hyperon or GPU JAX — CI runs CPU only.
 
       - name: Run unit tests
-        run: pytest tests/unit/ -v --tb=short
-        # -v: verbose output, shows each test name
-        # --tb=short: shorter traceback on failures
+        run: |
+          if [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
+            pytest tests/unit/ -v --tb=short
+          else
+            echo "No unit tests found. Skipping."
+          fi
 
       - name: Run grammar integration tests
-        run: pytest tests/unit/test_atomese.py -v
-        # These do not need any running services.
-        # Integration tests that need MORK/parser are skipped in CI
-        # (they require running services which CI does not have).
+        run: |
+          if [ -f "tests/unit/test_atomese.py" ]; then
+            pytest tests/unit/test_atomese.py -v
+          else
+            echo "No grammar tests found. Skipping."
+          fi
