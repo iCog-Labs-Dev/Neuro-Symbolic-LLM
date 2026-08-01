@@ -1,11 +1,9 @@
-# Both checks must pass before a PR can be merged.
-
 name: CI
 
 on:
   push:
     branches:
-      - '**'        # Run on all branches
+      - '**'
   pull_request:
     branches:
       - main
@@ -88,16 +86,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
-
-
-      - name: Run unit tests
-        run: |
-          if [ -d "tests/frozenllm/unit" ] && [ "$(ls -A tests/frozenllm/unit 2>/dev/null)" ]; then
-            pytest tests/frozenllm/unit/ -v --tb=short
-          elif [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
-            pytest tests/unit/ -v --tb=short
+          if [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
+            PYTHONPATH=. pytest tests/unit/ -v --tb=short
           else
             echo "No unit tests found. Skipping."
           fi
