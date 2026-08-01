@@ -1,5 +1,43 @@
-env/
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache/
+
+# Python compiled files
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+*.dylib
+*.dll
+
+# Python egg files
+*.egg
+*.egg-info/
+*.egg-info
+*.egg-info/*
+
+# MyPy cache
+.mypy_cache/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff cache
+.ruff_cache/
+
+# Black cache
+.black_cache/
+
+# Virtual environments
 venv/
+env/
 .venv/
 # Python cache
 __pycache__/
