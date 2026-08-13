@@ -15,7 +15,7 @@ What lives here:
   - generalize():          produce a template from a ground atom
   - canonical():           normalize a string for deduplication
 
-The 8 predicates we use (closed vocabulary):
+The 14 predicates we use (closed vocabulary):
   Inheritance  "X is a type of Y"           (Inheritance dog animal)
   Evaluation   "X does Y to Z"              (Evaluation likes (List john mary))
   CanDo        "X can do Y"                 (CanDo bird fly)
@@ -24,6 +24,11 @@ The 8 predicates we use (closed vocabulary):
   Has          "X has Y"                    (Has dog fur)
   PartOf       "X is part of Y"             (PartOf wheel car)
   StateOf      "X is in state Y"            (StateOf world stage)
+  LocatedIn    "X is located in Y"          (LocatedIn book shelf)
+  MemberOf     "X is a member of Y"         (MemberOf alice team)
+  UsedFor      "X is used for Y"            (UsedFor knife cutting)
+  Before       "X happens before Y"         (Before dawn sunrise)
+  After        "X happens after Y"          (After sunrise dawn)
   List         argument list for Evaluation (List john mary)
 """
 
@@ -36,15 +41,20 @@ from dataclasses import dataclass
 
 PREDICATES = frozenset(
     {
-        "Inheritance",
-        "Evaluation",
         "CanDo",
-        "On",
         "Cause",
+        "Evaluation",
         "Has",
+        "Inheritance",
+        "List",
+        "On",
         "PartOf",
         "StateOf",
-        "List",
+        "LocatedIn",
+        "MemberOf",
+        "UsedFor",
+        "Before",
+        "After",
     }
 )
 
@@ -57,6 +67,11 @@ ARITY = {
     "Has": 2,
     "PartOf": 2,
     "StateOf": 2,
+    "LocatedIn": 2,
+    "MemberOf": 2,
+    "UsedFor": 2,
+    "Before": 2,
+    "After": 2,
     "Evaluation": 2,  # (Evaluation VERB ARGS)
     # List: variable arity (1–4)
 }
