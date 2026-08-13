@@ -41,6 +41,7 @@ dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
+    "python-dotenv>=1.0.0",
     "tqdm>=4.66.0",
     "wandb>=0.17.0",
 ]
@@ -68,7 +69,7 @@ dev = [
 ]
 
 [project.scripts]
-semantic-parser = "parser.semantic.cli:main"
+semantic-parser = "parser.semantic.semantic_parser:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
