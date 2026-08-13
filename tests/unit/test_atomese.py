@@ -75,6 +75,11 @@ class TestParseAtom:
             "(Has dog fur)",
             "(PartOf wheel car)",
             "(StateOf world stage)",
+            "(LocatedIn book shelf)",
+            "(MemberOf alice team)",
+            "(UsedFor knife cutting)",
+            "(Before dawn sunrise)",
+            "(After sunrise dawn)",
         ]
         for expr in cases:
             a = parse_atom(expr)
@@ -136,10 +141,25 @@ class TestValidate:
             "(Has dog fur)",
             "(PartOf wheel car)",
             "(StateOf world stage)",
+            "(LocatedIn book shelf)",
+            "(MemberOf alice team)",
+            "(UsedFor knife cutting)",
+            "(Before dawn sunrise)",
+            "(After sunrise dawn)",
         ]
         for expr in cases:
             ok, err = validate_metta_string(expr)
             assert ok, f"Should be valid: {expr}  error: {err}"
+
+    @pytest.mark.parametrize(
+        "predicate",
+        ["LocatedIn", "MemberOf", "UsedFor", "Before", "After"],
+    )
+    def test_added_predicates_require_two_children(self, predicate):
+        ok, err = validate_metta_string(f"({predicate} subject object extra)")
+
+        assert not ok
+        assert "requires exactly 2" in err
 
 
 # ── match_template ────────────────────────────────────────────────────────────
