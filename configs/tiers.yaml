@@ -1,0 +1,11 @@
+tier2_cpu:
+  host: localhost
+  port: 8000
+  dim: 256
+  space: cosine
+  max_capacity: 100000
+  hnsw:
+    M: 16
+    ef_construction: 200
+    ef_query: 50
+  top_m: 8

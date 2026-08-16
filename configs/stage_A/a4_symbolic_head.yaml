@@ -1,0 +1,23 @@
+# Stage A4 Symbolic Head Configuration
+# PC Residual + Basic Symbolic Head with Key/Value Alignment
+
+stage: "Stage A4"
+name: "pc_residual_basic_symbolic_head"
+
+model:
+  d_model: 4096 # Base LLM hidden dimension
+  k_dim: 256    # Symbolic key space dimension
+  top_m: 8      # Number of template key/value pairs retrieved
+  temperature: 0.1 # Softmax symbolic attention temperature
+
+optimization:
+  lr_sym: 0.0001
+  lambda_key: 1.0   # Key-space log-softmax alignment weight
+  lambda_value: 1.0 # Value-space regression loss weight
+  batch_size: 16
+  num_epochs: 5
+
+dataset:
+  name: "tiny_shakespeare"
+  val_split: 0.1
+  num_templates_seeded: 10000
