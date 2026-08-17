@@ -37,8 +37,11 @@ class ModelGenerationError(RuntimeError):
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 ALLOWED_PREDICATES = ", ".join(sorted(PREDICATES))
-_SYMBOLIC_HEAD_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "configs" / "symbolic_head_config.yaml"
+_PARSER_PROMPT_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "configs"
+    / "parser_config"
+    / "parser_prompt.yaml"
 )
 
 _CODE_FENCE_RE = re.compile(
@@ -99,7 +102,7 @@ class _BaseSemanticParser:
     def build_prompt(sentence: str) -> str:
         """Build the shared text-to-MeTTa conversion prompt."""
 
-        with _SYMBOLIC_HEAD_CONFIG_PATH.open("r", encoding="utf-8") as f:
+        with _PARSER_PROMPT_CONFIG_PATH.open("r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
         system_prompt = config["parser"]["system_prompt"].format(
