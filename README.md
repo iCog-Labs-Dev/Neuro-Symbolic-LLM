@@ -142,7 +142,8 @@ with a future fine-tuned 1B–3B local model for deployment.
 
 Copy [`.env.example`](./.env.example) to `.env` and add only the credentials you
 use. Model selection belongs in
-[`configs/model_backends.yaml`](./configs/model_backends.yaml). The active
+[`configs/model_config/model_backend.yaml`](./configs/model_config/model_backend.yaml).
+The active
 profile picks the backend class.
 
 ```yaml
@@ -151,7 +152,7 @@ active: ollama
 profiles:
   ollama:
     provider: ollama
-    model: qwen3.5:2b
+    model: qwen3:8b
 ```
 
 For the local Ollama profile, start the server in one terminal:
@@ -200,8 +201,10 @@ dedicated predicate.
 
 ```text
 configs/
-├── model_backends.yaml          # selected provider and model profiles
-├── symbolic_head_config.yaml    # semantic-parser prompt
+├── model_config/
+│   └── model_backend.yaml       # selected provider and model profiles
+├── parser_config/
+│   └── parser_prompt.yaml       # semantic-parser prompt
 ├── tiers.yaml                   # tier configuration
 └── stage_A/                     # experiment configurations
 experiments/                     # Stage A experiment entry points
