@@ -69,13 +69,13 @@ class TestSemanticParserConfig:
 class TestPrompt:
     def test_contains_sentence_and_predicates(self):
         prompt = ReferenceSemanticParser.build_prompt("A dog has fur.")
-        assert "Sentence:\nA dog has fur." in prompt
+        assert "<sentence>\nA dog has fur.\n</sentence>" in prompt
         assert ALLOWED_PREDICATES in prompt
 
     def test_contains_output_contract(self):
         prompt = ReferenceSemanticParser.build_prompt("A dog has fur.")
-        assert "Return exactly UNSUPPORTED" in prompt
-        assert "Do not include labels, explanations, or Markdown" in prompt
+        assert "output exactly:\n\nUNSUPPORTED" in prompt
+        assert "Do not output explanations, labels, comments, Markdown" in prompt
 
 
 # ── Shared parsing behavior ────────────────────────────────────────────────────

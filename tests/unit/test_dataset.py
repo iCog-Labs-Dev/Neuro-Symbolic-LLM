@@ -25,8 +25,8 @@ def make_parser():
     def generate(*, prompt: str, model: str) -> str:
         del model
         sentence = (
-            prompt.rsplit("Sentence:\n", maxsplit=1)[-1]
-            .split("\n\nConvert the sentence into MeTTa.", maxsplit=1)[0]
+            prompt.rsplit("<sentence>\n", maxsplit=1)[-1]
+            .split("\n</sentence>", maxsplit=1)[0]
             .strip()
         )
         return outputs.get(sentence, "UNSUPPORTED")
