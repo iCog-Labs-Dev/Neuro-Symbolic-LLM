@@ -54,7 +54,12 @@ class ModelProfile:
 
 def default_model_config_path() -> Path:
     """Return the repository's standard model-backend configuration path."""
-    return Path(__file__).resolve().parents[2] / "configs" / "model_backends.yaml"
+    return (
+        Path(__file__).resolve().parents[2]
+        / "configs"
+        / "parser_config"
+        / "model_backend.yaml"
+    )
 
 
 def load_model_profile(
