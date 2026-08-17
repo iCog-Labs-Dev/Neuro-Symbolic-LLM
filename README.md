@@ -142,9 +142,8 @@ with a future fine-tuned 1B–3B local model for deployment.
 
 Copy [`.env.example`](./.env.example) to `.env` and add only the credentials you
 use. Model selection belongs in
-[`configs/model_config/model_backend.yaml`](./configs/model_config/model_backend.yaml).
-The active
-profile picks the backend class.
+[`configs/parser_config/model_backend.yaml`](./configs/parser_config/model_backend.yaml).
+The active profile picks the backend class.
 
 ```yaml
 active: ollama
@@ -201,9 +200,8 @@ dedicated predicate.
 
 ```text
 configs/
-├── model_config/
-│   └── model_backend.yaml       # selected provider and model profiles
 ├── parser_config/
+│   ├── model_backend.yaml       # selected provider and model profiles
 │   └── parser_prompt.yaml       # semantic-parser prompt
 ├── tiers.yaml                   # tier configuration
 └── stage_A/                     # experiment configurations
