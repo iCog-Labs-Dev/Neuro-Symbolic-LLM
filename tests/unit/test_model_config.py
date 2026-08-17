@@ -6,9 +6,9 @@ from parser.semantic.model_config import load_model_profile
 def test_loads_active_profile_from_project_config() -> None:
     profile = load_model_profile()
 
-    assert profile.name
-    assert profile.provider
-    assert profile.model
+    assert profile.name == "ollama"
+    assert profile.provider == "ollama"
+    assert profile.model == "qwen3:8b"
 
 
 def test_can_select_named_profile() -> None:
