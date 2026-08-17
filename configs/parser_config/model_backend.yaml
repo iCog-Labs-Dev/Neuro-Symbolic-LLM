@@ -1,0 +1,49 @@
+# ── Active model ───────────────────────────────────────────────────────────────────────────────
+# Choose one model you want to use below. Credentials always stay in .env.
+active: ollama
+
+# ── Provider profiles ───────────────────────────────────────────────────────────────────────────
+profiles:
+
+  # Hosted APIs ───────────────────────────────────────────────────────────────────────────
+  openai:
+    provider: openai
+    model: gpt-4.1-mini
+    api_key_env: OPENAI_API_KEY
+    max_output_tokens: 512
+
+  anthropic:
+    provider: anthropic
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    max_tokens: 512
+
+  gemini:
+    provider: gemini
+    model: gemini-3.5-flash
+    api_key_env: GEMINI_API_KEY
+    max_output_tokens: 512
+
+  # OpenAI-compatible APIs ──────────────────────────────────────────────────────────
+  openai_compatible:
+    # For vLLM, Together, Groq, or another OpenAI-compatible endpoint.
+    provider: openai-compatible
+    model: your-provider-model-id
+    api_key_env: OPENAI_COMPATIBLE_API_KEY
+    base_url_env: OPENAI_COMPATIBLE_BASE_URL
+    max_output_tokens: 512
+
+  # Local or self-hosted models ────────────────────────────────────────────────────────
+  ollama:
+    # Start Ollama with `ollama serve`; it does not require an API key by default.
+    provider: ollama
+    model: qwen3:8b  # Use qwen3:14b for higher-quality
+    host_env: OLLAMA_HOST
+    max_output_tokens: 512
+
+  transformers_local:
+    # A locally downloaded Hugging Face model; no provider API key is required.
+    provider: transformers-local
+    model: Qwen/Qwen2.5-3B-Instruct
+    hf_token_env: HF_TOKEN
+    max_new_tokens: 512
