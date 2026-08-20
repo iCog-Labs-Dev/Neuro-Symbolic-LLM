@@ -1,5 +1,5 @@
 """
-Holistic Benchmarking Suite for Tier 2 MORK HNSW Indexing & Retrieval Engine.
+Holistic Benchmarking Suite for Tier 2 HNSW Indexing & Retrieval Engine.
 Measures latency (p50/p95/p99), throughput (QPS), index construction rates, and Recall@m.
 """
 
@@ -8,14 +8,14 @@ import logging
 import time
 import numpy as np
 
-from tier2_mork.store import MORKTemplateStore, TemplateRecord
+from tier2_retrieval.store import TemplateStore, TemplateRecord
 
 logger = logging.getLogger(__name__)
 
 
-class MORKBenchmarkSuite:
+class RetrievalBenchmarkSuite:
     """
-    Benchmarking harness for evaluating Tier 2 MORK CPU performance.
+    Benchmarking harness for evaluating Tier 2 CPU retrieval performance.
     """
 
     def __init__(self, dim: int = 256, metric: str = "cosine") -> None:
@@ -55,11 +55,11 @@ class MORKBenchmarkSuite:
         """
         Run end-to-end index construction, latency, throughput, and Recall@m sweep.
         """
-        logger.info(f"Starting MORK benchmark: {num_templates} templates, {num_queries} queries")
+        logger.info(f"Starting retrieval benchmark: {num_templates} templates, {num_queries} queries")
 
         # 1. Benchmark Index Construction
         templates = self.generate_synthetic_templates(num_templates)
-        store = MORKTemplateStore(
+        store = TemplateStore(
             dim=self.dim, space=self.metric, max_capacity=num_templates + 1000
         )
 
@@ -128,5 +128,6 @@ class MORKBenchmarkSuite:
             "query_benchmarks": ef_results,
         }
 
-        logger.info(f"MORK Benchmark complete: Recall@{top_m}={recall_at_m:.4f}, p95_latency={ef_results['ef_50']['p95_latency_ms']:.3f} ms")
+        logger.info(f"Retrieval Benchmark complete: Recall@{top_m}={recall_at_m:.4f}, p95_latency={ef_results['ef_50']['p95_latency_ms']:.3f} ms")
         return results
+

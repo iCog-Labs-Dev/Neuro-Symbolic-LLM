@@ -4,7 +4,7 @@ Unit tests for GenericHNSWIndex.
 
 import numpy as np
 import pytest
-from tier2_mork.index import GenericHNSWIndex
+from tier2_retrieval.index import GenericHNSWIndex
 
 
 def test_hnsw_index_basic_query():

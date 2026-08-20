@@ -1,5 +1,5 @@
 """
-MORK Template Hypergraph Store for Tier 2 Sparse Symbolic Engine.
+CPU DRAM Template Hypergraph Store for Tier 2 Sparse Symbolic Engine.
 Hosts Atomese/MeTTa templates, key/value embeddings (p_j, v_j) in CPU DRAM.
 """
 
@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import logging
 import numpy as np
 
-from tier2_mork.index import GenericHNSWIndex
+from tier2_retrieval.index import GenericHNSWIndex
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TemplateRecord:
-    """Represents a single Atomese/MeTTa hypergraph template in MORK."""
+    """Represents a single Atomese/MeTTa hypergraph template record."""
 
     template_id: int
     metta_ast: str
@@ -26,9 +26,9 @@ class TemplateRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class MORKTemplateStore:
+class TemplateStore:
     """
-    CPU DRAM MORK Store combining HNSW index search with template record storage.
+    CPU DRAM Template Store combining HNSW index search with template record storage.
     """
 
     def __init__(

@@ -1,15 +1,15 @@
 """
-Unit tests for MORKTemplateStore.
+Unit tests for TemplateStore.
 """
 
 import numpy as np
 import pytest
-from tier2_mork.store import MORKTemplateStore, TemplateRecord
+from tier2_retrieval.store import TemplateStore, TemplateRecord
 
 
-def test_mork_store_insert_and_retrieve():
+def test_template_store_insert_and_retrieve():
     dim = 128
-    store = MORKTemplateStore(dim=dim, max_capacity=500)
+    store = TemplateStore(dim=dim, max_capacity=500)
 
     t1 = TemplateRecord(
         template_id=1,

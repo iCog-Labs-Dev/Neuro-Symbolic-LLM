@@ -1,5 +1,5 @@
 """
-PCIe Communication Bridge between Tier 1 GPU (JAX/Flax) and Tier 2 CPU (MORK Sparse Engine).
+PCIe Communication Bridge between Tier 1 GPU (JAX/Flax) and Tier 2 CPU Sparse Engine.
 Provides kilobyte-scale payload serialization, round-trip IPC/Network transport, and latency profiling.
 """
 
@@ -9,7 +9,7 @@ import logging
 import time
 import numpy as np
 
-from tier2_mork.store import MORKTemplateStore, TemplateRecord
+from tier2_retrieval.store import TemplateStore, TemplateRecord
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +68,12 @@ class Profiler:
 
 class PCIeBridgeClient:
     """
-    High-speed PCIe/IPC bridge client used by Tier 1 GPU loop to query Tier 2 CPU MORK engine.
+    High-speed PCIe/IPC bridge client used by Tier 1 GPU loop to query Tier 2 CPU engine.
     """
 
     def __init__(
         self,
-        mork_store: Optional[MORKTemplateStore] = None,
+        template_store: Optional[TemplateStore] = None,
         host: str = "localhost",
         port: int = 8000,
         direct_in_memory: bool = True,
@@ -81,12 +81,12 @@ class PCIeBridgeClient:
         """
         Initialize the PCIe Bridge client.
 
-        :param mork_store: In-memory store reference (for co-located / zero-copy nodes).
+        :param template_store: In-memory store reference (for co-located / zero-copy nodes).
         :param host: Tier 2 CPU host address.
         :param port: Tier 2 CPU service port.
         :param direct_in_memory: If True, uses zero-copy in-memory calls (NVLink-C2C style).
         """
-        self.mork_store = mork_store
+        self.template_store = template_store
         self.host = host
         self.port = port
         self.direct_in_memory = direct_in_memory
@@ -94,7 +94,7 @@ class PCIeBridgeClient:
 
     def send_query(self, payload: CrossTierPayload) -> CrossTierResponse:
         """
-        Send q_sym payload to Tier 2 MORK and receive top-m keys & values.
+        Send q_sym payload to Tier 2 and receive top-m keys & values.
 
         :param payload: CrossTierPayload containing q_sym vector.
         :return: CrossTierResponse with returned key and value matrices.
@@ -105,8 +105,8 @@ class PCIeBridgeClient:
         # Compute payload size in bytes
         send_bytes = q_arr.nbytes + 16  # vector bytes + header
 
-        if self.direct_in_memory and self.mork_store is not None:
-            records, distances, keys, values = self.mork_store.retrieve_top_m(
+        if self.direct_in_memory and self.template_store is not None:
+            records, distances, keys, values = self.template_store.retrieve_top_m(
                 q_arr, top_m=payload.top_m
             )
             matched_ids = [r.template_id for r in records]

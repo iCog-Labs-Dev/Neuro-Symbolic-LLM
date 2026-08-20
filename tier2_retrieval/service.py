@@ -1,5 +1,5 @@
 """
-MORK Fast Top-m Service API & Service Engine for Tier 2 CPU Node Deployment.
+Fast Top-m Service API & Service Engine for Tier 2 CPU Node Deployment.
 Provides both direct in-memory calls and REST/gRPC endpoints for cross-tier PCIe communication.
 """
 
@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 import numpy as np
 from pydantic import BaseModel, Field
 
-from tier2_mork.store import MORKTemplateStore, TemplateRecord
+from tier2_retrieval.store import TemplateStore, TemplateRecord
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,11 @@ class QueryResponse(BaseModel):
     latency_ms: float
 
 
-class MORKService:
-    """Service wrapper for hosting MORK store in memory or serving over network."""
+class Tier2Service:
+    """Service wrapper for hosting template store in memory or serving over network."""
 
-    def __init__(self, store: Optional[MORKTemplateStore] = None, dim: int = 256):
-        self.store = store or MORKTemplateStore(dim=dim)
+    def __init__(self, store: Optional[TemplateStore] = None, dim: int = 256):
+        self.store = store or TemplateStore(dim=dim)
 
     def query_direct(
         self, query_vector: np.ndarray, top_m: int = 8
@@ -71,33 +71,33 @@ class MORKService:
         }
 
 
-def create_app(service: Optional[MORKService] = None) -> FastAPI:
-    """Factory creating FastAPI application for MORK Tier 2 CPU node deployment."""
+def create_app(service: Optional[Tier2Service] = None) -> FastAPI:
+    """Factory creating FastAPI application for Tier 2 CPU node deployment."""
     app = FastAPI(
-        title="MORK Tier 2 Symbolic Engine API",
+        title="Tier 2 Symbolic Retrieval Engine API",
         version="0.1.0",
         description="Sub-millisecond Atomese template retrieval engine for SingularityNET PC-Residual LLM.",
     )
-    mork_service = service or MORKService()
+    t2_service = service or Tier2Service()
 
     @app.get("/health")
     def health():
         return {
             "status": "healthy",
-            "indexed_templates": mork_service.store.size(),
-            "dim": mork_service.store.dim,
+            "indexed_templates": t2_service.store.size(),
+            "dim": t2_service.store.dim,
         }
 
     @app.post("/query", response_model=QueryResponse)
     def query_templates(payload: QueryPayload):
         q_arr = np.array(payload.query_vector, dtype=np.float32)
-        if q_arr.shape[0] != mork_service.store.dim:
+        if q_arr.shape[0] != t2_service.store.dim:
             raise HTTPException(
                 status_code=400,
-                detail=f"Dimension mismatch: expected {mork_service.store.dim}, got {q_arr.shape[0]}",
+                detail=f"Dimension mismatch: expected {t2_service.store.dim}, got {q_arr.shape[0]}",
             )
 
-        res = mork_service.query_direct(q_arr, top_m=payload.top_m)
+        res = t2_service.query_direct(q_arr, top_m=payload.top_m)
         return QueryResponse(**res)
 
     @app.post("/insert")
@@ -109,7 +109,8 @@ def create_app(service: Optional[MORKService] = None) -> FastAPI:
             value_embedding=np.array(payload.value_embedding, dtype=np.float32),
             category=payload.category,
         )
-        mork_service.store.insert_template(record)
+        t2_service.store.insert_template(record)
         return {"status": "success", "template_id": payload.template_id}
 
     return app
+

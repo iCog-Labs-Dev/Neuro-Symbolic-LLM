@@ -1,6 +1,6 @@
 """
 Stage A4 Symbolic Head Implementation.
-Projects continuous residual hidden states into k-dimensional key-space, retrieves top-m MORK templates,
+Projects continuous residual hidden states into k-dimensional key-space, retrieves top-m Atomese templates,
 computes softmax symbolic attention, and integrates semantic value vectors back into the continuous stream.
 """
 
@@ -15,7 +15,7 @@ try:
 except ImportError:
     HAS_JAX = False
 
-from tier2_mork.store import MORKTemplateStore, TemplateRecord
+from tier2_retrieval.store import TemplateStore, TemplateRecord
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class SymbolicHead:
     """
     Stage A4 Basic Symbolic Head Module.
-    Connects Tier 1 GPU continuous activations with Tier 2 CPU MORK hypergraph templates.
+    Connects Tier 1 GPU continuous activations with Tier 2 CPU hypergraph templates.
     """
 
     def __init__(
@@ -33,24 +33,24 @@ class SymbolicHead:
         top_m: int = 8,
         temperature: float = 0.1,
         layer_id: int = 0,
-        mork_store: Optional[MORKTemplateStore] = None,
+        template_store: Optional[TemplateStore] = None,
     ) -> None:
         """
         Initialize the Stage A4 Symbolic Head.
 
         :param d_model: Hidden dimension of base LLM (d).
         :param k_dim: Symbolic key/value dimension (k << d).
-        :param top_m: Number of templates to retrieve from MORK.
+        :param top_m: Number of templates to retrieve.
         :param temperature: Softmax temperature for symbolic attention.
         :param layer_id: Transformer layer ID where this head is attached.
-        :param mork_store: Reference to Tier 2 MORK Template Store.
+        :param template_store: Reference to Tier 2 Template Store.
         """
         self.d_model = d_model
         self.k_dim = k_dim
         self.top_m = top_m
         self.temperature = temperature
         self.layer_id = layer_id
-        self.mork_store = mork_store
+        self.template_store = template_store
 
         # Projection weights: W_sym in R^{k x d}, b_sym in R^k
         np.random.seed(42 + layer_id)
@@ -109,8 +109,8 @@ class SymbolicHead:
         """
         q_sym = self.project_query(h_tilde)
 
-        if self.mork_store is not None:
-            records, distances, keys, values = self.mork_store.retrieve_top_m(
+        if self.template_store is not None:
+            records, distances, keys, values = self.template_store.retrieve_top_m(
                 q_sym, top_m=self.top_m
             )
         else:

@@ -1,5 +1,5 @@
 """
-Generic HNSW Vector Indexing Engine for Tier 2 CPU MORK Pattern Matching.
+Generic HNSW Vector Indexing Engine for Tier 2 CPU Pattern Matching.
 Provides holistic nearest-neighbor search over symbolic key-space without domain hardcoding.
 Includes robust NumPy fallback if hnswlib is unavailable.
 """

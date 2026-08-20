@@ -10,8 +10,8 @@ import numpy as np
 from fabricpc_ext.pcie_bridge import CrossTierPayload, PCIeBridgeClient
 from residual.symbolic_head.head import SymbolicHead
 from residual.symbolic_head.losses import combined_symbolic_loss
-from tier2_mork.benchmark import MORKBenchmarkSuite
-from tier2_mork.store import MORKTemplateStore
+from tier2_retrieval.benchmark import RetrievalBenchmarkSuite
+from tier2_retrieval.store import TemplateStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("run_stage_a4")
@@ -25,9 +25,9 @@ def run_stage_a4_verification():
     top_m = 8
     num_templates = 10000
 
-    # 1. Initialize Tier 2 MORK Store & Benchmark Suite
-    logger.info(f"1. Seeding Tier 2 MORK Store with {num_templates} templates...")
-    bench = MORKBenchmarkSuite(dim=k_dim, metric="cosine")
+    # 1. Initialize Tier 2 Template Store & Benchmark Suite
+    logger.info(f"1. Seeding Tier 2 Template Store with {num_templates} templates...")
+    bench = RetrievalBenchmarkSuite(dim=k_dim, metric="cosine")
     bench_results = bench.run_full_benchmark(
         num_templates=num_templates, num_queries=500, top_m=top_m, ef_search_list=[32, 50]
     )
@@ -42,12 +42,12 @@ def run_stage_a4_verification():
 
     # Re-use seeded store for integration test
     templates = bench.generate_synthetic_templates(num_templates)
-    store = MORKTemplateStore(dim=k_dim, space="cosine", max_capacity=num_templates + 1000)
+    store = TemplateStore(dim=k_dim, space="cosine", max_capacity=num_templates + 1000)
     store.insert_batch(templates)
 
     # 2. Test PCIe Bridge Client
     logger.info("2. Testing Tier 1 GPU <-> Tier 2 CPU PCIe Bridge Client...")
-    bridge = PCIeBridgeClient(mork_store=store, direct_in_memory=True)
+    bridge = PCIeBridgeClient(template_store=store, direct_in_memory=True)
 
     dummy_q = np.random.randn(k_dim).astype(np.float32)
     dummy_q /= np.linalg.norm(dummy_q)
@@ -59,10 +59,10 @@ def run_stage_a4_verification():
     logger.info(f"Retrieved Top-{top_m} Template IDs: {resp.matched_ids}")
     logger.info(f"Key Matrix shape: {resp.key_matrix.shape}, Value Matrix shape: {resp.value_matrix.shape}")
 
-    # 3. Test Stage A4 Symbolic Head Forward Pass
-    logger.info("3. Testing Stage A4 Symbolic Head Forward Pass...")
+    # 3. Test Symbolic Head Execution
+    logger.info("3. Testing Symbolic Head forward pass...")
     head = SymbolicHead(
-        d_model=d_model, k_dim=k_dim, top_m=top_m, temperature=0.1, layer_id=28, mork_store=store
+        d_model=d_model, k_dim=k_dim, top_m=top_m, temperature=0.1, layer_id=28, template_store=store
     )
 
     dummy_h_tilde = np.random.randn(d_model).astype(np.float32)

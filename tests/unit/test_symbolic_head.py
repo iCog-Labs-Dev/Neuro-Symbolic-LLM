@@ -6,13 +6,13 @@ import numpy as np
 import pytest
 from residual.symbolic_head.head import SymbolicHead
 from residual.symbolic_head.losses import combined_symbolic_loss
-from tier2_mork.store import MORKTemplateStore, TemplateRecord
+from tier2_retrieval.store import TemplateStore, TemplateRecord
 
 
 def test_symbolic_head_forward():
     d_model = 512
     k_dim = 64
-    store = MORKTemplateStore(dim=k_dim, max_capacity=100)
+    store = TemplateStore(dim=k_dim, max_capacity=100)
 
     for i in range(1, 11):
         rec = TemplateRecord(
@@ -23,7 +23,7 @@ def test_symbolic_head_forward():
         )
         store.insert_template(rec)
 
-    head = SymbolicHead(d_model=d_model, k_dim=k_dim, top_m=4, mork_store=store)
+    head = SymbolicHead(d_model=d_model, k_dim=k_dim, top_m=4, template_store=store)
     h_in = np.random.randn(d_model).astype(np.float32)
 
     h_out, info = head.forward(h_in)
