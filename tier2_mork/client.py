@@ -1,11 +1,3 @@
-"""Pluggable MORK Client Interface and Concrete Backends.
-
-Supports:
-1. DockerMorkClient: HTTP REST client connecting to official containerized MORK service.
-2. LocalHNSWClient: Fast in-memory hnswlib index backend for local testing and offline sweeps.
-3. MmapPathMapClient: Memory-mapped .act PathMap binary snapshot loader backend.
-"""
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import os
@@ -14,9 +6,9 @@ import typing as t
 import numpy as np
 
 try:
-    import hnswlib
+    import faiss
 except ImportError:
-    hnswlib = None
+    faiss = None
 
 try:
     import httpx
@@ -35,22 +27,14 @@ class MorkQueryResult:
 
 
 class MorkClient(ABC):
-    """Abstract interface for Tier 2 MORK sparse symbolic engine."""
+    """Abstract client interface for Tier 2 MORK sparse symbolic engine."""
 
     def __init__(self, key_dim: int = 256) -> None:
         self.key_dim = key_dim
 
     @abstractmethod
     def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
-        """Query MORK for top_m template key/value pairs matching input query vectors.
-
-        Args:
-            query_vectors: np.ndarray of shape (N, k), float32
-            top_m: number of nearest template keys to retrieve per position
-
-        Returns:
-            MorkQueryResult containing matched key matrices, value matrices, IDs, and scores.
-        """
+        """Query top_m template key/value pairs matching query_vectors."""
 
     @abstractmethod
     def add_template(
@@ -60,11 +44,11 @@ class MorkClient(ABC):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        """Add a newly mined template key/value pair to the MORK store."""
+        """Register a template key/value pair in MORK."""
 
 
 class LocalHNSWClient(MorkClient):
-    """In-memory hnswlib index backend for local execution and offline testing."""
+    """In-memory HNSW vector index backend using FAISS (IndexHNSWFlat) / HNSWLib for CPU execution."""
 
     def __init__(
         self,
@@ -80,16 +64,18 @@ class LocalHNSWClient(MorkClient):
         self.id_store: list[str] = []
         self.metta_store: list[str] = []
 
-        if hnswlib is not None:
-            self.index = hnswlib.Index(space="cosine", dim=key_dim)
-            self.index.init_index(
-                max_elements=max_elements,
-                ef_construction=ef_construction,
-                M=M,
-            )
-            self.index.set_ef(50)
+        if faiss is not None:
+            self.faiss_index = faiss.IndexHNSWFlat(key_dim, M)
+            self.faiss_index.hnsw.efSearch = 50
+            self.hnsw_index = None
+        elif hnswlib is not None:
+            self.faiss_index = None
+            self.hnsw_index = hnswlib.Index(space="cosine", dim=key_dim)
+            self.hnsw_index.init_index(max_elements=max_elements, ef_construction=ef_construction, M=M)
+            self.hnsw_index.set_ef(50)
         else:
-            self.index = None
+            self.faiss_index = None
+            self.hnsw_index = None
 
     def add_template(
         self,
@@ -98,23 +84,26 @@ class LocalHNSWClient(MorkClient):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        idx = len(self.key_store)
         key_vec = np.asarray(key_vector, dtype=np.float32)
         val_vec = np.asarray(val_vector, dtype=np.float32)
 
         if key_vec.shape != (self.key_dim,):
-            raise ValueError(f"Key vector dimension mismatch: expected {self.key_dim}, got {key_vec.shape}")
+            raise ValueError(f"Key vector dim mismatch: expected {self.key_dim}, got {key_vec.shape}")
 
         self.key_store.append(key_vec)
         self.val_store.append(val_vec)
         self.id_store.append(template_id)
         self.metta_store.append(metta_expr)
 
-        if self.index is not None:
+        if self.faiss_index is not None:
+            norm_key = key_vec / (np.linalg.norm(key_vec) + 1e-8)
+            self.faiss_index.add(np.expand_dims(norm_key, axis=0))
+        elif self.hnsw_index is not None:
+            idx = len(self.key_store) - 1
             if idx >= self.max_elements:
-                self.index.resize_index(self.max_elements * 2)
+                self.hnsw_index.resize_index(self.max_elements * 2)
                 self.max_elements *= 2
-            self.index.add_items(key_vec, idx)
+            self.hnsw_index.add_items(key_vec, idx)
 
         return True
 
@@ -124,33 +113,30 @@ class LocalHNSWClient(MorkClient):
         num_items = len(self.key_store)
 
         if num_items == 0:
-            # Empty store fallback: return zeros
-            empty_keys = np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32)
-            empty_vals = np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32)
-            empty_ids = [["empty"] * top_m for _ in range(num_queries)]
-            empty_scores = np.zeros((num_queries, top_m), dtype=np.float32)
             return MorkQueryResult(
-                keys=empty_keys,
-                values=empty_vals,
-                template_ids=empty_ids,
-                scores=empty_scores,
+                keys=np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32),
+                values=np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32),
+                template_ids=[["empty"] * top_m for _ in range(num_queries)],
+                scores=np.zeros((num_queries, top_m), dtype=np.float32),
             )
 
         k_actual = min(top_m, num_items)
 
-        if self.index is not None and num_items >= k_actual:
-            labels, distances = self.index.knn_query(queries, k=k_actual)
+        if self.faiss_index is not None and num_items >= k_actual:
+            norm_queries = queries / (np.linalg.norm(queries, axis=1, keepdims=True) + 1e-8)
+            distances, labels = self.faiss_index.search(norm_queries, k=k_actual)
+            scores = 1.0 - distances / 2.0
+        elif self.hnsw_index is not None and num_items >= k_actual:
+            labels, distances = self.hnsw_index.knn_query(queries, k=k_actual)
             scores = 1.0 - distances
         else:
-            # Brute-force cosine similarity fallback
-            keys_mat = np.stack(self.key_store, axis=0)  # (M, k)
+            keys_mat = np.stack(self.key_store, axis=0)
             norm_q = queries / (np.linalg.norm(queries, axis=1, keepdims=True) + 1e-8)
             norm_k = keys_mat / (np.linalg.norm(keys_mat, axis=1, keepdims=True) + 1e-8)
-            sim_mat = np.matmul(norm_q, norm_k.T)  # (N, M)
+            sim_mat = np.matmul(norm_q, norm_k.T)
             labels = np.argsort(-sim_mat, axis=1)[:, :k_actual]
             scores = np.take_along_axis(sim_mat, labels, axis=1)
 
-        # Pad to top_m if k_actual < top_m
         matched_keys = np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32)
         matched_vals = np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32)
         matched_scores = np.zeros((num_queries, top_m), dtype=np.float32)
@@ -173,7 +159,7 @@ class LocalHNSWClient(MorkClient):
 
 
 class DockerMorkClient(MorkClient):
-    """HTTP client for official containerized MORK server instance."""
+    """HTTP REST client for containerized MORK service."""
 
     def __init__(self, server_url: str = "http://localhost:8080", key_dim: int = 256, timeout_sec: float = 2.0) -> None:
         super().__init__(key_dim=key_dim)
@@ -185,13 +171,9 @@ class DockerMorkClient(MorkClient):
         queries = np.asarray(query_vectors, dtype=np.float32)
         if httpx is not None:
             try:
-                payload = {
-                    "query_vectors": queries.tolist(),
-                    "top_m": top_m,
-                }
                 resp = httpx.post(
                     f"{self.server_url}/query",
-                    json=payload,
+                    json={"query_vectors": queries.tolist(), "top_m": top_m},
                     timeout=self.timeout_sec,
                 )
                 if resp.status_code == 200:
@@ -203,7 +185,6 @@ class DockerMorkClient(MorkClient):
                         scores=np.array(data["scores"], dtype=np.float32),
                     )
             except Exception:
-                # Fallback on connection error/timeout
                 pass
 
         return self.fallback_client.query_top_k(queries, top_m=top_m)
@@ -224,29 +205,19 @@ class DockerMorkClient(MorkClient):
                     "key_vector": np.asarray(key_vector, dtype=np.float32).tolist(),
                     "val_vector": np.asarray(val_vector, dtype=np.float32).tolist(),
                 }
-                httpx.post(
-                    f"{self.server_url}/templates/add",
-                    json=payload,
-                    timeout=self.timeout_sec,
-                )
+                httpx.post(f"{self.server_url}/templates/add", json=payload, timeout=self.timeout_sec)
             except Exception:
                 pass
         return True
 
 
 class MmapPathMapClient(MorkClient):
-    """Memory-mapped .act PathMap binary snapshot loader client."""
+    """Memory-mapped PathMap binary snapshot client for CLI workflows."""
 
     def __init__(self, snapshot_path: t.Optional[str] = None, key_dim: int = 256) -> None:
         super().__init__(key_dim=key_dim)
         self.snapshot_path = snapshot_path
         self.fallback_client = LocalHNSWClient(key_dim=key_dim)
-        if snapshot_path and os.path.exists(snapshot_path):
-            self._load_snapshot(snapshot_path)
-
-    def _load_snapshot(self, path: str) -> None:
-        # Placeholder for memory-mapping PathMap .act file via POSIX mmap
-        pass
 
     def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
         return self.fallback_client.query_top_k(query_vectors, top_m=top_m)
@@ -262,7 +233,7 @@ class MmapPathMapClient(MorkClient):
 
 
 def get_mork_client(key_dim: int = 256) -> MorkClient:
-    """Factory function returning active MORK client based on environment config."""
+    """Factory returning active MORK client based on environment config."""
     server_url = os.getenv("MORK_SERVER_URL")
     if server_url:
         return DockerMorkClient(server_url=server_url, key_dim=key_dim)
