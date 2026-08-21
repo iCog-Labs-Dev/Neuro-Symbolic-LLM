@@ -5,27 +5,63 @@ services:
     container_name: neuro-symbolic-llm-runner
     working_dir: /app
     volumes:
-      - .:/app
-      - nsllm-hf-cache:/root/.cache/huggingface
+    - .:/app
+    - nsllm-hf-cache:/root/.cache/huggingface
     environment:
-      - PYTHONUNBUFFERED=1
-      - TF_CPP_MIN_LOG_LEVEL=3
-      - GLOG_minloglevel=3
+    - PYTHONUNBUFFERED=1
+    - TF_CPP_MIN_LOG_LEVEL=3
+    - GLOG_minloglevel=3
     command: bash
-
   test:
     build: .
     image: neuro-symbolic-llm:latest
     working_dir: /app
     volumes:
-      - .:/app
-      - nsllm-hf-cache:/root/.cache/huggingface
+    - .:/app
+    - nsllm-hf-cache:/root/.cache/huggingface
     environment:
-      - PYTHONUNBUFFERED=1
-      - TF_CPP_MIN_LOG_LEVEL=3
-      - GLOG_minloglevel=3
+    - PYTHONUNBUFFERED=1
+    - TF_CPP_MIN_LOG_LEVEL=3
+    - GLOG_minloglevel=3
     command: pytest
-
+  mork-server:
+    image: trueagi/mork:server-latest
+    container_name: mork-server
+    restart: unless-stopped
+    ports:
+    - 8080:8080
+    environment:
+    - MORK_PORT=8080
+    - MORK_TEMPLATE_SNAPSHOT=/data/templates.act
+    - RUST_LOG=info
+    volumes:
+    - ./data/mork_data:/data
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:8080/health
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    build:
+      context: ./docker/mork
+      dockerfile: Dockerfile
+  redis-queue:
+    image: redis:7-alpine
+    container_name: redis-queue
+    restart: unless-stopped
+    ports:
+    - 6379:6379
+    healthcheck:
+      test:
+      - CMD
+      - redis-cli
+      - ping
+      interval: 5s
+      timeout: 3s
+      retries: 3
 volumes:
   nsllm-hf-cache:
     name: nsllm-hf-cache

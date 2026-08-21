@@ -1,17 +1,7 @@
-"""
-Symbolic Pipeline Package for Stage A4 Symbolic Head Integration & Alignment Losses.
-"""
+"""Symbolic Pipeline Package (Tier 1 GPU Neural Core).
 
-from residual.symbolic_head.head import SymbolicHead
-from residual.symbolic_head.losses import (
-    key_space_alignment_loss,
-    value_space_regression_loss,
-    combined_symbolic_loss,
-)
+Note: Tier 1 model execution, PC continuous residual settlement loops, and JAX training losses
+are developed and maintained by Team 1 (GPU Cluster Engineers).
 
-__all__ = [
-    "SymbolicHead",
-    "key_space_alignment_loss",
-    "value_space_regression_loss",
-    "combined_symbolic_loss",
-]
+Tier 2 MORK Sparse Symbolic Engine retrieval and integration contracts are located in `tier2_mork/`.
+"""
