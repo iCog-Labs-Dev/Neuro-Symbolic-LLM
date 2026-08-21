@@ -48,13 +48,12 @@ class MorkClient(ABC):
 
 
 class LocalHNSWClient(MorkClient):
-    """In-memory HNSW vector index backend using FAISS (IndexHNSWFlat) / HNSWLib for CPU execution."""
+    """In-memory CPU HNSW vector index backend using FAISS (IndexHNSWFlat)."""
 
     def __init__(
         self,
         key_dim: int = 256,
         max_elements: int = 100000,
-        ef_construction: int = 200,
         M: int = 16,
     ) -> None:
         super().__init__(key_dim=key_dim)
@@ -67,15 +66,8 @@ class LocalHNSWClient(MorkClient):
         if faiss is not None:
             self.faiss_index = faiss.IndexHNSWFlat(key_dim, M)
             self.faiss_index.hnsw.efSearch = 50
-            self.hnsw_index = None
-        elif hnswlib is not None:
-            self.faiss_index = None
-            self.hnsw_index = hnswlib.Index(space="cosine", dim=key_dim)
-            self.hnsw_index.init_index(max_elements=max_elements, ef_construction=ef_construction, M=M)
-            self.hnsw_index.set_ef(50)
         else:
             self.faiss_index = None
-            self.hnsw_index = None
 
     def add_template(
         self,
@@ -98,12 +90,6 @@ class LocalHNSWClient(MorkClient):
         if self.faiss_index is not None:
             norm_key = key_vec / (np.linalg.norm(key_vec) + 1e-8)
             self.faiss_index.add(np.expand_dims(norm_key, axis=0))
-        elif self.hnsw_index is not None:
-            idx = len(self.key_store) - 1
-            if idx >= self.max_elements:
-                self.hnsw_index.resize_index(self.max_elements * 2)
-                self.max_elements *= 2
-            self.hnsw_index.add_items(key_vec, idx)
 
         return True
 
@@ -126,9 +112,6 @@ class LocalHNSWClient(MorkClient):
             norm_queries = queries / (np.linalg.norm(queries, axis=1, keepdims=True) + 1e-8)
             distances, labels = self.faiss_index.search(norm_queries, k=k_actual)
             scores = 1.0 - distances / 2.0
-        elif self.hnsw_index is not None and num_items >= k_actual:
-            labels, distances = self.hnsw_index.knn_query(queries, k=k_actual)
-            scores = 1.0 - distances
         else:
             keys_mat = np.stack(self.key_store, axis=0)
             norm_q = queries / (np.linalg.norm(queries, axis=1, keepdims=True) + 1e-8)
