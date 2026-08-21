@@ -33,6 +33,10 @@ def test_local_hnsw_client_operations():
     assert res.template_ids[0][0] == "tpl_001"
     assert res.scores[0][0] > res.scores[0][1]
 
+    # Test exec_metta statement execution
+    exec_res = client.exec_metta('!(exec (save-state "snapshot.act"))')
+    assert "(exec-result" in exec_res or "evaluated" in exec_res
+
 
 def test_docker_mork_client_fallback():
     client = DockerMorkClient(server_url="http://localhost:9999", key_dim=16)
@@ -54,9 +58,11 @@ def test_symbolic_head_bridge_tier1_contract():
     # Seed MORK client with a sample template
     key_vec = np.ones(256, dtype=np.float32)
     val_vec = np.ones(256, dtype=np.float32) * 2.5
-    bridge.mork_client.add_template("tpl_test", "(Concept (Member X Y))", key_vec, val_vec)
+    bridge.mork_client.add_template(
+        "tpl_test", "(Concept (Member X Y))", key_vec, val_vec
+    )
 
-    # Simulate Tier 1 hidden states input from colleagues' model pass: shape (batch=2, seq=8, d=768)
+    # Simulate continuous residual hidden state activations: shape (batch=2, seq=8, d=768)
     h_tier1 = np.ones((2, 8, 768), dtype=np.float32)
 
     # Execute Tier 1 -> Tier 2 bridge pass

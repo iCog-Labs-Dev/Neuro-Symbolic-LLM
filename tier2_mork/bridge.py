@@ -18,7 +18,9 @@ class SymbolicHeadBridge:
         self.key_dim = key_dim
         self.top_m = top_m
         self.tau = tau
-        self.mork_client = mork_client if mork_client is not None else get_mork_client(key_dim=key_dim)
+        self.mork_client = (
+            mork_client if mork_client is not None else get_mork_client(key_dim=key_dim)
+        )
 
         rng = np.random.default_rng(42)
         self.w_sym = (rng.normal(0.0, 0.02, (key_dim, hidden_dim))).astype(np.float32)
@@ -47,7 +49,9 @@ class SymbolicHeadBridge:
         weights_expanded = np.expand_dims(weights, axis=-1)
         return np.sum(weights_expanded * v_vals, axis=-2)
 
-    def forward(self, hidden_states: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, MorkQueryResult]:
+    def forward(
+        self, hidden_states: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, MorkQueryResult]:
         """Execute symbolic head pass given Tier 1 hidden states."""
         h_arr = np.asarray(hidden_states, dtype=np.float32)
         original_shape = h_arr.shape

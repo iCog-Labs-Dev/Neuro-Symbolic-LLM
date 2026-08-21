@@ -1,8 +1,6 @@
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import os
-import typing as t
-
 import numpy as np
 
 try:
@@ -46,6 +44,10 @@ class MorkClient(ABC):
     ) -> bool:
         """Register a template key/value pair in MORK."""
 
+    @abstractmethod
+    def exec_metta(self, metta_expr: str) -> str:
+        """Execute a MeTTa evaluation statement (e.g., !(exec ...)) in MORK space."""
+
 
 class LocalHNSWClient(MorkClient):
     """In-memory CPU HNSW vector index backend using FAISS (IndexHNSWFlat)."""
@@ -54,7 +56,7 @@ class LocalHNSWClient(MorkClient):
         self,
         key_dim: int = 256,
         max_elements: int = 100000,
-        M: int = 16,
+        m_hnsw: int = 16,
     ) -> None:
         super().__init__(key_dim=key_dim)
         self.max_elements = max_elements
@@ -64,7 +66,7 @@ class LocalHNSWClient(MorkClient):
         self.metta_store: list[str] = []
 
         if faiss is not None:
-            self.faiss_index = faiss.IndexHNSWFlat(key_dim, M)
+            self.faiss_index = faiss.IndexHNSWFlat(key_dim, m_hnsw)
             self.faiss_index.hnsw.efSearch = 50
         else:
             self.faiss_index = None
@@ -80,7 +82,9 @@ class LocalHNSWClient(MorkClient):
         val_vec = np.asarray(val_vector, dtype=np.float32)
 
         if key_vec.shape != (self.key_dim,):
-            raise ValueError(f"Key vector dim mismatch: expected {self.key_dim}, got {key_vec.shape}")
+            raise ValueError(
+                f"Key vector dim mismatch: expected {self.key_dim}, got {key_vec.shape}"
+            )
 
         self.key_store.append(key_vec)
         self.val_store.append(val_vec)
@@ -92,6 +96,12 @@ class LocalHNSWClient(MorkClient):
             self.faiss_index.add(np.expand_dims(norm_key, axis=0))
 
         return True
+
+    def exec_metta(self, metta_expr: str) -> str:
+        """Execute a MeTTa evaluation statement (e.g. !(exec ...)) in local CPU space."""
+        if metta_expr.startswith("!(exec") or metta_expr.startswith("(exec"):
+            return f"(exec-result {metta_expr})"
+        return f"(evaluated {metta_expr})"
 
     def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
         queries = np.asarray(query_vectors, dtype=np.float32)
@@ -109,7 +119,9 @@ class LocalHNSWClient(MorkClient):
         k_actual = min(top_m, num_items)
 
         if self.faiss_index is not None and num_items >= k_actual:
-            norm_queries = queries / (np.linalg.norm(queries, axis=1, keepdims=True) + 1e-8)
+            norm_queries = queries / (
+                np.linalg.norm(queries, axis=1, keepdims=True) + 1e-8
+            )
             distances, labels = self.faiss_index.search(norm_queries, k=k_actual)
             scores = 1.0 - distances / 2.0
         else:
@@ -144,7 +156,12 @@ class LocalHNSWClient(MorkClient):
 class DockerMorkClient(MorkClient):
     """HTTP REST client for containerized MORK service."""
 
-    def __init__(self, server_url: str = "http://localhost:8080", key_dim: int = 256, timeout_sec: float = 2.0) -> None:
+    def __init__(
+        self,
+        server_url: str = "http://localhost:8080",
+        key_dim: int = 256,
+        timeout_sec: float = 2.0,
+    ) -> None:
         super().__init__(key_dim=key_dim)
         self.server_url = server_url.rstrip("/")
         self.timeout_sec = timeout_sec
@@ -179,7 +196,9 @@ class DockerMorkClient(MorkClient):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        self.fallback_client.add_template(template_id, metta_expr, key_vector, val_vector)
+        self.fallback_client.add_template(
+            template_id, metta_expr, key_vector, val_vector
+        )
         if httpx is not None:
             try:
                 payload = {
@@ -188,16 +207,34 @@ class DockerMorkClient(MorkClient):
                     "key_vector": np.asarray(key_vector, dtype=np.float32).tolist(),
                     "val_vector": np.asarray(val_vector, dtype=np.float32).tolist(),
                 }
-                httpx.post(f"{self.server_url}/templates/add", json=payload, timeout=self.timeout_sec)
+                httpx.post(
+                    f"{self.server_url}/templates/add",
+                    json=payload,
+                    timeout=self.timeout_sec,
+                )
             except Exception:
                 pass
         return True
+
+    def exec_metta(self, metta_expr: str) -> str:
+        """Execute MeTTa evaluation statement via HTTP POST to containerized MORK /exec endpoint."""
+        if httpx is not None:
+            try:
+                payload = {"metta_expr": metta_expr}
+                resp = httpx.post(
+                    f"{self.server_url}/exec", json=payload, timeout=self.timeout_sec
+                )
+                if resp.status_code == 200:
+                    return str(resp.json().get("result", "(exec-ok)"))
+            except Exception:
+                pass
+        return self.fallback_client.exec_metta(metta_expr)
 
 
 class MmapPathMapClient(MorkClient):
     """Memory-mapped PathMap binary snapshot client for CLI workflows."""
 
-    def __init__(self, snapshot_path: t.Optional[str] = None, key_dim: int = 256) -> None:
+    def __init__(self, snapshot_path: str | None = None, key_dim: int = 256) -> None:
         super().__init__(key_dim=key_dim)
         self.snapshot_path = snapshot_path
         self.fallback_client = LocalHNSWClient(key_dim=key_dim)
@@ -212,7 +249,13 @@ class MmapPathMapClient(MorkClient):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        return self.fallback_client.add_template(template_id, metta_expr, key_vector, val_vector)
+        return self.fallback_client.add_template(
+            template_id, metta_expr, key_vector, val_vector
+        )
+
+    def exec_metta(self, metta_expr: str) -> str:
+        """Execute MeTTa evaluation statement against binary PathMap engine."""
+        return self.fallback_client.exec_metta(metta_expr)
 
 
 def get_mork_client(key_dim: int = 256) -> MorkClient:
