@@ -1,7 +1,5 @@
-"""Symbolic Pipeline Package (Tier 1 GPU Neural Core).
+"""Symbolic Pipeline Package.
 
-Note: Tier 1 model execution, PC continuous residual settlement loops, and JAX training losses
-are developed and maintained by Team 1 (GPU Cluster Engineers).
-
-Tier 2 MORK Sparse Symbolic Engine retrieval and integration contracts are located in `tier2_mork/`.
+Provides neural-symbolic heads and loss functions integrating dense neural hidden states
+with Tier 2 MORK sparse hypergraph symbolic reasoning.
 """

@@ -4,18 +4,12 @@ Projects continuous residual hidden states into k-dimensional key-space, retriev
 computes softmax symbolic attention, and integrates semantic value vectors back into the continuous stream.
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union
 import logging
+from typing import Any
+
 import numpy as np
 
-try:
-    import jax
-    import jax.numpy as jnp
-    HAS_JAX = True
-except ImportError:
-    HAS_JAX = False
-
-from tier2_retrieval.store import TemplateStore, TemplateRecord
+from tier2_mork.client import MorkClient, get_mork_client
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +27,16 @@ class SymbolicHead:
         top_m: int = 8,
         temperature: float = 0.1,
         layer_id: int = 0,
-        template_store: Optional[TemplateStore] = None,
+        mork_client: MorkClient | None = None,
     ) -> None:
-        """
-        Initialize the Stage A4 Symbolic Head.
-
-        :param d_model: Hidden dimension of base LLM (d).
-        :param k_dim: Symbolic key/value dimension (k << d).
-        :param top_m: Number of templates to retrieve.
-        :param temperature: Softmax temperature for symbolic attention.
-        :param layer_id: Transformer layer ID where this head is attached.
-        :param template_store: Reference to Tier 2 Template Store.
-        """
         self.d_model = d_model
         self.k_dim = k_dim
         self.top_m = top_m
         self.temperature = temperature
         self.layer_id = layer_id
-        self.template_store = template_store
+        self.mork_client = (
+            mork_client if mork_client is not None else get_mork_client(key_dim=k_dim)
+        )
 
         # Projection weights: W_sym in R^{k x d}, b_sym in R^k
         np.random.seed(42 + layer_id)
@@ -70,11 +56,11 @@ class SymbolicHead:
             q_sym = np.dot(self.W_sym, h_arr) + self.b_sym
         else:
             q_sym = np.dot(h_arr, self.W_sym.T) + self.b_sym
-        return q_sym
+        return np.asarray(q_sym, dtype=np.float32)
 
     def compute_symbolic_attention(
         self, q_sym: np.ndarray, key_matrix: np.ndarray, value_matrix: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Compute softmax symbolic attention summary SAtt in R^k over retrieved templates.
 
@@ -101,22 +87,14 @@ class SymbolicHead:
 
         return s_att, attn_weights
 
-    def forward(
-        self, h_tilde: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Full Stage A4 Symbolic Head forward pass.
-        """
+    def forward(self, h_tilde: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        """Full Stage A4 Symbolic Head forward pass."""
         q_sym = self.project_query(h_tilde)
+        q_sym_2d = np.atleast_2d(q_sym)
 
-        if self.template_store is not None:
-            records, distances, keys, values = self.template_store.retrieve_top_m(
-                q_sym, top_m=self.top_m
-            )
-        else:
-            records, distances = [], np.zeros((0,))
-            keys = np.zeros((0, self.k_dim), dtype=np.float32)
-            values = np.zeros((0, self.k_dim), dtype=np.float32)
+        mork_res = self.mork_client.query_top_k(q_sym_2d, top_m=self.top_m)
+        keys = mork_res.keys[0] if mork_res.keys.ndim == 3 else mork_res.keys
+        values = mork_res.values[0] if mork_res.values.ndim == 3 else mork_res.values
 
         s_att, attn_weights = self.compute_symbolic_attention(q_sym, keys, values)
 
@@ -131,7 +109,7 @@ class SymbolicHead:
             "q_sym": q_sym,
             "s_att": s_att,
             "attn_weights": attn_weights,
-            "matched_ids": [r.template_id for r in records],
-            "distances": distances,
+            "matched_ids": mork_res.template_ids[0],
+            "scores": mork_res.scores[0],
         }
         return h_out, info
