@@ -25,7 +25,9 @@ services:
     - GLOG_minloglevel=3
     command: pytest
   mork-server:
-    image: trueagi/mork:server-latest
+    build:
+      context: ./docker/mork
+      dockerfile: Dockerfile
     container_name: mork-server
     restart: unless-stopped
     ports:
@@ -35,7 +37,7 @@ services:
     - MORK_PORT=8080
     - RUST_LOG=info
     volumes:
-    - ./data/mork_data:/data
+    - ./data/mork_data:/app/data
     healthcheck:
       test:
       - CMD
@@ -45,9 +47,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    build:
-      context: ./docker/mork
-      dockerfile: Dockerfile
   redis-queue:
     image: redis:7-alpine
     container_name: redis-queue
