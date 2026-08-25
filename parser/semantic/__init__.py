@@ -23,6 +23,16 @@ from parser.semantic.model_config import (
     default_model_config_path,
     load_model_profile,
 )
+from parser.semantic.normalization import (
+    SemanticNormalizationError,
+    normalize_semantic_result,
+    normalize_symbol,
+)
+from parser.semantic.schema import (
+    SemanticArgument,
+    SemanticAssertion,
+    SemanticParseResult,
+)
 from parser.semantic.semantic_parser import (
     ALLOWED_PREDICATES,
     DistilledSemanticParser,
@@ -46,7 +56,11 @@ __all__ = [
     "OpenAIBackend",
     "OpenAICompatibleBackend",
     "RejectedRecord",
+    "SemanticArgument",
+    "SemanticAssertion",
+    "SemanticNormalizationError",
     "SemanticParseError",
+    "SemanticParseResult",
     "SemanticParserConfig",
     "SemanticDatasetBuilder",
     "ReferenceSemanticParser",
@@ -56,4 +70,6 @@ __all__ = [
     "create_backend",
     "default_model_config_path",
     "load_model_profile",
+    "normalize_semantic_result",
+    "normalize_symbol",
 ]
