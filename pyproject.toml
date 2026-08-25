@@ -63,7 +63,7 @@ dev = [
 ]
 
 [project.scripts]
-semantic-parser = "parser.semantic.semantic_parser:main"
+semantic-parser = "parser.semantic.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
