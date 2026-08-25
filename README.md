@@ -175,7 +175,10 @@ for atom in atoms:
 
 ## Atomese output contract
 
-The closed vocabulary in [`parser/grammar/atomese.py`](./parser/grammar/atomese.py) is:
+The closed vocabulary is defined in
+[`configs/parser_config/predicate_schema.yaml`](./configs/parser_config/predicate_schema.yaml)
+and enforced by
+[`parser/grammar/atomese.py`](./parser/grammar/atomese.py):
 
 ```text
 Inheritance  Evaluation  CanDo  On  Cause  Has  PartOf  StateOf  List

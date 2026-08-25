@@ -63,5 +63,19 @@ predicates:
     variable_arity: true
     min_arity: 1
     max_arity: 4
+    atomese_arity: 2
     fallback: true
     description: "Free-form relation not represented by a known predicate"
+
+# Renderer-owned predicates are valid Atomese syntax but are never selected
+# directly by the language model.
+structural_predicates:
+  List:
+    variable_arity: true
+    min_arity: 1
+    max_arity: 4
+    description: "Ordered argument container used by Evaluation"
+
+  Not:
+    arity: 1
+    description: "Negation wrapper around one assertion"
