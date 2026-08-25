@@ -52,6 +52,7 @@ PREDICATES = frozenset(
         "StateOf",
         "LocatedIn",
         "MemberOf",
+        "Not",
         "UsedFor",
         "Before",
         "After",
@@ -72,6 +73,7 @@ ARITY = {
     "UsedFor": 2,
     "Before": 2,
     "After": 2,
+    "Not": 1,
     "Evaluation": 2,  # (Evaluation VERB ARGS)
     # List: variable arity (1–4)
 }
