@@ -1,6 +1,6 @@
-"""Command-line entry point for the semantic parser demonstration."""
+"""Package entry point for ``python -m parser.semantic``."""
 
-from parser.semantic.semantic_parser import main
+from parser.semantic.cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
