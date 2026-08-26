@@ -106,9 +106,10 @@ class TestSemanticDatasetBuilder:
 
         assert rejected == []
         assert accepted[0].text == "A dog can bark."
-        assert [
-            item["predicate"] for item in accepted[0].target["assertions"]
-        ] == ["Inheritance", "CanDo"]
+        assert [item["predicate"] for item in accepted[0].target["assertions"]] == [
+            "Inheritance",
+            "CanDo",
+        ]
         assert accepted[0].teacher_model == "teacher-model"
 
     def test_optionally_includes_derived_metta(self) -> None:
