@@ -8,7 +8,6 @@ from collections.abc import Mapping
 
 from parser.semantic.schema import SemanticParseResult
 
-
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -78,9 +77,7 @@ def normalize_semantic_result(
             if argument.type is not None:
                 argument.type = _normalize_phrase(argument.type, "argument type")
 
-        assertion.source_span = _normalize_phrase(
-            assertion.source_span, "source span"
-        )
+        assertion.source_span = _normalize_phrase(assertion.source_span, "source span")
         assertion.alternatives = [
             _normalize_phrase(alternative, "alternative")
             for alternative in assertion.alternatives

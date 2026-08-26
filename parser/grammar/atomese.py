@@ -54,9 +54,7 @@ def _load_atomese_predicates() -> tuple[dict[str, int], dict[str, tuple[int, int
     duplicates = semantic.keys() & structural.keys()
     if duplicates:
         names = ", ".join(sorted(duplicates))
-        raise ValueError(
-            f"Predicates cannot be both semantic and structural: {names}"
-        )
+        raise ValueError(f"Predicates cannot be both semantic and structural: {names}")
 
     fixed: dict[str, int] = {}
     variable: dict[str, tuple[int, int]] = {}
@@ -128,7 +126,7 @@ class LinkAtom:
     """
 
     predicate: str
-    children: tuple["Atom", ...]
+    children: tuple[Atom, ...]
 
     def __str__(self) -> str:
         parts = " ".join(str(c) for c in self.children)

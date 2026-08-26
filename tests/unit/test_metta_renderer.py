@@ -97,9 +97,7 @@ def test_renders_multiple_assertions_in_order() -> None:
         values=("dog", "bark"),
         roles=("agent", "action"),
     )
-    result = SemanticParseResult(
-        assertions=[first.assertions[0], second.assertions[0]]
-    )
+    result = SemanticParseResult(assertions=[first.assertions[0], second.assertions[0]])
 
     assert render_metta(result) == ["(Has dog fur)", "(CanDo dog bark)"]
 
@@ -130,9 +128,7 @@ def test_rejects_unsafe_evaluation_relation() -> None:
 
 
 def test_validates_and_parses_rendered_expressions() -> None:
-    atoms = validate_rendered_metta(
-        ["(Has dog fur)", "(Not (On cat chair))"]
-    )
+    atoms = validate_rendered_metta(["(Has dog fur)", "(Not (On cat chair))"])
 
     assert [str(atom) for atom in atoms] == [
         "(Has dog fur)",

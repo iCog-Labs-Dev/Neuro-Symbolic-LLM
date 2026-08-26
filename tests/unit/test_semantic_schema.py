@@ -123,8 +123,7 @@ def known_predicate_result(
     assertion["predicate"] = predicate
     assertion["relation"] = relation
     assertion["arguments"] = [
-        {"value": f"value_{index}", "role": role}
-        for index, role in enumerate(roles)
+        {"value": f"value_{index}", "role": role} for index, role in enumerate(roles)
     ]
     assertion["fallback"] = fallback
     return SemanticParseResult.model_validate(data)

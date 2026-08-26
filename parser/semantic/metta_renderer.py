@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from parser.grammar.atomese import LinkAtom, parse_atom, validate_metta_string
 from parser.semantic.schema import SemanticParseResult
 
-
 _BARE_SYMBOL_RE = re.compile(r"^[^\s()]+$")
 
 
