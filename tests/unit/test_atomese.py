@@ -73,6 +73,7 @@ structural_predicates:
     ):
         atomese._load_atomese_predicates()
 
+
 # ── parse_atom ────────────────────────────────────────────────────────────────
 
 
