@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches:
+      - '**'        # Run on all branches
   pull_request:
     branches: [main]
 
@@ -54,10 +55,10 @@ jobs:
           ls -la
           echo "Checking for pyproject.toml:"
           if [ -f "pyproject.toml" ]; then
-            echo "✅ pyproject.toml found!"
+            echo "pyproject.toml found!"
             head -20 pyproject.toml
           else
-            echo "❌ pyproject.toml NOT FOUND!"
+            echo "pyproject.toml NOT FOUND!"
             exit 1
           fi
 

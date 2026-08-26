@@ -68,6 +68,7 @@ include = [
     "tier3*",
     "tiers*",
     "symbolic_pipeline*",
+    "substrate*",
 ]
 
 # ── Black ──────────────────────────────────────────────────────────────────
@@ -115,11 +116,21 @@ known-first-party = [
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
 [tool.mypy]
-python_version = "3.10"
+# Parse/check target. Must stay >= 3.12 because modern JAX/NumPy/Flax ship
+# PEP 695 stubs ("type X = ...", generic "[T]" syntax) that older targets
+# refuse to parse. The package itself remains 3.10-compatible at runtime
+# (requires-python = ">=3.10"); this setting only controls type checking.
+python_version = "3.12"
 warn_return_any = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 ignore_missing_imports = true   # JAX and FabricPC stubs are incomplete
+
+# Treat heavy numeric/JAX libraries as opaque: skip analyzing their internals
+# (their names still resolve). Keeps local and CI runs fast and consistent.
+[[tool.mypy.overrides]]
+module = ["jax", "jax.*", "flax", "flax.*", "numpy", "numpy.*"]
+follow_imports = "skip"
 # Run manually: mypy .
 # Runs automatically on every commit via pre-commit.
 
