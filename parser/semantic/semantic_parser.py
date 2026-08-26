@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
+from typing import cast
 
 import yaml
 from pydantic import ValidationError
@@ -25,7 +26,11 @@ from parser.grammar.atomese import LinkAtom
 from parser.semantic.backends import ModelBackend
 from parser.semantic.metta_renderer import (
     MettaRenderError,
+)
+from parser.semantic.metta_renderer import (
     render_metta as render_semantic_result,
+)
+from parser.semantic.metta_renderer import (
     validate_rendered_metta as parse_rendered_metta,
 )
 from parser.semantic.normalization import (
@@ -123,7 +128,7 @@ def _build_predicate_guide() -> str:
         if schema.get("variable_arity") is True:
             roles = "semantic roles appropriate to the relation"
         else:
-            roles = ", ".join(schema["roles"])
+            roles = ", ".join(cast(list[str], schema["roles"]))
         lines.append(f"- {name}({roles}): {description}")
     return "\n".join(lines)
 
@@ -216,9 +221,7 @@ class _BaseSemanticParser:
         for assertion in result.assertions:
             predicate = assertion.predicate
             if predicate not in PREDICATE_SCHEMAS:
-                raise SemanticParseError(
-                    f"Unknown semantic predicate: {predicate!r}"
-                )
+                raise SemanticParseError(f"Unknown semantic predicate: {predicate!r}")
             if predicate == "Evaluation":
                 if not assertion.fallback:
                     raise SemanticParseError("Evaluation must have fallback=true")
@@ -230,9 +233,7 @@ class _BaseSemanticParser:
                         f"{predicate} is a known predicate, so fallback must be false"
                     )
                 if assertion.relation is not None:
-                    raise SemanticParseError(
-                        f"{predicate} should have relation=null"
-                    )
+                    raise SemanticParseError(f"{predicate} should have relation=null")
         return result
 
     @staticmethod
