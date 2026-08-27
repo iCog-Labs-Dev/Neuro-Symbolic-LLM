@@ -8,7 +8,8 @@ foundation, Atomese grammar, offline dataset generation, and unit tests.
 
 ```text
 Input:  Ben bought a car.
-Output: (Evaluation buy (List ben car))
+Model target: {"assertions": [{"predicate": "Evaluation", "relation": "buy", ...}]}
+Derived MeTTa: (Evaluation buy (List Ben car))
 ```
 
 
@@ -20,130 +21,92 @@ with a future fine-tuned 1B–3B local model for deployment.
 
 ### End-to-end teacher–student flow
 
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│                        OFFLINE REFERENCE STAGE                       │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph offline["Offline reference and dataset stage"]
+        source["Natural-language sentence<br/>Ben bought a sports car."]
+        teacher["ReferenceSemanticParser<br/>large teacher model"]
+        json["Structured JSON<br/>Evaluation · buy · Ben · sports car"]
+        schema["Pydantic validation<br/>confidence 0.98 ✓"]
+        normalize["Semantic normalization<br/>sports car → sports_car"]
+        validate["Semantic validation<br/>Evaluation · 2 args · fallback ✓"]
+        render["Deterministic rendering<br/>(Evaluation buy (List Ben sports_car))"]
+        atom["Validated LinkAtom<br/>Evaluation with List children"]
+        dataset[("Distillation JSONL<br/>text → structured JSON")]
+        rejected[("Rejected JSONL<br/>input + validation error")]
 
-┌──────────────────────────────┐
-│ Natural-language sentence    │
-│ "Ben bought a car."          │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ ReferenceSemanticParser      │
-│ Large hosted or local model  │
-│ Recommended Model (>7B)      │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ Expected MeTTa output        │
-│ (Evaluation buy              │
-│   (List ben car))            │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ Shared Atomese pipeline      │
-│ 1. clean_model_output()      │
-│ 2. canonical()               │
-│ 3. validate_metta_string()   │
-│ 4. parse_atom()              │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│     Validated LinkAtom       │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ Distillation JSONL dataset   │
-│ accepted and rejected data   │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ Fine-tune local student      │
-│ future 1B–3B model           │
-└───────────────┬──────────────┘
-                │
-                ▼
+        source --> teacher --> json --> schema --> normalize --> validate
+        validate --> render --> atom
+        atom --> dataset
+        schema -. invalid .-> rejected
+        validate -. invalid .-> rejected
+        render -. invalid .-> rejected
+    end
 
-┌──────────────────────────────────────────────────────────────────────┐
-│                         DEPLOYMENT STAGE                             │
-└──────────────────────────────────────────────────────────────────────┘
+    subgraph deployment["Deployment stage"]
+        input["Natural-language sentence"]
+        student["DistilledSemanticParser<br/>local student model"]
+        student_json["Structured JSON"]
+        shared["Same validation, normalization,<br/>rendering, and Atomese pipeline"]
+        result["Validated LinkAtom"]
 
-┌──────────────────────────────┐
-│ Natural-language sentence    │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ DistilledSemanticParser      │
-│ Local 1B–3B student model    │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ Shared Atomese pipeline      │
-│ clean → canonicalize         │
-│ validate → parse             │
-└───────────────┬──────────────┘
-                │
-                ▼
-┌──────────────────────────────┐
-│ Validated LinkAtom           │
-└──────────────────────────────┘
+        input --> student --> student_json --> shared --> result
+    end
+
+    dataset -. "future fine-tuning" .-> student
 ```
 
-### Parser Component relationship
+### Parser component relationships
 
-```text
-┌────────────────────┐
-│ GeminiBackend      │
-├────────────────────┤
-│ OpenAIBackend      │
-├────────────────────┤
-│ AnthropicBackend   │
-├────────────────────┤
-│ OllamaBackend      │
-├────────────────────┤
-│ TransformersBackend│
-└─────────┬──────────┘
-          │ implements
-          ▼
-┌────────────────────┐
-│ ModelBackend       │
-│ generate(...)      │
-└─────────┬──────────┘
-          │ injected into
-          ▼
-┌──────────────────────────────────────────┐
-│ Shared semantic-parser implementation    │
-│  • prompt construction                   │
-│  • output cleaning                       │
-│  • canonicalization                      │
-│  • grammar validation                    │
-│  • LinkAtom conversion                   │
-└───────────────┬──────────────────────────┘
-                │
-        ┌───────┴────────┐
-        ▼                ▼
-┌─────────────────┐  ┌────────────────────┐
-│ Reference       │  │ Distilled          │
-│ Semantic Parser │  │ Semantic Parser    │
-└─────────────────┘  └────────────────────┘
+```mermaid
+flowchart TD
+    openai["OpenAI / compatible"] --> backend
+    anthropic["Anthropic"] --> backend
+    gemini["Gemini"] --> backend
+    ollama["Ollama"] --> backend
+    transformers["Transformers"] --> backend
+
+    backend["ModelBackend<br/>generate(prompt, model)"]
+    backend --> reference["ReferenceSemanticParser"]
+    backend --> distilled["DistilledSemanticParser"]
+
+    reference --> prompt["Prompt construction"]
+    distilled --> prompt
+    prompt --> structured["Structured JSON validation"]
+    structured --> normalization["Semantic normalization"]
+    normalization --> semantic["Predicate and role validation"]
+    semantic --> renderer["MeTTa renderer"]
+    renderer --> atomese["Atomese validation"]
+    atomese --> links["LinkAtom objects"]
 ```
+
+### Component source map
+
+GitHub renders Mermaid diagrams securely, so navigation is provided through
+standard Markdown links:
+
+| Diagram component | Implementation |
+| --- | --- |
+| Model backends and `ModelBackend` | [`backends.py`](./parser/semantic/backends.py) |
+| Reference and distilled parsers | [`semantic_parser.py`](./parser/semantic/semantic_parser.py) |
+| Prompt construction | [`parser_prompt.yaml`](./configs/parser_config/parser_prompt.yaml) |
+| Structured JSON and Pydantic validation | [`schema.py`](./parser/semantic/schema.py) |
+| Semantic normalization | [`normalization.py`](./parser/semantic/normalization.py) |
+| Predicate, arity, and role contract | [`predicate_schema.yaml`](./configs/parser_config/predicate_schema.yaml) |
+| Deterministic MeTTa rendering | [`metta_renderer.py`](./parser/semantic/metta_renderer.py) |
+| Atomese and `LinkAtom` validation | [`atomese.py`](./parser/grammar/atomese.py) |
+| Accepted and rejected JSONL records | [`dataset.py`](./parser/semantic/dataset.py) |
+| Command-line interface | [`cli.py`](./parser/semantic/cli.py) |
 
 ## Model configuration and running
 
 Copy [`.env.example`](./.env.example) to `.env` and add only the credentials you
 use. Model selection belongs in
 [`configs/parser_config/model_backend.yaml`](./configs/parser_config/model_backend.yaml).
-The active profile picks the backend class.
+The active profile picks the default backend. You can override it for one
+command with `--profile`.
+
+For example, a local Ollama default is configured as:
 
 ```yaml
 active: ollama
@@ -160,41 +123,73 @@ For the local Ollama profile, start the server in one terminal:
 ollama serve
 ```
 
-Then run the parser from another terminal:
+Then run the parser from another terminal. To use the active profile from the
+configuration file:
 
 ```bash
 source .venv/bin/activate
-python -m pip install -e ".[ollama]"
-python -m parser.semantic
+python -m pip install -e .
+python -m parser.semantic parse "A bird can fly."
 ```
 
-`python -m parser.semantic` avoids the import-order warning produced by running
-the implementation module directly. If the configured local backend is not
-running, start it with `ollama serve` first.
+To explicitly use Ollama, place the global `--profile` option before the
+subcommand:
+
+```bash
+python -m pip install -e ".[ollama]"
+python -m parser.semantic --profile ollama parse "A bird can fly."
+```
+
+To provide context for reference resolution:
+
+```bash
+python -m parser.semantic --profile ollama parse \
+  "It released a new phone." \
+  --context "Apple is a technology company."
+```
+
+To build a distillation dataset, create a UTF-8 text file containing one
+sentence per line, then run:
+
+```bash
+python -m parser.semantic --profile ollama build-dataset \
+  --input sentences.txt \
+  --output data/semantic_dataset.jsonl \
+  --include-metta
+```
+
+Rejected examples are written to `data/semantic_dataset.rejected.jsonl` unless
+`--rejected-output` specifies another path. If Ollama is selected, start its
+server with `ollama serve` first.
 
 In Python, use the factory instead of choosing provider classes manually:
 
 ```python
 from parser.semantic import build_reference_semantic_parser
 
-parser = build_reference_semantic_parser()
-atom = parser.parse("A bird can fly.")
-print(atom)
+parser = build_reference_semantic_parser(profile_name="ollama")
+atoms = parser.parse("A bird can fly.")
+for atom in atoms:
+    print(atom)
 ```
 
 ## Atomese output contract
 
-The closed vocabulary in [`parser/grammar/atomese.py`](./parser/grammar/atomese.py) is:
+The closed vocabulary is defined in
+[`configs/parser_config/predicate_schema.yaml`](./configs/parser_config/predicate_schema.yaml)
+and enforced by
+[`parser/grammar/atomese.py`](./parser/grammar/atomese.py):
 
 ```text
 Inheritance  Evaluation  CanDo  On  Cause  Has  PartOf  StateOf  List
-LocatedIn  MemberOf  UsedFor  Before  After
+LocatedIn  MemberOf  UsedFor  Before  After  Not
 ```
 
-The model must output one or more expressions, preserve semantic roles, use
-lowercase concepts and base-form verbs, and return `UNSUPPORTED` when it cannot
-represent the sentence reliably. `Evaluation` handles relations without a
-dedicated predicate.
+The model outputs structured JSON rather than MeTTa. Pydantic validates the
+shape and confidence range, predicate-specific checks validate arity and roles,
+and deterministic code renders the result as MeTTa. Entity case is preserved;
+multiword symbols use underscores. `Evaluation` handles relations without a
+dedicated predicate, and `polarity: negative` renders as `Not`.
 
 ## Repository structure
 
@@ -202,7 +197,8 @@ dedicated predicate.
 configs/
 ├── parser_config/
 │   ├── model_backend.yaml       # selected provider and model profiles
-│   └── parser_prompt.yaml       # semantic-parser prompt
+│   ├── parser_prompt.yaml       # structured semantic-parser prompt
+│   └── predicate_schema.yaml    # predicate arity and role definitions
 ├── tiers.yaml                   # tier configuration
 └── stage_A/                     # experiment configurations
 experiments/                     # Stage A experiment entry points
@@ -211,8 +207,12 @@ parser/
 └── semantic/
     ├── backends.py              # provider adapters
     ├── model_config.py          # YAML/.env backend factory
-    ├── semantic_parser.py       # reference and distilled parsers
-    ├── __main__.py              # command-line demonstration
+    ├── schema.py                # Pydantic structured-output contract
+    ├── normalization.py         # deterministic semantic normalization
+    ├── metta_renderer.py        # structured JSON to validated MeTTa
+    ├── semantic_parser.py       # parser orchestration and roles
+    ├── cli.py                   # command-line behavior
+    ├── __main__.py              # minimal package launcher
     ├── dataset.py               # accepted/rejected JSONL records
     └── __init__.py              # public semantic-parser API
 tests/unit/                      # offline unit tests
@@ -236,6 +236,8 @@ access, and may cost money.
 
 ## Current implementation status
 
-Implemented: Atomese grammar and validation, configurable provider adapters,
-reference/distilled parser roles, dataset-record generation, and offline unit
-tests. The student-model fine-tuning and deployment pipeline are planned next.
+Implemented: structured JSON extraction, Pydantic and predicate validation,
+normalization, deterministic MeTTa rendering, configurable provider adapters,
+reference/distilled parser roles, text-to-JSON dataset generation, offline unit
+tests, and command-line dataset generation. Student-model fine-tuning remains
+a separate future stage.

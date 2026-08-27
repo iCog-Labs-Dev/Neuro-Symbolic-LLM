@@ -1,0 +1,81 @@
+predicates:
+  Inheritance:
+    arity: 2
+    roles: [instance, class]
+    description: "X is a type or kind of Y"
+
+  Has:
+    arity: 2
+    roles: [owner, possessed]
+    description: "X has or possesses Y"
+
+  PartOf:
+    arity: 2
+    roles: [part, whole]
+    description: "X is part of Y"
+
+  StateOf:
+    arity: 2
+    roles: [entity, state]
+    description: "X is in state Y"
+
+  LocatedIn:
+    arity: 2
+    roles: [entity, location]
+    description: "X is located in Y"
+
+  CanDo:
+    arity: 2
+    roles: [agent, action]
+    description: "X is capable of performing Y"
+
+  "On":
+    arity: 2
+    roles: [entity, surface]
+    description: "X is physically on Y"
+
+  Cause:
+    arity: 2
+    roles: [cause, effect]
+    description: "X causes Y"
+
+  MemberOf:
+    arity: 2
+    roles: [member, group]
+    description: "X is a member of Y"
+
+  UsedFor:
+    arity: 2
+    roles: [entity, purpose]
+    description: "X is used for Y"
+
+  Before:
+    arity: 2
+    roles: [earlier, later]
+    description: "X happens before Y"
+
+  After:
+    arity: 2
+    roles: [later, earlier]
+    description: "X happens after Y"
+
+  Evaluation:
+    variable_arity: true
+    min_arity: 1
+    max_arity: 4
+    atomese_arity: 2
+    fallback: true
+    description: "Free-form relation not represented by a known predicate"
+
+# Renderer-owned predicates are valid Atomese syntax but are never selected
+# directly by the language model.
+structural_predicates:
+  List:
+    variable_arity: true
+    min_arity: 1
+    max_arity: 4
+    description: "Ordered argument container used by Evaluation"
+
+  Not:
+    arity: 1
+    description: "Negation wrapper around one assertion"

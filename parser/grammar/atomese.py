@@ -2,82 +2,100 @@
 
 The complete MeTTa Atomese data model.
 
-This file has zero external dependencies — pure Python.
-It is the foundation that every other symbolic component validates against.
-Write this first, test it first, before touching MORK or the parser.
+Predicate and arity definitions are loaded from the shared semantic predicate
+schema. This module remains responsible for parsing and structural validation.
 
 What lives here:
   - Atom data classes (SymbolAtom, LinkAtom)
   - parse_atom():          string → Atom tree
   - atom_to_string():      Atom tree → string
-  - validate_metta_string(): is this valid for our 8-predicate vocabulary?
+  - validate_metta_string(): validate the complete Atom tree recursively
   - match_template():      does this ground atom match this template?
   - generalize():          produce a template from a ground atom
   - canonical():           normalize a string for deduplication
 
-The 14 predicates we use (closed vocabulary):
-  Inheritance  "X is a type of Y"           (Inheritance dog animal)
-  Evaluation   "X does Y to Z"              (Evaluation likes (List john mary))
-  CanDo        "X can do Y"                 (CanDo bird fly)
-  On           "X is on/in Y"               (On cup table)
-  Cause        "X causes Y"                 (Cause rain flood)
-  Has          "X has Y"                    (Has dog fur)
-  PartOf       "X is part of Y"             (PartOf wheel car)
-  StateOf      "X is in state Y"            (StateOf world stage)
-  LocatedIn    "X is located in Y"          (LocatedIn book shelf)
-  MemberOf     "X is a member of Y"         (MemberOf alice team)
-  UsedFor      "X is used for Y"            (UsedFor knife cutting)
-  Before       "X happens before Y"         (Before dawn sunrise)
-  After        "X happens after Y"          (After sunrise dawn)
-  List         argument list for Evaluation (List john mary)
+The closed vocabulary and its structural arities live in
+``configs/parser_config/predicate_schema.yaml``.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-PREDICATES = frozenset(
-    {
-        "CanDo",
-        "Cause",
-        "Evaluation",
-        "Has",
-        "Inheritance",
-        "List",
-        "On",
-        "PartOf",
-        "StateOf",
-        "LocatedIn",
-        "MemberOf",
-        "UsedFor",
-        "Before",
-        "After",
-    }
+_PREDICATE_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "configs"
+    / "parser_config"
+    / "predicate_schema.yaml"
 )
 
-# fixed arity (number of required children)
-ARITY = {
-    "Inheritance": 2,
-    "CanDo": 2,
-    "On": 2,
-    "Cause": 2,
-    "Has": 2,
-    "PartOf": 2,
-    "StateOf": 2,
-    "LocatedIn": 2,
-    "MemberOf": 2,
-    "UsedFor": 2,
-    "Before": 2,
-    "After": 2,
-    "Evaluation": 2,  # (Evaluation VERB ARGS)
-    # List: variable arity (1–4)
-}
 
-VARIABLE_RE = re.compile(r"^\$[A-Z]+$")
-CONCEPT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+def _load_atomese_predicates() -> tuple[dict[str, int], dict[str, tuple[int, int]]]:
+    """Load the shared predicate vocabulary and its Atomese-level arities."""
+    with _PREDICATE_SCHEMA_PATH.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+    if not isinstance(config, dict):
+        raise ValueError("Predicate schema must be a YAML mapping")
+
+    semantic = config.get("predicates")
+    structural = config.get("structural_predicates")
+    if not isinstance(semantic, dict) or not isinstance(structural, dict):
+        raise ValueError(
+            "Predicate schema must define 'predicates' and "
+            "'structural_predicates' mappings"
+        )
+
+    duplicates = semantic.keys() & structural.keys()
+    if duplicates:
+        names = ", ".join(sorted(duplicates))
+        raise ValueError(f"Predicates cannot be both semantic and structural: {names}")
+
+    fixed: dict[str, int] = {}
+    variable: dict[str, tuple[int, int]] = {}
+    for name, definition in {**semantic, **structural}.items():
+        if not isinstance(name, str) or not isinstance(definition, dict):
+            raise ValueError("Every Atomese predicate requires a mapping")
+
+        atomese_arity = definition.get("atomese_arity")
+        if atomese_arity is None and definition.get("variable_arity") is not True:
+            atomese_arity = definition.get("arity")
+        if atomese_arity is not None:
+            if (
+                not isinstance(atomese_arity, int)
+                or isinstance(atomese_arity, bool)
+                or atomese_arity < 1
+            ):
+                raise ValueError(f"Invalid Atomese arity for {name!r}")
+            fixed[name] = atomese_arity
+            continue
+
+        minimum = definition.get("min_arity")
+        maximum = definition.get("max_arity")
+        if (
+            not isinstance(minimum, int)
+            or isinstance(minimum, bool)
+            or not isinstance(maximum, int)
+            or isinstance(maximum, bool)
+            or minimum < 1
+            or maximum < minimum
+        ):
+            raise ValueError(f"Invalid variable Atomese arity for {name!r}")
+        variable[name] = (minimum, maximum)
+
+    return fixed, variable
+
+
+ARITY, VARIABLE_ARITY = _load_atomese_predicates()
+PREDICATES = frozenset(ARITY | VARIABLE_ARITY)
+
+VARIABLE_RE = re.compile(r"^\$[A-Z][A-Z0-9_]*$")
+CONCEPT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 VAR_NAMES = ["$X", "$Y", "$Z", "$W", "$V", "$U"]
 
 
@@ -95,7 +113,7 @@ class SymbolAtom:
 
     @property
     def is_variable(self) -> bool:
-        return self.name.startswith("$")
+        return VARIABLE_RE.fullmatch(self.name) is not None
 
 
 @dataclass(frozen=True)
@@ -108,7 +126,7 @@ class LinkAtom:
     """
 
     predicate: str
-    children: tuple  # tuple[Atom, ...]
+    children: tuple[Atom, ...]
 
     def __str__(self) -> str:
         parts = " ".join(str(c) for c in self.children)
@@ -169,19 +187,24 @@ def _tokenize(s: str) -> list[str]:
             current.append(ch)
         elif ch == ")":
             depth -= 1
+            if depth < 0:
+                raise ValueError("Unexpected closing parenthesis")
             current.append(ch)
             if depth == 0:
                 t = "".join(current).strip()
                 if t:
                     tokens.append(t)
                 current = []
-        elif ch == " " and depth == 0:
+        elif ch.isspace() and depth == 0:
             t = "".join(current).strip()
             if t:
                 tokens.append(t)
             current = []
         else:
             current.append(ch)
+
+    if depth != 0:
+        raise ValueError("Unbalanced parentheses")
 
     if current:
         t = "".join(current).strip()
@@ -203,7 +226,7 @@ def atom_to_string(atom: Atom) -> str:
 
 
 def validate_metta_string(s: str) -> tuple[bool, str]:
-    """Check whether a string is valid MeTTa for our 8-predicate vocabulary.
+    """Check whether a string is valid for the configured Atomese vocabulary.
 
     Returns (is_valid: bool, error_message: str).
     error_message is empty string when is_valid is True.
@@ -235,25 +258,53 @@ def validate_metta_string(s: str) -> tuple[bool, str]:
     if not isinstance(atom, LinkAtom):
         return False, "Top-level atom must be a link (start with '(')"
 
+    error = _validate_atom(atom)
+    return (False, error) if error else (True, "")
+
+
+def _validate_atom(atom: Atom) -> str:
+    """Return the first validation error in an Atom tree, or an empty string."""
+    if isinstance(atom, SymbolAtom):
+        if VARIABLE_RE.fullmatch(atom.name) or CONCEPT_RE.fullmatch(atom.name):
+            return ""
+        return f"Invalid symbol '{atom.name}'"
+
     if atom.predicate not in PREDICATES:
-        return False, (
+        return (
             f"Unknown predicate '{atom.predicate}'. "
             f"Must be one of: {sorted(PREDICATES)}"
         )
 
-    # arity checks
+    child_count = len(atom.children)
     if atom.predicate in ARITY:
         expected = ARITY[atom.predicate]
-        if len(atom.children) != expected:
-            return False, (
+        if child_count != expected:
+            return (
                 f"'{atom.predicate}' requires exactly {expected} children, "
-                f"got {len(atom.children)}"
+                f"got {child_count}"
             )
-    elif atom.predicate == "List":
-        if len(atom.children) < 1:
-            return False, "List requires at least 1 child"
+    else:
+        minimum, maximum = VARIABLE_ARITY[atom.predicate]
+        if not minimum <= child_count <= maximum:
+            return (
+                f"'{atom.predicate}' requires between {minimum} and {maximum} "
+                f"children, got {child_count}"
+            )
 
-    return True, ""
+    if atom.predicate == "Evaluation" and (
+        not isinstance(atom.children[1], LinkAtom)
+        or atom.children[1].predicate != "List"
+    ):
+        return "'Evaluation' requires a List link as its second child"
+
+    if atom.predicate == "Not" and not isinstance(atom.children[0], LinkAtom):
+        return "'Not' requires a link as its child"
+
+    for child in atom.children:
+        error = _validate_atom(child)
+        if error:
+            return error
+    return ""
 
 
 # ── Template utilities ────────────────────────────────────────────────────────

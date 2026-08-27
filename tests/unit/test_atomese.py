@@ -6,8 +6,11 @@ All tests must pass before writing any other symbolic code.
 These tests define exactly what the grammar does and does not accept.
 """
 
+from pathlib import Path
+
 import pytest
 
+from parser.grammar import atomese
 from parser.grammar.atomese import (
     LinkAtom,
     SymbolAtom,
@@ -19,6 +22,30 @@ from parser.grammar.atomese import (
     parse_atom,
     validate_metta_string,
 )
+
+
+def test_rejects_predicate_defined_as_semantic_and_structural(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schema_path = tmp_path / "predicate_schema.yaml"
+    schema_path.write_text(
+        """predicates:
+  Not:
+    arity: 1
+structural_predicates:
+  Not:
+    arity: 1
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(atomese, "_PREDICATE_SCHEMA_PATH", schema_path)
+
+    with pytest.raises(
+        ValueError,
+        match="Predicates cannot be both semantic and structural: Not",
+    ):
+        atomese._load_atomese_predicates()
+
 
 # ── parse_atom ────────────────────────────────────────────────────────────────
 
@@ -64,6 +91,14 @@ class TestParseAtom:
     def test_unbalanced_raises(self):
         with pytest.raises(ValueError):
             parse_atom("(Inheritance dog animal")
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["(Has dog fur))", "((Has dog fur)"],
+    )
+    def test_rejects_parentheses_that_close_at_the_wrong_depth(self, expression):
+        with pytest.raises(ValueError, match="parenthes"):
+            parse_atom(expression)
 
     def test_all_predicates_parse(self):
         cases = [
@@ -160,6 +195,49 @@ class TestValidate:
 
         assert not ok
         assert "requires exactly 2" in err
+
+    def test_rejects_unknown_nested_predicate(self):
+        ok, err = validate_metta_string("(Has dog (Unknown x))")
+
+        assert not ok
+        assert "Unknown predicate 'Unknown'" in err
+
+    def test_evaluation_requires_list_as_second_child(self):
+        ok, err = validate_metta_string("(Evaluation likes john)")
+
+        assert not ok
+        assert "requires a List link" in err
+
+    def test_list_rejects_more_than_four_children(self):
+        ok, err = validate_metta_string("(List one two three four five)")
+
+        assert not ok
+        assert "between 1 and 4" in err
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "(Has dog invalid-symbol!)",
+            "(Has dog $lowercase)",
+            "(Has dog $)",
+        ],
+    )
+    def test_rejects_invalid_symbols(self, expression):
+        ok, err = validate_metta_string(expression)
+
+        assert not ok
+        assert "Invalid symbol" in err
+
+    def test_accepts_case_preserved_entity_symbols(self):
+        ok, err = validate_metta_string("(Has Ben Car)")
+
+        assert ok, err
+
+    def test_not_requires_a_link_child(self):
+        ok, err = validate_metta_string("(Not dog)")
+
+        assert not ok
+        assert "requires a link" in err
 
 
 # ── match_template ────────────────────────────────────────────────────────────
