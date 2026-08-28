@@ -37,6 +37,6 @@ RUN useradd -r -u 1000 -s /bin/false mork && \
     chmod 755 /app/data /app/reports /app/benchmarks
 
 USER mork
-EXPOSE 8080
+EXPOSE 8000
 
 ENTRYPOINT ["/app/entrypoint.sh"]
