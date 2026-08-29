@@ -1,14 +1,16 @@
-"""
-Stage A4 End-to-End Experiment Verification Sweep.
-Validates Tier 2 MORK HNSW indexing, Symbolic Head Bridge, and top-m MeTTa retrieval.
+"""A4 path: T1 q=Wh+b, T2 wire retrieve, T1 SAtt and h+U SAtt, key/value losses.
+
+Requires a live MORK Docker container:
+    docker compose up -d --build
 """
 
 import logging
 
 import numpy as np
 
-from tier2_mork.bridge import SymbolicHeadBridge
-from tier2_mork.client import LocalHNSWClient
+from residual.symbolic_head.head import SymbolicHead
+from residual.symbolic_head.losses import combined_symbolic_loss
+from tier2_mork.client import get_mork_client
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -16,42 +18,55 @@ logging.basicConfig(
 logger = logging.getLogger("run_stage_a4")
 
 
-def run_stage_a4_verification():
-    logger.info("=== STARTING TIER 2 MORK SYMBOLIC HEAD INTEGRATION SWEEP ===")
-
+def run_stage_a4_verification() -> None:
     hidden_dim = 768
     key_dim = 256
     top_m = 4
-    num_templates = 500
+    num_templates = 10
+    tau = 0.1
 
-    # 1. Initialize Tier 2 Local HNSW Client
-    logger.info(f"1. Seeding Tier 2 MORK Client with {num_templates} templates...")
-    client = LocalHNSWClient(key_dim=key_dim)
-
+    client = get_mork_client(key_dim=key_dim)
     rng = np.random.default_rng(42)
+    target_key = None
+    target_val = None
+    all_keys = []
     for i in range(num_templates):
         k_vec = rng.normal(0, 1, key_dim).astype(np.float32)
         v_vec = rng.normal(0, 1, key_dim).astype(np.float32)
         client.add_template(f"tpl_{i:04d}", f"(Concept (Node_{i}))", k_vec, v_vec)
+        all_keys.append(k_vec)
+        if i == 0:
+            target_key, target_val = k_vec, v_vec
+    all_keys_mat = np.stack(all_keys, axis=0)
 
-    # 2. Instantiate Symbolic Head Bridge
-    logger.info("2. Initializing Symbolic Head Bridge Integration Contract...")
-    bridge = SymbolicHeadBridge(
-        hidden_dim=hidden_dim, key_dim=key_dim, top_m=top_m, mork_client=client
+    head = SymbolicHead(
+        mork_client=client,
+        d_model=hidden_dim,
+        k_dim=key_dim,
+        top_m=top_m,
+        temperature=tau,
+    )
+    h = rng.normal(0, 1, (2, 4, hidden_dim)).astype(np.float32)
+    h_out, info = head.forward(h)
+
+    q0 = info["q_sym"].reshape(-1, key_dim)[0]
+    u_satt = np.matmul(info["s_att"].reshape(-1, key_dim)[0], head.U_out.T)
+    losses = combined_symbolic_loss(
+        q_sym=q0,
+        target_key=target_key,
+        all_keys=all_keys_mat,
+        u_satt=u_satt,
+        target_value=np.matmul(target_val, head.U_out.T),
+        temperature=tau,
     )
 
-    # 3. Pass simulated Tier 1 hidden states (batch=2, seq=4, d=768)
-    logger.info("3. Executing Symbolic Head forward pass...")
-    h_tier1 = rng.normal(0, 1, (2, 4, hidden_dim)).astype(np.float32)
-    h_out, q_sym, s_att, mork_res = bridge.forward(h_tier1)
-
-    logger.info(f"Tier 1 Hidden State Input Shape: {h_tier1.shape}")
-    logger.info(f"Projected Symbolic Query Shape:  {q_sym.shape}")
-    logger.info(f"Symbolic Attention Vector Shape: {s_att.shape}")
-    logger.info(f"Integrated Residual Output Shape:{h_out.shape}")
-    logger.info(f"Retrieved Top-{top_m} Template IDs: {mork_res.template_ids[0]}")
-
-    logger.info("=== TIER 2 MORK VERIFICATION SWEEP COMPLETED SUCCESSFULLY! ===")
+    logger.info("index=%s", client.index_backend)
+    logger.info("h %s -> q_sym %s", h.shape, info["q_sym"].shape)
+    logger.info("query packet bytes=%s template packet bytes=%s", info["query_nbytes"], info["template_nbytes"])
+    logger.info("SAtt %s h_out %s", info["s_att"].shape, h_out.shape)
+    logger.info("top-%s ids[0]=%s", top_m, info["matched_ids"])
+    logger.info("L_key=%.6f L_value=%.6f L_total=%.6f", losses["l_sym_key"], losses["l_sym_value"], losses["l_sym_total"])
+    logger.info("A4 hops: T1 project | T2 retrieve | T1 SAtt+U | losses")
 
 
 if __name__ == "__main__":

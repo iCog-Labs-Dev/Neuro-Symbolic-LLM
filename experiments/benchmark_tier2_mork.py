@@ -1,9 +1,7 @@
-"""Tier 2 MORK Sparse Symbolic Engine Benchmark Suite.
+"""FAISS insert/query latency and bridge forward timing.
 
-Evaluates:
-1. Indexing Throughput (templates / sec).
-2. HNSW Vector Similarity Search Latency (p50, p95, p99, mean in ms) & QPS.
-3. Symbolic Head Bridge Forward Pass Scaling (per-token latency across batch sizes).
+MORK Docker is required. Start the server before running:
+    docker compose up -d --build
 """
 
 import argparse
@@ -14,8 +12,8 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from tier2_mork.bridge import SymbolicHeadBridge
-from tier2_mork.client import DockerMorkClient, MorkClient, get_mork_client
+from residual.symbolic_head.head import SymbolicHead
+from tier2_mork.client import DockerMorkClient, MorkClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,24 +51,31 @@ def run_benchmark_suite(
     key_dim: int = 256,
     hidden_dim: int = 768,
     top_m: int = 8,
-    use_docker: bool = False,
     server_url: str = "http://127.0.0.1:8000",
     warmup_queries: int = 20,
 ) -> BenchmarkSummary:
-    """Execute performance benchmark sweep across indexing, search, and bridge components."""
-    client: MorkClient = (
-        DockerMorkClient(server_url=server_url, key_dim=key_dim)
-        if use_docker
-        else get_mork_client(key_dim=key_dim)
+    """Execute performance benchmark. MORK Docker is mandatory."""
+    client: MorkClient = DockerMorkClient(
+        server_url=server_url, key_dim=key_dim,
     )
 
     client_name = client.__class__.__name__
+    index_name = getattr(client, "index_backend", None)
+    if index_name is None and hasattr(client, "vector_index"):
+        index_name = client.vector_index.index_backend
     rng = np.random.default_rng(42)
 
-    logger.info("Starting Tier 2 MORK Performance Benchmark Suite")
-    logger.info("Backend: %s | Templates: %d | Queries: %d | KeyDim: %d", client_name, num_templates, num_queries, key_dim)
+    logger.info("Starting Tier 2 latency suite")
+    logger.info(
+        "Client: %s | index: %s | Templates: %d | Queries: %d | KeyDim: %d",
+        client_name,
+        index_name,
+        num_templates,
+        num_queries,
+        key_dim,
+    )
 
-    # 1. Indexing Throughput Benchmark
+    # 1. Indexing Throughput
     start_insert = time.perf_counter()
     for i in range(num_templates):
         k_vec = rng.normal(0, 1, key_dim).astype(np.float32)
@@ -80,10 +85,9 @@ def run_benchmark_suite(
     indexing_qps = num_templates / t_insert_sec
     logger.info("Seeded %d templates in %.4f sec (%.1f templates/sec)", num_templates, t_insert_sec, indexing_qps)
 
-    # 2. HNSW Retrieval Latency Benchmark
+    # 2. Retrieval Latency
     query_vectors = rng.normal(0, 1, (num_queries + warmup_queries, key_dim)).astype(np.float32)
 
-    # Warm-up phase
     for i in range(warmup_queries):
         _ = client.query_top_k(query_vectors[i : i + 1], top_m=top_m)
 
@@ -110,9 +114,9 @@ def run_benchmark_suite(
         ret_metrics.throughput_qps,
     )
 
-    # 3. Symbolic Head Bridge Forward Pass Latency Benchmark
-    bridge = SymbolicHeadBridge(
-        hidden_dim=hidden_dim, key_dim=key_dim, top_m=top_m, mork_client=client
+    head = SymbolicHead(
+        mork_client=client,
+        d_model=hidden_dim, k_dim=key_dim, top_m=top_m,
     )
 
     batch_latencies: dict[int, float] = {}
@@ -120,12 +124,12 @@ def run_benchmark_suite(
     for b in batch_sizes:
         h_in = rng.normal(0, 1, (b, 8, hidden_dim)).astype(np.float32)
         t0 = time.perf_counter()
-        _ = bridge.forward(h_in)
+        _ = head.forward(h_in)
         t_ms = (time.perf_counter() - t0) * 1000.0
         batch_latencies[b] = t_ms
         tokens = b * 8
         per_token_us = (t_ms * 1000.0) / tokens
-        logger.info("Bridge Pass (Batch=%d, Tokens=%d): Total=%.3f ms | Per-token=%.2f µs", b, tokens, t_ms, per_token_us)
+        logger.info("A4 pass (Batch=%d, Tokens=%d): Total=%.3f ms | Per-token=%.2f µs", b, tokens, t_ms, per_token_us)
 
     return BenchmarkSummary(
         client_backend=client_name,
@@ -148,9 +152,8 @@ def main() -> None:
     parser.add_argument("--key-dim", type=int, default=256, help="Symbolic key/value dimension")
     parser.add_argument("--hidden-dim", type=int, default=768, help="Continuous hidden dimension")
     parser.add_argument("--top-m", type=int, default=8, help="Top-m retrieval count")
-    parser.add_argument("--use-docker", action="store_true", help="Benchmark Docker container REST API")
     parser.add_argument("--server-url", type=str, default="http://127.0.0.1:8000", help="MORK server URL")
-    parser.add_argument("--output-json", type=str, default=None, help="Optional path to save JSON benchmark report")
+    parser.add_argument("--output-json", type=str, default=None, help="Path to save JSON benchmark report")
 
     args = parser.parse_args()
 
@@ -160,7 +163,6 @@ def main() -> None:
         key_dim=args.key_dim,
         hidden_dim=args.hidden_dim,
         top_m=args.top_m,
-        use_docker=args.use_docker,
         server_url=args.server_url,
     )
 
