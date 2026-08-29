@@ -1,7 +1,4 @@
-"""
-Stage A4 Symbolic Head Alignment Loss Functions.
-Implements Key-Space Cross-Entropy Alignment and Value-Space Regression Loss.
-"""
+"""Symbolic alignment and value regression losses."""
 
 import numpy as np
 
@@ -49,12 +46,15 @@ def value_space_regression_loss(u_satt: np.ndarray, target_value: np.ndarray) ->
 
     :param u_satt: Projected symbolic attention output in R^d.
     :param target_value: Ground-truth target semantic value vector in R^d.
-    :return: Scalar MSE loss value.
+    :return: Scalar ||diff||^2 (mean over batch if 2D).
     """
     u_satt = np.asarray(u_satt, dtype=np.float32)
     target_value = np.asarray(target_value, dtype=np.float32)
     diff = u_satt - target_value
-    return float(np.mean(np.square(diff)))
+    sq = np.square(diff)
+    if u_satt.ndim == 1:
+        return float(np.sum(sq))
+    return float(np.mean(np.sum(sq, axis=-1)))
 
 
 def combined_symbolic_loss(
@@ -67,10 +67,7 @@ def combined_symbolic_loss(
     lambda_value: float = 1.0,
     temperature: float = 0.1,
 ) -> dict[str, float]:
-    """
-    Compute total Stage A4 Symbolic Head Loss.
-    L_sym^total = lambda_key * L_sym^key + lambda_value * L_sym^value
-    """
+    """lambda_key * L_key + lambda_value * L_value."""
     l_key = key_space_alignment_loss(
         q_sym, target_key, all_keys, temperature=temperature
     )

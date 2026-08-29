@@ -1,8 +1,13 @@
-import logging
+"""Tier 2 MORK client and local FAISS index wrapper."""
+
+from __future__ import annotations
+
 import os
+import socket
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from urllib.parse import quote, urlparse
 
 import numpy as np
 
@@ -16,28 +21,30 @@ try:
 except ImportError:
     httpx = None
 
-logger = logging.getLogger(__name__)
+DEFAULT_MORK_SERVER_URL = "http://127.0.0.1:8000"
+SEXPR_PATTERN = "$x"
+SEXPR_TEMPLATE = "$x"
 
 
 @dataclass
 class MorkQueryResult:
-    """Container for matched template key/value payload returned from Tier 2 MORK."""
+    """Top-m keys/values/ids/scores from the vector index."""
 
-    keys: np.ndarray  # shape: (N, m, k), float32
-    values: np.ndarray  # shape: (N, m, k), float32
-    template_ids: list[list[str]]  # shape: (N, m)
-    scores: np.ndarray  # shape: (N, m), float32
+    keys: np.ndarray
+    values: np.ndarray
+    template_ids: list[list[str]]
+    scores: np.ndarray
 
 
 class MorkClient(ABC):
-    """Abstract client interface for Tier 2 MORK sparse symbolic engine."""
+    """Interface for registering templates and retrieving top-m key/value pairs."""
 
     def __init__(self, key_dim: int = 256) -> None:
         self.key_dim = key_dim
 
     @abstractmethod
     def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
-        """Query top_m template key/value pairs matching query_vectors."""
+        """Return top_m template key/value pairs matching query_vectors."""
 
     @abstractmethod
     def add_template(
@@ -47,31 +54,31 @@ class MorkClient(ABC):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        """Register a template key/value pair in MORK."""
+        """Register a template key/value pair in the vector index."""
 
 
-class LocalHNSWClient(MorkClient):
-    """In-memory CPU HNSW vector index backend using FAISS (IndexHNSWFlat). Thread-safe."""
+class _LocalFAISSIndex:
+    """In-memory cosine similarity search via FAISS with NumPy fallback.
 
-    def __init__(
-        self,
-        key_dim: int = 256,
-        max_elements: int = 100000,
-        m_hnsw: int = 16,
-    ) -> None:
-        super().__init__(key_dim=key_dim)
-        self.max_elements = max_elements
+    This is an internal component used exclusively inside DockerMorkClient
+    for cosine ANN on the same CPU node. It is NOT a standalone MorkClient
+    and must not be used outside of DockerMorkClient.
+    """
+
+    def __init__(self, key_dim: int = 256) -> None:
+        self.key_dim = key_dim
         self.key_store: list[np.ndarray] = []
         self.val_store: list[np.ndarray] = []
         self.id_store: list[str] = []
         self.metta_store: list[str] = []
         self._lock = threading.Lock()
-
+        self._faiss_index = None
         if faiss is not None:
-            self.faiss_index = faiss.IndexHNSWFlat(key_dim, m_hnsw)
-            self.faiss_index.hnsw.efSearch = 50
-        else:
-            self.faiss_index = None
+            self._faiss_index = faiss.IndexFlatIP(key_dim)
+
+    @property
+    def index_backend(self) -> str:
+        return "faiss" if self._faiss_index is not None else "numpy"
 
     def add_template(
         self,
@@ -93,15 +100,14 @@ class LocalHNSWClient(MorkClient):
             )
 
         with self._lock:
+            if self._faiss_index is not None:
+                norm = np.linalg.norm(key_vec)
+                normalized = key_vec / (norm + 1e-8) if norm > 0 else key_vec
+                self._faiss_index.add(np.expand_dims(normalized, axis=0))
             self.key_store.append(key_vec)
             self.val_store.append(val_vec)
             self.id_store.append(template_id)
             self.metta_store.append(metta_expr)
-
-            if self.faiss_index is not None:
-                norm = np.linalg.norm(key_vec)
-                norm_key = key_vec / (norm + 1e-8) if norm > 0 else key_vec
-                self.faiss_index.add(np.expand_dims(norm_key, axis=0))
 
         return True
 
@@ -130,11 +136,12 @@ class LocalHNSWClient(MorkClient):
 
             k_actual = min(top_m, num_items)
 
-            if self.faiss_index is not None and num_items >= k_actual:
+            if self._faiss_index is not None:
                 q_norms = np.linalg.norm(queries, axis=1, keepdims=True)
-                norm_queries = np.where(q_norms > 0, queries / (q_norms + 1e-8), queries)
-                distances, labels = self.faiss_index.search(norm_queries, k=k_actual)
-                scores = 1.0 - distances / 2.0
+                norm_q = np.where(q_norms > 0, queries / (q_norms + 1e-8), queries)
+                scores, labels = self._faiss_index.search(norm_q, k_actual)
+                scores = np.atleast_2d(np.asarray(scores))
+                labels = np.atleast_2d(np.asarray(labels))
             else:
                 keys_mat = np.stack(self.key_store, axis=0)
                 q_norms = np.linalg.norm(queries, axis=1, keepdims=True)
@@ -166,54 +173,108 @@ class LocalHNSWClient(MorkClient):
         )
 
 
+def _floats_sexpr(vec: np.ndarray) -> str:
+    return " ".join(f"{float(x):.8g}" for x in np.asarray(vec, dtype=np.float32).tolist())
+
+
+def _vector_sexpr(label: str, vec: np.ndarray) -> str:
+    values = np.asarray(vec, dtype=np.float32).tolist()
+    chunk_size = 16
+    if len(values) <= chunk_size:
+        return f"({label} {_floats_sexpr(vec)})"
+
+    chunks = [
+        "(chunk " + " ".join(f"{float(x):.8g}" for x in values[i : i + chunk_size]) + ")"
+        for i in range(0, len(values), chunk_size)
+    ]
+    return f"({label} {' '.join(chunks)})"
+
+
+def template_record_sexpr(
+    template_id: str, metta_expr: str, key_vector: np.ndarray, val_vector: np.ndarray
+) -> str:
+    """One S-expr: id, MeTTa, key floats, value floats."""
+    return (
+        f"(record {template_id} {metta_expr} "
+        f"{_vector_sexpr('key', key_vector)} {_vector_sexpr('val', val_vector)})\n"
+    )
+
+
 class DockerMorkClient(MorkClient):
-    """HTTP client for containerized MORK service based on official trueagi-io/MORK server API."""
+    """Upload Atomese records to MORK and keep a local FAISS key index."""
 
     def __init__(
         self,
-        server_url: str = "http://127.0.0.1:8000",
+        server_url: str = DEFAULT_MORK_SERVER_URL,
         key_dim: int = 256,
-        timeout_sec: float = 2.0,
-        strict_mork: bool = True,
+        timeout_sec: float = 10.0,
     ) -> None:
         super().__init__(key_dim=key_dim)
         self.server_url = server_url.rstrip("/")
         self.timeout_sec = timeout_sec
-        self.strict_mork = strict_mork
-        self.fallback_client = LocalHNSWClient(key_dim=key_dim)
+        self.vector_index = _LocalFAISSIndex(key_dim=key_dim)
+        self._mork_checked = False
+
+    @property
+    def index_backend(self) -> str:
+        return self.vector_index.index_backend
+
+    def _upload_url(self) -> str:
+        pattern = quote(SEXPR_PATTERN, safe="")
+        template = quote(SEXPR_TEMPLATE, safe="")
+        return f"{self.server_url}/upload/{pattern}/{template}/"
 
     def is_connected(self) -> bool:
-        """Check if containerized MORK server is online and responding."""
-        if httpx is None:
+        parsed_url = urlparse(self.server_url)
+        if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
             return False
+        port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
         try:
-            resp = httpx.get(f"{self.server_url}/", timeout=self.timeout_sec)
-            return resp.status_code in (200, 404)
+            with socket.create_connection(
+                (parsed_url.hostname, port), timeout=self.timeout_sec
+            ):
+                return True
         except Exception:
             return False
 
-    def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
-        queries = np.asarray(query_vectors, dtype=np.float32)
-        if httpx is not None:
-            try:
-                # Query MORK server using official export endpoint (/export/$x/$x/)
-                resp = httpx.get(
-                    f"{self.server_url}/export/%24x/%24x/?max_write={top_m}",
-                    timeout=self.timeout_sec,
-                )
-                if resp.status_code == 200:
-                    logger.debug("Successfully received MORK export response.")
-            except Exception as err:
-                if self.strict_mork:
-                    raise ConnectionError(
-                        f"Tier 2 MORK Docker connection failed ({err}) at {self.server_url}. "
-                        "Docker MORK server is required for production Tier 2 operations."
-                    ) from err
-                logger.warning(
-                    "DockerMorkClient query failed (%s), falling back to LocalHNSWClient.", err
-                )
+    def _require_mork(self, operation: str) -> None:
+        """Verify MORK server is reachable. Always enforced — no bypass."""
+        if httpx is None:
+            raise ConnectionError(
+                f"httpx is required for MORK {operation} at {self.server_url}. "
+                f"Install it: pip install httpx"
+            )
+        if not self._mork_checked and not self.is_connected():
+            raise ConnectionError(
+                f"MORK server unreachable at {self.server_url} during {operation}. "
+                f"Start it with: docker compose up -d --build"
+            )
+        self._mork_checked = True
 
-        return self.fallback_client.query_top_k(queries, top_m=top_m)
+    def _upload_record(self, payload: str) -> None:
+        if httpx is None:
+            raise ConnectionError(f"httpx required to upload to {self.server_url}.")
+        try:
+            resp = httpx.post(
+                self._upload_url(),
+                content=payload,
+                headers={"Content-Type": "text/plain"},
+                timeout=self.timeout_sec,
+            )
+        except Exception as err:
+            raise ConnectionError(
+                f"MORK upload failed at {self.server_url}: {err}"
+            ) from err
+        if resp.status_code >= 400:
+            raise ConnectionError(
+                f"MORK upload HTTP {resp.status_code} at {self._upload_url()}."
+            )
+
+    def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
+        self._require_mork("query_top_k")
+        return self.vector_index.query_top_k(
+            np.asarray(query_vectors, dtype=np.float32), top_m=top_m
+        )
 
     def add_template(
         self,
@@ -222,35 +283,16 @@ class DockerMorkClient(MorkClient):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        self.fallback_client.add_template(
-            template_id, metta_expr, key_vector, val_vector
-        )
-        if httpx is not None:
-            try:
-                # Upload S-expression data to official MORK server endpoint (/upload/$x/$x/)
-                payload_str = f"({template_id} {metta_expr})\n"
-                httpx.post(
-                    f"{self.server_url}/upload/%24x/%24x/",
-                    content=payload_str,
-                    headers={"Content-Type": "text/plain"},
-                    timeout=self.timeout_sec,
-                )
-            except Exception as err:
-                if self.strict_mork:
-                    raise ConnectionError(
-                        f"Tier 2 MORK Docker add_template failed ({err}) at {self.server_url}. "
-                        "Docker MORK server is required for production Tier 2 operations."
-                    ) from err
-                logger.warning(
-                    "DockerMorkClient add_template failed (%s), cached in local fallback.", err
-                )
+        key_vec = np.asarray(key_vector, dtype=np.float32)
+        val_vec = np.asarray(val_vector, dtype=np.float32)
+        payload = template_record_sexpr(template_id, metta_expr, key_vec, val_vec)
+        self._require_mork("add_template")
+        self._upload_record(payload)
+        self.vector_index.add_template(template_id, metta_expr, key_vec, val_vec)
         return True
 
 
-def get_mork_client(key_dim: int = 256, strict_mork: bool = True) -> MorkClient:
-    """Factory returning active MORK client based on environment config."""
-    server_url = os.getenv("MORK_SERVER_URL", "http://127.0.0.1:8000")
-    allow_local = os.getenv("ALLOW_LOCAL_MORK_FALLBACK", "0") == "1"
-    if allow_local and not strict_mork:
-        return DockerMorkClient(server_url=server_url, key_dim=key_dim, strict_mork=False)
-    return DockerMorkClient(server_url=server_url, key_dim=key_dim, strict_mork=True)
+def get_mork_client(key_dim: int = 256) -> MorkClient:
+    """Create the Docker-backed MORK client used by Tier 2."""
+    server_url = os.getenv("MORK_SERVER_URL", DEFAULT_MORK_SERVER_URL)
+    return DockerMorkClient(server_url=server_url, key_dim=key_dim)
