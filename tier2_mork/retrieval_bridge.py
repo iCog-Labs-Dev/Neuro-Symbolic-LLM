@@ -3,7 +3,7 @@
 import numpy as np
 
 from tier2_mork.client import MorkClient, MorkQueryResult, get_mork_client
-from tier2_mork.comm import QueryPacket, TemplatePacket, retrieve_on_wire
+from tier2_mork.communication import QueryPacket, TemplatePacket, retrieve_on_wire
 
 
 class Tier2Retrieve:

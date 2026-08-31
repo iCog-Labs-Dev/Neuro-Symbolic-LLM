@@ -1,5 +1,10 @@
-from tier2_mork.bridge import SymbolicHeadBridge, Tier2Retrieve
-from tier2_mork.comm import decode_query, decode_templates, encode_query, encode_templates
+from tier2_mork.retrieval_bridge import SymbolicHeadBridge, Tier2Retrieve
+from tier2_mork.communication import (
+    decode_query,
+    decode_templates,
+    encode_query,
+    encode_templates,
+)
 from tier2_mork.client import (
     DockerMorkClient,
     MorkClient,
