@@ -4,9 +4,9 @@ from typing import Any
 
 import numpy as np
 
-from tier2_mork.bridge import Tier2Retrieve
+from tier2_mork.retrieval_bridge import Tier2Retrieve
 from tier2_mork.client import MorkClient
-from tier2_mork.comm import QueryPacket, TemplatePacket
+from tier2_mork.communication import QueryPacket, TemplatePacket
 
 
 class SymbolicHead:
