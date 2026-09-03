@@ -1,0 +1,25 @@
+# configs/student_config.yaml
+
+student:
+  base_model: Qwen/Qwen2.5-1.5B-Instruct
+  output_dir: models/distil_parser
+
+data:
+  val_split: 0.1
+  max_length: 128
+
+training:
+  epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 0.00002
+  lr_scheduler: cosine
+  # warmup_ratio: 0.05  # ← Remove or comment out
+  bf16: true
+  seed: 42
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
