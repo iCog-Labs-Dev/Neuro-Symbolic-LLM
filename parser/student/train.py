@@ -10,6 +10,7 @@ HOW TO RUN:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 
@@ -44,10 +45,8 @@ def load_pairs(train_file: str) -> list[dict]:
         for line in f:
             line = line.strip()
             if line:
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     pairs.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
     print(f"  Loaded {len(pairs)} pairs from {train_file}")
     return pairs
 
@@ -58,8 +57,8 @@ def load_pairs(train_file: str) -> list[dict]:
 def apply_lora(model, lora_config: dict):
     try:
         from peft import LoraConfig, TaskType, get_peft_model
-    except ImportError:
-        raise ImportError("Install peft: pip install peft")
+    except ImportError as err:
+        raise ImportError("Install peft: pip install peft") from err
 
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
