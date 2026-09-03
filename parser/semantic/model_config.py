@@ -211,8 +211,7 @@ def build_distilled_semantic_parser(
     profile_name: str | None = None,
 ) -> DistilledSemanticParser:
     """Build a distilled parser using the active YAML model profile."""
-    profile = load_model_profile(config_path, profile_name=profile_name)
-    return DistilledSemanticParser(
-        backend=create_backend(profile),
-        config=SemanticParserConfig(model_name=profile.model),
+    return DistilledSemanticParser.from_pretrained(
+        model_dir="models/distil_parser",
+        device="auto",
     )
