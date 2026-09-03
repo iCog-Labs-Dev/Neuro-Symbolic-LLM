@@ -263,7 +263,7 @@ class TestDistilledSemanticParser:
             config=SemanticParserConfig(model_name="student-model"),
         )
 
-        assert str(parser.parse("Rain causes flooding.")[0]) == "(Cause rain flood)"
+        assert str(parser.parse("Rain causes flooding.")[0]) == "(Cause Rain Flood)"
 
     def test_reports_distilled_role_on_failure(self) -> None:
         # Similar to above, test the reference parser with a failure
