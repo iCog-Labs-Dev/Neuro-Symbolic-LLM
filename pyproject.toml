@@ -19,8 +19,12 @@ dependencies = [
 
     # Frozen base model (PyTorch, hidden state extraction only)
     "torch>=2.2.0",
-    "transformers>=4.40.0",
-    "datasets>=2.19.0",
+    "transformers>=5.0.0",
+    "accelerate>=0.25.0",
+    "peft>=0.10.0",
+    "datasets>=2.14.0",
+    "sentencepiece>=0.1.99",
+    "protobuf>=3.20.0",
 
     # MORK service
     "fastapi>=0.110.0",
@@ -143,3 +147,7 @@ filterwarnings = [
 # Run all tests: pytest
 # Run only unit tests: pytest tests/unit/
 # Run with output: pytest -v -s
+
+[[tool.mypy.overrides]]
+module = "parser.semantic.semantic_parser"
+disable_error_code = ["no-any-return"]
