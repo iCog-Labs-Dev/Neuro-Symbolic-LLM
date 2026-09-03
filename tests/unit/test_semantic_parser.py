@@ -12,7 +12,6 @@ import torch
 from parser.grammar.atomese import LinkAtom
 from parser.semantic import (
     ALLOWED_PREDICATES,
-    DistilledSemanticParser,
     ModelGenerationError,
     ReferenceSemanticParser,
     SemanticParseError,
