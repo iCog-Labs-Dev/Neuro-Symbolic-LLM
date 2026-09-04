@@ -7,7 +7,7 @@ from torch.func import functional_call
 
 from substrate.torchax_backend import enable_torchax, to_torchax_device
 
-_SUPPORTED_MODEL_TYPES = {"gpt2"}
+_SUPPORTED_MODEL_TYPES = {"gpt2", "gpt_neox"}
 
 
 def load_torchax_gpt2(
@@ -45,10 +45,7 @@ def functional_gpt2(
     params: dict[str, torch.Tensor],
     input_ids: torch.Tensor,
 ) -> Any:
-    """Run `model`'s forward pass with `params` as an explicit argument
-    rather than the module's own internal state.
-
-    This is a thin wrapper around `torch.func.functional_call`.
+    """ This is a thin wrapper around `torch.func.functional_call`.
     """
     return functional_call(model, params, (input_ids,))
 
@@ -61,17 +58,14 @@ def check_numerical_fidelity(
     atol: float = 1e-4,
 ) -> dict[str, Any]:
     """Compare the TorchAX-dispatched forward pass against a plain,
-    non-TorchAX PyTorch forward pass on the *same* loaded weights and the
+    non-TorchAX PyTorch forward pass on the same loaded weights and the
     same random input.
     """
-    import copy
-
     from transformers import AutoConfig, AutoModelForCausalLM
 
     enable_torchax()
 
-
-    config = AutoConfig.from_pretrained(model_id, revision= revision)
+    config = AutoConfig.from_pretrained(model_id, revision=revision)
     model_plain = AutoModelForCausalLM.from_pretrained(model_id, revision=revision)
     model_plain.eval()
 
@@ -81,7 +75,8 @@ def check_numerical_fidelity(
     with torch.no_grad():
         ref_logits = model_plain(input_ids=ids).logits
 
-    model_jax = to_torchax_device(copy.deepcopy(model_plain))
+  
+    model_jax = to_torchax_device(model_plain)
     params = dict(model_jax.named_parameters())
     for p in params.values():
         p.requires_grad_(False)
