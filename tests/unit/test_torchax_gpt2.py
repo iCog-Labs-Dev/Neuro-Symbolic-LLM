@@ -27,7 +27,7 @@ class TestFunctionalCallCorrectness:
         model = _tiny_model().to("jax")
         params = dict(model.named_parameters())
         ids = torch.randint(0, 100, (2, 6)).to("jax")
-        out = functional_gpt2(model, params, ids)
+        out = functional_model(model, params, ids)
         assert out.logits.shape == (2, 6, 100)
 
     def test_numerically_matches_plain_pytorch(self):
