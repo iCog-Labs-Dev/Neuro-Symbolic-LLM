@@ -10,7 +10,7 @@ import torchax
 from torch.func import functional_call
 from transformers import GPT2Config, GPT2LMHeadModel
 
-from substrate.torchax_transformers import functional_gpt2
+from substrate.torchax_models import functional_model
 
 torchax.enable_globally()
 
@@ -39,7 +39,7 @@ class TestFunctionalCallCorrectness:
 
         model_jax = copy.deepcopy(model_plain).to("jax")
         params = dict(model_jax.named_parameters())
-        out = functional_gpt2(model_jax, params, ids.to("jax"))
+        out = functional_model(model_jax, params, ids.to("jax"))
         jax_logits = out.logits.to("cpu")
 
         assert torch.allclose(ref_logits, jax_logits, atol=1e-4)
@@ -86,7 +86,7 @@ class TestHookSurvivesFunctionalCall:
         handle = model.transformer.h[1].register_forward_hook(hook)
         try:
             ids = torch.randint(0, 100, (1, 4)).to("jax")
-            out = functional_gpt2(model, params, ids)
+            out = functional_model(model, params, ids)
             assert len(calls) == 1
             assert out.logits.shape == (1, 4, 100)
         finally:
@@ -100,11 +100,11 @@ class TestHookSurvivesFunctionalCall:
             return output * 0.0
 
         ids = torch.randint(0, 100, (1, 4)).to("jax")
-        baseline = functional_gpt2(model, params, ids).logits.to("cpu")
+        baseline = functional_model(model, params, ids).logits.to("cpu")
 
         handle = model.transformer.h[1].register_forward_hook(zero_hook)
         try:
-            modified = functional_gpt2(model, params, ids).logits.to("cpu")
+            modified = functional_model(model, params, ids).logits.to("cpu")
         finally:
             handle.remove()
 

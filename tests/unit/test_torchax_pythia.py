@@ -11,7 +11,7 @@ import torchax
 from torch.func import functional_call
 from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
 
-from substrate.torchax_transformers import functional_gpt2
+from substrate.torchax_models import functional_model
 
 torchax.enable_globally()
 
@@ -43,7 +43,7 @@ class TestFunctionalCallCorrectness:
         model = _tiny_neox_model().to("jax")
         params = dict(model.named_parameters())
         ids = torch.randint(0, 100, (2, 6)).to("jax")
-        out = functional_gpt2(model, params, ids)
+        out = functional_model(model, params, ids)
         assert out.logits.shape == (2, 6, 100)
 
 
@@ -60,7 +60,7 @@ class TestFidelity:
 
         model = model.to("jax")
         params = dict(model.named_parameters())
-        out = functional_gpt2(model, params, ids.to("jax"))
+        out = functional_model(model, params, ids.to("jax"))
         jax_logits = out.logits.to("cpu")
 
         diff = (ref_logits - jax_logits).abs()
@@ -95,10 +95,7 @@ class TestFreezing:
 
 
 class TestHookSurvivesFunctionalCall:
-    """NeoX's blocks live at model.gpt_neox.layers[i] (GPTNeoXLayer), not
-    model.transformer.h[i] like GPT-2 -- confirmed directly against a real
-    GPTNeoXForCausalLM before writing this, not assumed from the GPT-2
-    tests' shape."""
+
 
     def test_hook_fires_and_can_replace_output(self):
         model = _tiny_neox_model().to("jax")
@@ -113,7 +110,7 @@ class TestHookSurvivesFunctionalCall:
         handle = model.gpt_neox.layers[1].register_forward_hook(hook)
         try:
             ids = torch.randint(0, 100, (1, 4)).to("jax")
-            out = functional_gpt2(model, params, ids)
+            out = functional_model(model, params, ids)
             assert len(calls) == 1
             assert out.logits.shape == (1, 4, 100)
         finally:
@@ -127,11 +124,11 @@ class TestHookSurvivesFunctionalCall:
             return output * 0.0
 
         ids = torch.randint(0, 100, (1, 4)).to("jax")
-        baseline = functional_gpt2(model, params, ids).logits.to("cpu")
+        baseline = functional_model(model, params, ids).logits.to("cpu")
 
         handle = model.gpt_neox.layers[1].register_forward_hook(zero_hook)
         try:
-            modified = functional_gpt2(model, params, ids).logits.to("cpu")
+            modified = functional_model(model, params, ids).logits.to("cpu")
         finally:
             handle.remove()
 
