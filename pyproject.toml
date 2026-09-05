@@ -21,6 +21,7 @@ dependencies = [
     "torch>=2.2.0",
     "transformers>=4.40.0",
     "datasets>=2.19.0",
+    "torchax==0.0.13",
 
     # MORK service
     "fastapi>=0.110.0",
