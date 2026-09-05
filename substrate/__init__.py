@@ -17,8 +17,6 @@ from .memory import (
     compute_memory_headroom,
     get_memory_status,
     maybe_reduce_batch_size,
-)
-from .substrate import ForwardResult
 
 __all__ = [
     "Architecture",
