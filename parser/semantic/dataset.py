@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from parser.semantic.normalization import normalize_semantic_result
@@ -26,6 +27,7 @@ from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParseError,
 )
+from parser.semantic.student_prompt import build_student_prompt
 
 # ── Dataset records ────────────────────────────────────────────────────────────
 
@@ -143,7 +145,12 @@ class StudentDataset(Dataset):
     """Prepares (input, json_label) pairs for student model training."""
 
     def __init__(self, pairs: list[dict], tokenizer, max_length: int = 256):
+        if max_length <= 0:
+            raise ValueError("max_length must be positive")
+        if tokenizer.eos_token_id is None:
+            raise ValueError("Student training requires an EOS token")
         self.examples = []
+        self.oversized = 0
         skipped = 0
 
         for pair in pairs:
@@ -161,35 +168,28 @@ class StudentDataset(Dataset):
                 skipped += 1
                 continue
 
-            prompt_text = (
-                f"Extract triples from this sentence as JSON:\nSentence: {text}\nJSON:"
-            )
-            full_text = prompt_text + json_label + tokenizer.eos_token
-
-            full_enc = tokenizer(
-                full_text, truncation=True, max_length=max_length, padding=False
-            )
-            prompt_enc = tokenizer(
-                prompt_text, truncation=True, max_length=max_length, padding=False
-            )
-
-            prompt_len = len(prompt_enc["input_ids"])
-            input_ids = full_enc["input_ids"]
-
-            # Mask prompt tokens: -100 means "ignore for loss"
-            labels = [-100] * min(prompt_len, len(input_ids)) + input_ids[prompt_len:]
-            labels = labels[:max_length]
-
-            if all(i == -100 for i in labels):
-                skipped += 1
+            prompt_text = build_student_prompt(text)
+            # Encode the boundary separately: prompt tokens must match inference,
+            # and every target token must contribute to the loss.
+            prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+            target_ids = tokenizer(json_label, add_special_tokens=False)["input_ids"]
+            target_ids = target_ids + [tokenizer.eos_token_id]
+            input_ids = prompt_ids + target_ids
+            if len(input_ids) > max_length:
+                self.oversized += 1
                 continue
 
             self.examples.append(
                 {
-                    "input_ids": input_ids[:max_length],
-                    "attention_mask": full_enc["attention_mask"][:max_length],
-                    "labels": labels,
+                    "input_ids": input_ids,
+                    "attention_mask": [1] * len(input_ids),
+                    "labels": [-100] * len(prompt_ids) + target_ids,
                 }
+            )
+
+        if self.oversized:
+            print(
+                f"  Skipped {self.oversized} oversized examples (max_length={max_length})"
             )
 
         if skipped > 0:
@@ -200,6 +200,26 @@ class StudentDataset(Dataset):
 
     def __getitem__(self, idx):
         return {k: torch.tensor(v) for k, v in self.examples[idx].items()}
+
+
+@dataclass(frozen=True)
+class StudentBatchCollator:
+    """Right-pad inputs while excluding padding from attention and loss."""
+
+    pad_token_id: int
+
+    def __call__(
+        self, examples: list[dict[str, torch.Tensor]]
+    ) -> dict[str, torch.Tensor]:
+        padding = {"input_ids": self.pad_token_id, "attention_mask": 0, "labels": -100}
+        return {
+            key: pad_sequence(
+                [example[key] for example in examples],
+                batch_first=True,
+                padding_value=value,
+            )
+            for key, value in padding.items()
+        }
 
 
 # ── Converter: Structured → Pairs (for student training) ─────────────────────

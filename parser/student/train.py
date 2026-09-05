@@ -20,9 +20,10 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from parser.grammar.atomese import validate_metta_string
-from parser.semantic.dataset import StudentDataset
+from parser.semantic.dataset import StudentBatchCollator, StudentDataset
 from parser.semantic.metta_renderer import render_metta
 from parser.semantic.schema import SemanticParseResult
+from parser.semantic.student_prompt import STUDENT_PROMPT, build_student_prompt
 
 # ── Load config ───────────────────────────────────────────────────────────────
 
@@ -94,7 +95,7 @@ def save_model(model, tokenizer, output_dir: str, metadata: dict) -> None:
     for file_path in sorted(output_path.iterdir()):
         size = file_path.stat().st_size / 1024
         if size > 1024:
-            print(f"    - {file_path.name} ({size/1024:.1f} MB)")
+            print(f"    - {file_path.name} ({size / 1024:.1f} MB)")
         else:
             print(f"    - {file_path.name} ({size:.1f} KB)")
 
@@ -140,10 +141,10 @@ def evaluate(
     valid_metta = 0
 
     for sentence in test_sentences:
-        prompt = (
-            f"Extract triples from this sentence as JSON:\nSentence: {sentence}\nJSON:"
+        prompt = build_student_prompt(sentence)
+        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(
+            model.device
         )
-        enc = tokenizer(prompt, return_tensors="pt").to(model.device)
 
         with torch.no_grad():
             out_ids = model.generate(
@@ -185,10 +186,10 @@ def evaluate(
         print(f"  [{status}] '{sentence[:40]:40s}' -> {json_output[:60]}...")
 
     print(
-        f"\nValid JSON: {valid_json}/{len(test_sentences)} ({100*valid_json/len(test_sentences):.0f}%)"
+        f"\nValid JSON: {valid_json}/{len(test_sentences)} ({100 * valid_json / len(test_sentences):.0f}%)"
     )
     print(
-        f"Valid MeTTa: {valid_metta}/{len(test_sentences)} ({100*valid_metta/len(test_sentences):.0f}%)"
+        f"Valid MeTTa: {valid_metta}/{len(test_sentences)} ({100 * valid_metta / len(test_sentences):.0f}%)"
     )
 
 
@@ -247,12 +248,29 @@ def train(
     val_dataset = StudentDataset(val_pairs, tokenizer, max_length)
     print(f"  Train: {len(train_dataset)} | Val: {len(val_dataset)}")
 
+    if not train_dataset:
+        raise ValueError(
+            "No training examples fit max_length; increase it or check the data"
+        )
+    if val_pairs and not val_dataset:
+        raise ValueError(
+            "No validation examples fit max_length; increase it or check the data"
+        )
+
+    collator = StudentBatchCollator(tokenizer.pad_token_id)
+
     # Step 4: Create dataloaders
     train_loader = DataLoader(
-        train_dataset, batch_size=train_cfg["batch_size"], shuffle=True
+        train_dataset,
+        batch_size=train_cfg["batch_size"],
+        shuffle=True,
+        collate_fn=collator,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=train_cfg["batch_size"], shuffle=False
+        val_dataset,
+        batch_size=train_cfg["batch_size"],
+        shuffle=False,
+        collate_fn=collator,
     )
 
     # Step 5: Load model
@@ -377,7 +395,7 @@ def train(
         "n_train": len(train_dataset),
         "n_val": len(val_dataset),
         "config": config,
-        "prompt_format": "Extract triples from this sentence as JSON:\nSentence: {text}\nJSON:",
+        "prompt_format": STUDENT_PROMPT,
         "epochs": train_cfg["epochs"],
         "batch_size": train_cfg["batch_size"],
         "learning_rate": train_cfg["learning_rate"],
