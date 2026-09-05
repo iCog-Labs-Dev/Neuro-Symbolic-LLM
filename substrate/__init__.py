@@ -16,7 +16,7 @@ from .memory import (
     check_memory_headroom,
     compute_memory_headroom,
     get_memory_status,
-    maybe_reduce_batch_size,
+    maybe_reduce_batch_size,)
 
 __all__ = [
     "Architecture",
