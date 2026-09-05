@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from substrate import FrozenJAXSubstrate, state_dict_to_jax_pytree
+
 
 GPT2_CFG: dict[str, Any] = {
     "n_layer": 12,
@@ -71,18 +71,7 @@ def _config(family: str):
     return GPTNeoXConfig(**NEOX_CFG)
 
 
-def make_substrate(family: str, intercept_layers=None, modify_hook=None, seed: int = 0):
-    """Build the torch reference model plus a FrozenJAXSubstrate wrapper."""
-    model = _torch_model(family, seed=seed)
-    model.eval()
-    params = state_dict_to_jax_pytree(model.state_dict())
-    substrate = FrozenJAXSubstrate(
-        params,
-        _config(family),
-        intercept_layers=intercept_layers,
-        modify_hook=modify_hook,
-    )
-    return model, substrate
+
 
 
 def torch_logits(model, ids):
