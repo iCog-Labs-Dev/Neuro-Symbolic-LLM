@@ -39,6 +39,7 @@ from parser.semantic.normalization import (
     normalize_semantic_result,
 )
 from parser.semantic.schema import SemanticParseResult
+from parser.semantic.student_prompt import build_student_prompt
 
 
 class SemanticParseError(ValueError):
@@ -136,9 +137,6 @@ def _build_predicate_guide() -> str:
 
 PREDICATE_GUIDE = _build_predicate_guide()
 
-# Prompt format used by both teacher and student
-PROMPT = "Extract triples from this sentence as JSON:\nSentence: {text}\nJSON:"
-
 _CODE_FENCE_RE = re.compile(
     r"^```(?:json)?\s*(.*?)\s*```$",
     flags=re.IGNORECASE | re.DOTALL,
@@ -171,6 +169,8 @@ class _BaseSemanticParser:
     """
 
     parser_role = "semantic"
+    max_new_tokens = 256
+    num_beams = 4
 
     def __init__(
         self,
@@ -343,12 +343,14 @@ class _BaseSemanticParser:
         """Generate text using either backend or saved model."""
         if self._model is not None and self._tokenizer is not None:
             # Distilled: use saved model
-            enc = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+            enc = self._tokenizer(
+                prompt, return_tensors="pt", add_special_tokens=False
+            ).to(self._model.device)
             with torch.no_grad():
                 out_ids = self._model.generate(
                     **enc,
-                    max_new_tokens=256,
-                    num_beams=4,
+                    max_new_tokens=self.max_new_tokens,
+                    num_beams=self.num_beams,
                     pad_token_id=self._tokenizer.pad_token_id,
                     eos_token_id=self._tokenizer.eos_token_id,
                 )
@@ -540,18 +542,10 @@ class DistilledSemanticParser(_BaseSemanticParser):
         """Load a saved model for inference."""
         return cls(model_dir, device, max_new_tokens, num_beams)
 
-    def parse(
-        self,
-        sentence: str,
-        context: str = "",
-        *,
-        aliases: Mapping[str, str] | None = None,
-        alias_types: Mapping[str, str] | None = None,
-    ) -> list[LinkAtom]:
-        """Parse a sentence using the loaded student model."""
-        prompt = self.build_prompt(sentence.strip(), context)
-        json_output = self._generate_text(prompt)
-        return self._parse_json_to_metta(json_output)
+    @staticmethod
+    def build_prompt(sentence: str, context: str = "") -> str:
+        """Use the same prompt as student training and evaluation."""
+        return build_student_prompt(sentence, context)
 
 
 # ── Builder functions ─────────────────────────────────────────────────────────
