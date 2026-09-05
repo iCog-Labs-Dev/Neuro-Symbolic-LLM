@@ -11,7 +11,7 @@ from .architecture import detect_architecture, validate_interception_layers
 
 @dataclass(frozen=True)
 class ForwardResult:
-    \"\"\"Result of a forward pass through the substrate.\"\"\"
+    
     logits: torch.Tensor
     hidden_states: Mapping[int, torch.Tensor] = None
 
