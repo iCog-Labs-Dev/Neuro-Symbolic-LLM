@@ -18,7 +18,7 @@ dependencies = [
     "orbax-checkpoint>=0.5.0",
 
     # Frozen base model (PyTorch, hidden state extraction only)
-    "torch>=2.2.0",
+    "torch==2.6.0",
     "transformers>=4.40.0",
     "datasets>=2.19.0",
     "torchax==0.0.14.dev20260617",

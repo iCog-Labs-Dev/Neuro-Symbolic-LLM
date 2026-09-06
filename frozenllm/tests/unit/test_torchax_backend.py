@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import torch
-
 from substrate.torchax_backend import (
     call_jax_differentiable,
     enable_torchax,

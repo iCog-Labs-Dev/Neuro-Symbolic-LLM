@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from substrate.architecture import detect_architecture
 from substrate.substrate import Substrate
 
