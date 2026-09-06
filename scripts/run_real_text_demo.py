@@ -30,6 +30,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from substrate import compute_kl_drift
+from substrate.substrate import Substrate
 from substrate.loader import load_torchax_model
 from substrate.torchax_models import functional_model
 
@@ -186,8 +187,8 @@ def main() -> int:
     torch_model = AutoModelForCausalLM.from_pretrained(args.model)
     torch_model.eval()
     
-    # Ingest PyTorch model to extract parameters
-    params = load_torchax_model(torch_model)
+    # Unpack parameters correctly if load_torchax_model returns a tuple
+    params, _ = load_torchax_model(torch_model) # Or params = load_torchax_model(torch_model)[0]
     
     num_layers = get_num_layers(torch_model.config)
     layers = parse_layers(args.layers, num_layers)
@@ -209,17 +210,18 @@ def main() -> int:
         recorded[layer_idx] = (h, out)
         return out
 
+    # Instantiate the Substrate wrapper
+    sub = Substrate(torch_model, params)
+    plain_sub = Substrate(torch_model, params)
+
     # ── Forward pass with interception ──────────────────────────────────────
     section("4. FORWARD PASS (EVERY INTERCEPTED LAYER)")
     
     # Run the model functionally
-    result = functional_model(
-        torch_model, params, input_ids, intercept_layers=layers, hook=recording_hook
-    )
-    # Untouched execution (default identity hook) for reference comparisons
-    plain_result = functional_model(
-        torch_model, params, input_ids, intercept_layers=layers
-    )
+    
+    result = sub(input_ids, intercept_layers=layers, hook=recording_hook)
+    plain_result = plain_sub(input_ids, intercept_layers=layers)
+
     
     print(
         f"logits      : shape={tuple(result.logits.shape)} "

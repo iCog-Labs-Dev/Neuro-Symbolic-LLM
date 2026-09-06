@@ -99,10 +99,9 @@ select = [
 ]
 ignore = [
     "E501",  # line too long — black handles this
-    "B008",  # do not perform function calls in default arguments (FastAPI uses this)
+    "B008",  # do not perform function calls in default arguments (FastAPI uses this),
+    "N806", "N803"
 ]
-
-ignore = ["N806", "N803"]
 
 [tool.ruff.lint.isort]
 # tells ruff which packages are "yours" so imports are sorted into the right group
