@@ -75,15 +75,15 @@ def load_text(path: Path | None) -> str:
         if candidate.is_file():
             text = candidate.read_text(encoding="utf-8")
             print(f"Text source : file {candidate}")
-            return text # type: ignore[no-any-return]
+            return str(text)
     try:
         with urllib.request.urlopen(SHAKESPEARE_URL, timeout=20) as resp:
             text = resp.read().decode("utf-8")
         print(f"Text source : downloaded tinyshakespeare ({len(text)} chars)")
-        return text # type: ignore[no-any-return]
+        return str(text)
     except Exception as exc:
         print(f"Text source : download failed ({exc}); using embedded excerpt")
-        return FALLBACK_TEXT
+        return str(FALLBACK_TEXT)
 
 
 def get_num_layers(config) -> int:
