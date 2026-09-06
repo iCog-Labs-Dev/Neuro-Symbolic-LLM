@@ -13,7 +13,7 @@ from .architecture import detect_architecture, validate_interception_layers
 class ForwardResult:
     
     logits: torch.Tensor
-    hidden_states: Mapping[int, torch.Tensor] = None
+    hidden_states: Mapping[int, torch.Tensor] | None = None
 
 class Substrate:
     def __init__(self, model: torch.nn.Module, params: dict[str, torch.Tensor]):

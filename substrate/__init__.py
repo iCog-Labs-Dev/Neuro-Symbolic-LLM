@@ -18,10 +18,13 @@ from .memory import (
     get_memory_status,
     maybe_reduce_batch_size,)
 
+from .substrate import ForwardResult, Substrate
+
 __all__ = [
     "Architecture",
     "ForwardResult",
     "MemoryStatus",
+    "Substrate"
     "check_memory_headroom",
     "compute_kl_drift",
     "compute_memory_headroom",

@@ -54,7 +54,7 @@ def to_torchax_device(obj: T) -> T:
     device, enabling global dispatch first if it hasn't been already.
     """
     enable_torchax()
-    return obj.to("jax")
+    return obj.to("jax")  # type: ignore[no-any-return, attr-defined]
 
 
 def is_on_torchax_device(tensor: torch.Tensor) -> bool:
@@ -73,4 +73,4 @@ def call_jax_differentiable(
     def torch_shell(*args: Any, **kwargs: Any) -> Any:
         return interop.call_jax(jax_fn, *args, **kwargs)
 
-    return interop.j2t_autograd(torch_shell)
+    return interop.j2t_autograd(torch_shell)  # type: ignore[no-any-return]

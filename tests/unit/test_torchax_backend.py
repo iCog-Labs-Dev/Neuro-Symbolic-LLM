@@ -64,33 +64,33 @@ class TestCallJaxDifferentiable:
         torch.manual_seed(0)
         d = 5
         h0_vals = torch.randn(3, d)
-        W_vals = torch.randn(d, d) * 0.02
+        w_vals = torch.randn(d, d) * 0.02
         b_vals = torch.zeros(d)
 
         # ground truth: pure torch, no torchax involved at all
         h0g = h0_vals.clone().requires_grad_()
-        Wg = W_vals.clone().requires_grad_()
+        w_g = w_vals.clone().requires_grad_()
         bg = b_vals.clone().requires_grad_()
-        out_g = h0g + torch.tanh(h0g @ Wg + bg)
+        out_g = h0g + torch.tanh(h0g @ w_g + bg)
         (out_g**2).sum().backward()
 
         # real raw-JAX function -- no torch syntax anywhere, standing in
         # for a genuine FabricPC node computation
-        def raw_jax_residual(h0, W, b):
-            return h0 + jnp.tanh(jnp.matmul(h0, W) + b)
+        def raw_jax_residual(h0, w, b):
+            return h0 + jnp.tanh(jnp.matmul(h0, w) + b)
 
         bridge = call_jax_differentiable(raw_jax_residual)
 
         h0j = to_torchax_device(h0_vals.clone())
-        Wj = to_torchax_device(W_vals.clone()).requires_grad_()
+        w_j = to_torchax_device(w_vals.clone()).requires_grad_()
         bj = to_torchax_device(b_vals.clone()).requires_grad_()
-        out_j = bridge(h0j, Wj, bj)
+        out_j = bridge(h0j, w_j, bj)
         (out_j**2).sum().backward()
 
         assert torch.allclose(out_g, out_j.to("cpu"), atol=1e-5)
-        assert Wj.grad is not None
+        assert w_j.grad is not None
         assert bj.grad is not None
-        assert torch.allclose(Wg.grad, Wj.grad.to("cpu"), atol=1e-5)
+        assert torch.allclose(w_g.grad, w_j.grad.to("cpu"), atol=1e-5)
         assert torch.allclose(bg.grad, bj.grad.to("cpu"), atol=1e-5)
 
     def test_jax_fn_receives_no_torch_syntax_requirement(self):
@@ -117,10 +117,10 @@ class TestCallJaxDifferentiable:
 
         bridge = call_jax_differentiable(raw_jax_residual)
         h0 = to_torchax_device(torch.randn(3, 4))  # requires_grad=False
-        W = to_torchax_device(torch.randn(4, 4) * 0.02).requires_grad_()
+        w = to_torchax_device(torch.randn(4, 4) * 0.02).requires_grad_()
         b = to_torchax_device(torch.zeros(4)).requires_grad_()
 
-        out = bridge(h0, W, b)
+        out = bridge(h0, w, b)
         out.sum().backward()
-        assert W.grad is not None
+        assert w.grad is not None
         assert b.grad is not None

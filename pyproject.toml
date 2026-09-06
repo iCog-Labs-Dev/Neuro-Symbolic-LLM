@@ -21,7 +21,7 @@ dependencies = [
     "torch>=2.2.0",
     "transformers>=4.40.0",
     "datasets>=2.19.0",
-    "torchax==0.0.13",
+    "torchax==0.0.14.dev20260617",
 
     # MORK service
     "fastapi>=0.110.0",
@@ -101,6 +101,8 @@ ignore = [
     "E501",  # line too long — black handles this
     "B008",  # do not perform function calls in default arguments (FastAPI uses this)
 ]
+
+ignore = ["N806", "N803"]
 
 [tool.ruff.lint.isort]
 # tells ruff which packages are "yours" so imports are sorted into the right group
