@@ -24,7 +24,7 @@ __all__ = [
     "Architecture",
     "ForwardResult",
     "MemoryStatus",
-    "Substrate"
+    "Substrate",
     "check_memory_headroom",
     "compute_kl_drift",
     "compute_memory_headroom",

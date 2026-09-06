@@ -75,12 +75,12 @@ def load_text(path: Path | None) -> str:
         if candidate.is_file():
             text = candidate.read_text(encoding="utf-8")
             print(f"Text source : file {candidate}")
-            return text
+            return text # type: ignore[no-any-return]
     try:
         with urllib.request.urlopen(SHAKESPEARE_URL, timeout=20) as resp:
             text = resp.read().decode("utf-8")
         print(f"Text source : downloaded tinyshakespeare ({len(text)} chars)")
-        return text
+        return text # type: ignore[no-any-return]
     except Exception as exc:
         print(f"Text source : download failed ({exc}); using embedded excerpt")
         return FALLBACK_TEXT
