@@ -4,8 +4,6 @@ entirely against a local random-init GPTNeoXConfig, no network needed.
 
 from __future__ import annotations
 
-import copy
-
 import torch
 import torchax
 from torch.func import functional_call
@@ -48,10 +46,7 @@ class TestFunctionalCallCorrectness:
 
 
 class TestFidelity:
-    
-
     def test_numerically_matches_plain_pytorch(self):
-
         model = _tiny_neox_model()
         torch.manual_seed(0)
         ids = torch.randint(0, 100, (2, 6))
@@ -64,8 +59,10 @@ class TestFidelity:
         jax_logits = out.logits.to("cpu")
 
         diff = (ref_logits - jax_logits).abs()
-        print(f"\nNeoX/Pythia TorchAX fidelity: max_abs_diff={float(diff.max()):.3e}, "
-              f"mean_abs_diff={float(diff.mean()):.3e}")
+        print(
+            f"\nNeoX/Pythia TorchAX fidelity: max_abs_diff={float(diff.max()):.3e}, "
+            f"mean_abs_diff={float(diff.mean()):.3e}"
+        )
 
         assert ref_logits.shape == jax_logits.shape
         assert torch.allclose(ref_logits, jax_logits, atol=1e-4)
@@ -95,8 +92,6 @@ class TestFreezing:
 
 
 class TestHookSurvivesFunctionalCall:
-
-
     def test_hook_fires_and_can_replace_output(self):
         model = _tiny_neox_model().to("jax")
         params = dict(model.named_parameters())

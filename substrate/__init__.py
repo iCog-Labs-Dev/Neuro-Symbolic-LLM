@@ -6,18 +6,15 @@ arbitrary per-layer hidden-state interception, activation caching, drift
 monitoring and device memory monitoring.
 """
 
-from .architecture import (
-    Architecture)
-
+from .architecture import Architecture
 from .drift import compute_kl_drift
-
 from .memory import (
     MemoryStatus,
     check_memory_headroom,
     compute_memory_headroom,
     get_memory_status,
-    maybe_reduce_batch_size,)
-
+    maybe_reduce_batch_size,
+)
 from .substrate import ForwardResult, Substrate
 
 __all__ = [

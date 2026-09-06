@@ -1,19 +1,21 @@
-
 from __future__ import annotations
 
-import torch
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence, Mapping
+from typing import Any
 
-from .torchax_backend import enable_torchax, to_torchax_device
+import torch
+
+from .architecture import detect_architecture
+from .torchax_backend import enable_torchax
 from .torchax_models import functional_model
-from .architecture import detect_architecture, validate_interception_layers
+
 
 @dataclass(frozen=True)
 class ForwardResult:
-    
     logits: torch.Tensor
     hidden_states: Mapping[int, torch.Tensor] | None = None
+
 
 class Substrate:
     def __init__(self, model: torch.nn.Module, params: dict[str, torch.Tensor]):

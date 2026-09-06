@@ -4,7 +4,6 @@ from typing import Any
 
 import torch
 
-
 from substrate.torchax_backend import enable_torchax, to_torchax_device
 
 _SUPPORTED_MODEL_TYPES = {"gpt2", "gpt_neox"}
@@ -20,7 +19,6 @@ def load_torchax_model(
     enable_torchax()
 
     from transformers import AutoConfig, AutoModelForCausalLM  # local import: heavy dep
-
 
     config = AutoConfig.from_pretrained(model_id, revision=revision)
     if config.model_type not in _SUPPORTED_MODEL_TYPES:
@@ -39,9 +37,9 @@ def load_torchax_model(
 
     return model, params
 
+
 def load_tokenizer(model_id: str) -> Any:
-    """Load the tokenizer for a given HF checkpoint.
-    """
+    """Load the tokenizer for a given HF checkpoint."""
     from transformers import AutoTokenizer  # local import: heavy dep
 
     return AutoTokenizer.from_pretrained(model_id)

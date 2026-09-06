@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 
-import pytest
 import torch
 import torchax
 from torch.func import functional_call
@@ -44,7 +43,7 @@ class TestFunctionalCallCorrectness:
 
         assert torch.allclose(ref_logits, jax_logits, atol=1e-4)
         diff = (ref_logits - jax_logits).abs()
-        
+
         assert float(diff.max()) < 1e-6
 
 
@@ -81,7 +80,7 @@ class TestHookSurvivesFunctionalCall:
 
         def hook(module, inp, output):
             calls.append(output.shape)
-            return output  
+            return output
 
         handle = model.transformer.h[1].register_forward_hook(hook)
         try:

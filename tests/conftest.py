@@ -14,8 +14,6 @@ import numpy as np
 import pytest
 import torch
 
-
-
 GPT2_CFG: dict[str, Any] = {
     "n_layer": 12,
     "n_head": 4,
@@ -69,9 +67,6 @@ def _config(family: str):
     from transformers import GPTNeoXConfig
 
     return GPTNeoXConfig(**NEOX_CFG)
-
-
-
 
 
 def torch_logits(model, ids):

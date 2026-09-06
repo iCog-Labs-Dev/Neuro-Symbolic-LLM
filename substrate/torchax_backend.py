@@ -18,8 +18,7 @@ _torchax_enabled = False
 
 
 def enable_torchax() -> None:
-    """Enable TorchAX's global op interception.
-    """
+    """Enable TorchAX's global op interception."""
     global _torchax_enabled
     if not _torchax_enabled:
         torchax.enable_globally()
@@ -43,8 +42,7 @@ def to_jax_array(value: Any) -> jax.Array:
 
 
 def from_jax_array(value: jax.Array) -> torch.Tensor:
-    """Convert a raw `jax.Array` into a `torchax.tensor.Tensor`.
-    """
+    """Convert a raw `jax.Array` into a `torchax.tensor.Tensor`."""
     enable_torchax()
     return interop.torch_view(value)
 

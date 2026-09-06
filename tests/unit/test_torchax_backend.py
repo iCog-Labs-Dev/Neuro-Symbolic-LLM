@@ -58,8 +58,6 @@ class TestDeviceManagement:
 
 
 class TestCallJaxDifferentiable:
-   
-
     def test_matches_pure_torch_ground_truth(self):
         torch.manual_seed(0)
         d = 5

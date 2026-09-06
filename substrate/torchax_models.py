@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from torch.func import functional_call
 
-from substrate.torchax_backend import enable_torchax, to_torchax_device 
+from substrate.torchax_backend import enable_torchax, to_torchax_device
 
 
 def functional_model(
@@ -13,8 +13,7 @@ def functional_model(
     params: dict[str, torch.Tensor],
     input_ids: torch.Tensor,
 ) -> Any:
-    """ This is a thin wrapper around `torch.func.functional_call`.
-    """
+    """This is a thin wrapper around `torch.func.functional_call`."""
     return functional_call(model, params, (input_ids,))
 
 
@@ -43,7 +42,6 @@ def check_numerical_fidelity(
     with torch.no_grad():
         ref_logits = model_plain(input_ids=ids).logits
 
-  
     model_jax = to_torchax_device(model_plain)
     params = dict(model_jax.named_parameters())
     for p in params.values():
@@ -60,4 +58,3 @@ def check_numerical_fidelity(
         "allclose": bool(torch.allclose(ref_logits, jax_logits, atol=atol)),
         "atol": atol,
     }
-

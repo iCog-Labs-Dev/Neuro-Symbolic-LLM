@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
-from substrate.substrate import Substrate
 from substrate.architecture import detect_architecture
+from substrate.substrate import Substrate
+
 
 class DummyModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.config = type('Config', (), {'n_layer': 1, 'n_embd': 32})
+        self.config = type("Config", (), {"n_layer": 1, "n_embd": 32})
+
 
 def _dummy_gpt2_params():
     return {
@@ -33,6 +35,7 @@ def _dummy_gpt2_params():
         "transformer.h.0.mlp.c_proj.bias": torch.zeros((32,)),
         "lm_head.weight": torch.zeros((64, 32)),
     }
+
 
 class TestUnsupportedArchitecture:
     def test_unknown_top_level_keys(self):
