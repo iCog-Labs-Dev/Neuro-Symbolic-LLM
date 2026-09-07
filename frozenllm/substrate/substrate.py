@@ -6,9 +6,9 @@ from typing import Any
 
 import torch
 
-from .architecture import detect_architecture
-from .torchax_backend import enable_torchax
-from .torchax_models import functional_model
+from frozenllm.substrate.architecture import detect_architecture
+from frozenllm.substrate.torchax_backend import enable_torchax
+from frozenllm.substrate.torchax_models import functional_model
 
 
 @dataclass(frozen=True)
