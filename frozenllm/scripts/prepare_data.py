@@ -12,7 +12,7 @@ Creates:
 Everything is regenerable; run this once while online, then the demo works
 fully offline:
 
-    python scripts/prepare_data.py
+    python frozenllm/scripts/prepare_data.py
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ from __future__ import annotations
 import urllib.request
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+FROZENLLM_DIR = Path(__file__).resolve().parent.parent
+REPO_ROOT = FROZENLLM_DIR.parent
+DATA_DIR = REPO_ROOT / "data"
 
 SHAKESPEARE_URL = (
     "https://raw.githubusercontent.com/karpathy/char-rnn/"
@@ -90,9 +92,13 @@ def main() -> None:
     save_tokenizer("gpt2", "tokenizer_gpt2")
     save_tokenizer("EleutherAI/pythia-70m", "tokenizer_pythia")
     print("\nAll data ready. Try:")
-    print("  python scripts/run_real_text_demo.py")
-    print("  python scripts/run_real_text_demo.py --model EleutherAI/pythia-70m")
-    print("  python scripts/run_real_text_demo.py --text data/wiki.txt --steer 2.0")
+    print("  python frozenllm/scripts/run_real_text_demo.py")
+    print(
+        "  python frozenllm/scripts/run_real_text_demo.py --model EleutherAI/pythia-70m"
+    )
+    print(
+        "  python frozenllm/scripts/run_real_text_demo.py --text data/wiki.txt --steer 2.0"
+    )
 
 
 if __name__ == "__main__":

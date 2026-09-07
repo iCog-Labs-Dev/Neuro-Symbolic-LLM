@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 import torch
-from substrate.architecture import detect_architecture
-from substrate.substrate import Substrate
+from frozenllm.substrate.architecture import detect_architecture
+from frozenllm.substrate.substrate import Substrate
 
 
 class DummyModel(torch.nn.Module):
