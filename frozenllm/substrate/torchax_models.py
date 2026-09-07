@@ -3,9 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from torch.func import functional_call
-
 from substrate.torchax_backend import enable_torchax, to_torchax_device
+from torch.func import functional_call
 
 
 def functional_model(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 from frozenllm.substrate.architecture import detect_architecture
 from frozenllm.substrate.substrate import Substrate
 

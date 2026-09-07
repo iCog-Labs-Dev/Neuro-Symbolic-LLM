@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-
 from substrate.torchax_backend import enable_torchax, to_torchax_device
 
 _SUPPORTED_MODEL_TYPES = {"gpt2", "gpt_neox"}

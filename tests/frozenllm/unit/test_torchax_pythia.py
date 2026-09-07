@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import torch
 import torchax
-from frozenllm.substrate.torchax_models import functional_model
 from torch.func import functional_call
 from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+
+from frozenllm.substrate.torchax_models import functional_model
 
 torchax.enable_globally()
 
