@@ -14,6 +14,10 @@ import numpy as np
 import pytest
 import torch
 
+# Workaround for torchax expecting sub-byte float dtypes missing in torch 2.6
+if not hasattr(torch, "float4_e2m1fn_x2"):
+    torch.float4_e2m1fn_x2 = object()
+
 GPT2_CFG: dict[str, Any] = {
     "n_layer": 12,
     "n_head": 4,
