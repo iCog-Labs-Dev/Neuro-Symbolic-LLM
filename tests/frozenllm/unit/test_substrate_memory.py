@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import jax
 import pytest
-from frozenllm.substrate.substrate import (
+from frozenllm.substrate.memory import (
     MemoryStatus,
     check_memory_headroom,
     compute_memory_headroom,
