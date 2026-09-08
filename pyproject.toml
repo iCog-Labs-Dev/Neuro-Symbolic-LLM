@@ -66,6 +66,7 @@ include = [
     "tier2_mork*",
     "parser*",
     "embedder*",
+    "frozenllm*",
     "tier3*",
     "tiers*",
     "symbolic_pipeline*",
@@ -110,6 +111,8 @@ known-first-party = [
     "nac",
     "tier2_mork",
     "parser",
+    "frozenllm",
+    "substrate",
     "embedder",
     "tier3",
     "tiers",
@@ -139,6 +142,7 @@ follow_imports = "skip"
 # ── Pytest ─────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "frozenllm"]
 asyncio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning",
