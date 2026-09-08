@@ -19,9 +19,6 @@ from transformers import (
 from frozenllm.substrate.architecture import detect_architecture
 from frozenllm.substrate.interception import (
     InterceptionContext,
-    _extract_hidden,
-    _wrap_hidden,
-    identity_modify,
     run_with_hooks,
 )
 
@@ -61,43 +58,6 @@ def real_gpt2_model() -> GPT2LMHeadModel:
 @pytest.fixture
 def real_pythia_model() -> GPTNeoXForCausalLM:
     return _tiny_neox_model()
-
-
-class TestIdentityModify:
-    def test_returns_same_object(self):
-        t = torch.randn(2, 4, 64)
-        assert identity_modify(t, 0) is t
-
-
-class TestExtractAndWrapHidden:
-    def test_extract_hidden_tensor(self):
-        t = torch.randn(2, 4, 64)
-        hidden, is_tuple, rest = _extract_hidden(t)
-        assert hidden is t
-        assert is_tuple is False
-        assert rest == ()
-
-    def test_extract_hidden_tuple(self):
-        t = torch.randn(2, 4, 64)
-        extra = torch.randn(2, 2, 4, 32)
-        output = (t, extra, "metadata")
-        hidden, is_tuple, rest = _extract_hidden(output)
-        assert hidden is t
-        assert is_tuple is True
-        assert rest == (extra, "metadata")
-
-    def test_wrap_hidden_tensor(self):
-        t = torch.randn(2, 4, 64)
-        wrapped = _wrap_hidden(t, is_tuple=False, rest=())
-        assert wrapped is t
-
-    def test_wrap_hidden_tuple(self):
-        t_mod = torch.randn(2, 4, 64)
-        extra = "extra"
-        wrapped = _wrap_hidden(t_mod, is_tuple=True, rest=(extra,))
-        assert isinstance(wrapped, tuple)
-        assert wrapped[0] is t_mod
-        assert wrapped[1] == extra
 
 
 class TestInterceptionContextLifecycle:

@@ -55,8 +55,11 @@ class TestGetMemoryStatus:
         status = get_memory_status()
         assert status.available is True
         assert status.platform == "gpu"
+        assert status.total_bytes is not None
         assert status.total_bytes > 0
+        assert status.available_bytes is not None
         assert status.available_bytes >= 0
+        assert status.allocated_bytes is not None
         assert status.allocated_bytes >= 0
 
     @_requires_gpu
