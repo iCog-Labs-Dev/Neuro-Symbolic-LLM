@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches:
+      - '**'        # Run on all branches
   pull_request:
     branches: [main]
 
@@ -54,23 +55,30 @@ jobs:
           ls -la
           echo "Checking for pyproject.toml:"
           if [ -f "pyproject.toml" ]; then
-            echo "✅ pyproject.toml found!"
+            echo "pyproject.toml found!"
             head -20 pyproject.toml
           else
-            echo "❌ pyproject.toml NOT FOUND!"
+            echo "pyproject.toml NOT FOUND!"
             exit 1
           fi
 
       - name: Install dependencies
-        run: pip install -e .[dev]
+        run: |
+          python -m pip install --upgrade pip
+          pip install "torch==2.6.0"
+          pip install -e .[dev]
+
 
       - name: Run unit tests (if they exist)
         run: |
-          if [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
+          if [ -d "tests/frozenllm/unit" ] && [ "$(ls -A tests/frozenllm/unit 2>/dev/null)" ]; then
+            pytest tests/frozenllm/unit/ -v --tb=short
+          elif [ -d "tests/unit" ] && [ "$(ls -A tests/unit 2>/dev/null)" ]; then
             pytest tests/unit/ -v --tb=short
           else
             echo "No unit tests found. Skipping."
           fi
+
 
       - name: Run grammar integration tests (if they exist)
         run: |
