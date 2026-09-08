@@ -1,4 +1,4 @@
-"""Tests for substrate.torchax_transformers"""
+"""Tests for substrate.torchax_models"""
 
 from __future__ import annotations
 

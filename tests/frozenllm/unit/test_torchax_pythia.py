@@ -1,4 +1,4 @@
-"""Tests for substrate.torchax_gpt2's Pythia/GPT-NeoX support -- run
+"""Tests for substrate.torchax_models's Pythia/GPT-NeoX support -- run
 entirely against a local random-init GPTNeoXConfig, no network needed.
 """
 

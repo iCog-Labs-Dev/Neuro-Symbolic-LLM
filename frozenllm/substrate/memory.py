@@ -23,6 +23,11 @@ class MemoryStatus:
     diagnostic: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def bytes_in_use(self) -> int | None:
+        """Convenience alias for allocated_bytes."""
+        return self.allocated_bytes
+
 
 def get_memory_status(device: jax.Device | None = None) -> MemoryStatus:
     """Query total/allocated/available device memory when supported.

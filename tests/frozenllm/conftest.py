@@ -14,9 +14,18 @@ import numpy as np
 import pytest
 import torch
 
-# Workaround for torchax expecting sub-byte float dtypes missing in torch 2.6
+# Compatibility patch for torchax versions expecting FP4 dtype
 if not hasattr(torch, "float4_e2m1fn_x2"):
-    torch.float4_e2m1fn_x2 = object()
+    torch.float4_e2m1fn_x2 = getattr(torch, "float8_e4m3fn", torch.uint8)
+
+from transformers import (
+    GPT2Config,
+    GPT2LMHeadModel,
+    GPTNeoXConfig,
+    GPTNeoXForCausalLM,
+)
+
+from frozenllm.substrate import FrozenSubstrate
 
 GPT2_CFG: dict[str, Any] = {
     "n_layer": 12,
@@ -55,27 +64,44 @@ def _torch_model(family: str, seed: int = 0):
     torch.manual_seed(seed)
     np.random.seed(seed)
     if family == "gpt2":
-        from transformers import GPT2Config, GPT2LMHeadModel
-
         return GPT2LMHeadModel(GPT2Config(**GPT2_CFG))
-    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
-
     return GPTNeoXForCausalLM(GPTNeoXConfig(**NEOX_CFG))
 
 
 def _config(family: str):
     if family == "gpt2":
-        from transformers import GPT2Config
-
         return GPT2Config(**GPT2_CFG)
-    from transformers import GPTNeoXConfig
-
     return GPTNeoXConfig(**NEOX_CFG)
+
+
+def make_substrate(family: str, intercept_layers=None, modify_hook=None, seed: int = 0):
+    """Build the torch reference model plus a FrozenSubstrate wrapper using TorchAX."""
+    model = _torch_model(family, seed=seed)
+    model.eval()
+    substrate = FrozenSubstrate(
+        model,
+        config=_config(family),
+        intercept_layers=intercept_layers,
+        modify_hook=modify_hook,
+    )
+    return model, substrate
 
 
 def torch_logits(model, ids):
     with torch.no_grad():
-        return model(ids).logits.numpy()
+        param = next(model.parameters(), None)
+        if (
+            param is not None
+            and isinstance(ids, torch.Tensor)
+            and ids.device != param.device
+        ):
+            ids = ids.to(param.device)
+        elif param is not None and not isinstance(ids, torch.Tensor):
+            ids = torch.as_tensor(ids, device=param.device)
+        out = model(ids).logits
+        if hasattr(out, "cpu"):
+            out = out.cpu()
+        return np.asarray(out)
 
 
 def make_input_ids():
