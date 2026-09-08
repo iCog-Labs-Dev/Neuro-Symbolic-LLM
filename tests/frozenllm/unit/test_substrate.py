@@ -113,16 +113,6 @@ class TestFrozenSubstrateInit:
         with pytest.raises(ValueError, match=f"only {n_layers} transformer layers"):
             FrozenSubstrate(model, intercept_layers=[n_layers])
 
-    def test_unknown_top_level_keys_rejected(self):
-        class DummyModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.config = type("Config", (), {"n_layer": 1, "n_embd": 32})
-
-        params = {"bert.embeddings.weight": torch.zeros((1, 1))}
-        with pytest.raises(ValueError, match="Unsupported model architecture"):
-            FrozenSubstrate(DummyModel(), params)
-
     def test_detect_architecture_raises_on_invalid_keys(self):
         with pytest.raises(ValueError, match="Unsupported model architecture"):
             detect_architecture({"nonsense": torch.zeros((1,))})
