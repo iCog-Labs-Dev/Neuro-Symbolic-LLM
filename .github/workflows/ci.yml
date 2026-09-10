@@ -35,7 +35,7 @@ jobs:
 
       - name: Run all pre-commit hooks
         env:
-          SKIP: no-commit-to-branch
+          SKIP: no-commit-to-branch   # Skip branch protection in CI
         run: pre-commit run --all-files
 
   # Unit tests
@@ -73,8 +73,7 @@ jobs:
           fi
 
       - name: Install dependencies
-        run: |
-          pip install -v -e .[dev]
+        run: pip install -e .[dev]
 
       - name: Run unit tests
         run: |
