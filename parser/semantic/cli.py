@@ -12,10 +12,14 @@ from parser.semantic.dataset import (
     SemanticDatasetBuilder,
     split_pairs,
     structured_to_pairs,
+    validate_student_pair,
     verify_split_overlap,
     write_pairs_jsonl,
 )
+from parser.semantic.metta_renderer import render_metta, validate_rendered_metta
 from parser.semantic.model_config import build_reference_semantic_parser
+from parser.semantic.normalization import normalize_semantic_result
+from parser.semantic.schema import SemanticParseResult
 from parser.semantic.semantic_parser import (
     DistilledSemanticParser,
     ModelGenerationError,
@@ -376,13 +380,74 @@ def _run_train_student(arguments: argparse.Namespace) -> None:
     )
 
 
+def _checkpoint_error(model_dir: Path) -> str | None:
+    """Check local checkpoint files without loading model weights into memory."""
+    if not model_dir.is_dir():
+        return "model directory is missing or is not a directory"
+
+    try:
+        from transformers import AutoConfig, AutoTokenizer
+
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+        if not isinstance(config, dict) or not config:
+            return "config.json must contain a model configuration object"
+        AutoConfig.from_pretrained(
+            str(model_dir), local_files_only=True, trust_remote_code=False
+        )
+        AutoTokenizer.from_pretrained(
+            str(model_dir), local_files_only=True, trust_remote_code=False
+        )
+
+        # Match the loader's preference for safetensors over PyTorch weights.
+        for name in (
+            "model.safetensors",
+            "model.safetensors.index.json",
+            "pytorch_model.bin",
+            "pytorch_model.bin.index.json",
+        ):
+            candidate = model_dir / name
+            if not candidate.exists():
+                continue
+            if name.endswith(".index.json"):
+                index = json.loads(candidate.read_text(encoding="utf-8"))
+                weight_map = (
+                    index.get("weight_map") if isinstance(index, dict) else None
+                )
+                if not isinstance(weight_map, dict) or not weight_map:
+                    return f"{name} has no valid weight map"
+                shards = list(weight_map.values())
+                if any(not isinstance(shard, str) or not shard for shard in shards):
+                    return f"{name} contains invalid shard names"
+                files = [model_dir / shard for shard in set(shards)]
+            else:
+                files = [candidate]
+            for path in files:
+                if not path.is_file():
+                    return f"missing weight file: {path.name}"
+                with path.open("rb") as file:
+                    if not file.read(1):
+                        return f"empty weight file: {path.name}"
+            return None
+    except Exception as error:
+        # Configuration/tokenizer deserializers can raise library-specific errors.
+        return f"unreadable checkpoint: {error}"
+    return "no model weights or weight index found"
+
+
+def _require_checkpoint(model_dir: Path) -> None:
+    error = _checkpoint_error(model_dir)
+    if error is not None:
+        raise ValueError(
+            f"A complete model checkpoint is required at {model_dir}: {error}"
+        )
+
+
 def _run_distill(arguments: argparse.Namespace) -> None:
     """Parse using the distilled (student) model."""
     model_dir: Path = arguments.model_dir
     sentence: str = arguments.sentence
 
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model not found: {model_dir}")
+    _require_checkpoint(model_dir)
 
     # Use the new DistilledSemanticParser
     distilled_parser = DistilledSemanticParser.from_pretrained(str(model_dir))
@@ -442,6 +507,8 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
     method: str = arguments.method
     force: bool = arguments.force
     skip_training: bool = arguments.skip_training
+    if skip_training:
+        _require_checkpoint(output_dir)
 
     # ── Get sentences ─────────────────────────────────────────────────────────
 
@@ -503,6 +570,28 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
         and test_file.exists()
         and not pairs_regenerated
     ):
+        cached_splits = []
+        for path in (train_file, val_file, test_file):
+            records = []
+            with path.open(encoding="utf-8") as file:
+                for line_number, line in enumerate(file, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        pair = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        raise ValueError(
+                            f"Invalid JSON at {path}:{line_number}"
+                        ) from error
+                    try:
+                        validate_student_pair(pair)
+                    except ValueError as error:
+                        raise ValueError(
+                            f"Invalid pair at {path}:{line_number}: {error}"
+                        ) from error
+                    records.append(pair)
+            cached_splits.append(records)
+        verify_split_overlap(*cached_splits)
         print("  Using existing dataset splits")
         print(f"  Train:      {train_file}")
         print(f"  Validation: {val_file}")
@@ -553,11 +642,14 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
 
     print("\nStep 4: Train student model")
     model_dir = output_dir
+    checkpoint_error = _checkpoint_error(model_dir)
     if skip_training:
         print("  Skipping training (--skip-training)")
-    elif model_dir.exists() and not force:
+    elif checkpoint_error is None and not force:
         print(f"  Using existing model: {model_dir}")
     else:
+        if checkpoint_error is not None:
+            print(f"  Training required: {checkpoint_error}")
         from parser.student.train import train
 
         train(
@@ -570,16 +662,35 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
     # ── Step 5: Run inference ──────────────────────────────────────────────
 
     print("\nStep 5: Inference with distilled parser")
+    expected = None
     if arguments.test_sentence:
         test_sentences = [arguments.test_sentence]
+        print("  Syntax check only: no expected label supplied")
     else:
+        test_sentences, expected = [], []
         with test_file.open(encoding="utf-8") as file:
-            test_sentences = [
-                json.loads(line)["input"] for line in file if line.strip()
-            ]
+            for line_number, line in enumerate(file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    pair = json.loads(line)
+                    validate_student_pair(pair)
+                    target = normalize_semantic_result(
+                        SemanticParseResult.model_validate_json(pair["label"])
+                    )
+                    target = ReferenceSemanticParser.validate_predicates(target)
+                    target = ReferenceSemanticParser.validate_arguments(target)
+                    atoms = validate_rendered_metta(render_metta(target))
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid test label at {test_file}:{line_number}: {error}"
+                    ) from error
+                test_sentences.append(pair["input"])
+                expected.append(sorted(str(atom) for atom in atoms))
+    if not test_sentences:
+        raise ValueError("No test examples available for evaluation")
 
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model not found: {model_dir}")
+    _require_checkpoint(model_dir)
 
     # Use the new DistilledSemanticParser
     distilled_parser = DistilledSemanticParser.from_pretrained(str(model_dir))
@@ -589,12 +700,17 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
     print()
 
     valid_count = 0
-    for sentence in test_sentences:
+    correct_count = 0
+    for index, sentence in enumerate(test_sentences):
         try:
             atoms = distilled_parser.parse(sentence)
             metta = " ".join(str(atom) for atom in atoms)
             status = "OK"
             valid_count += 1
+            if expected is not None:
+                matches = sorted(str(atom) for atom in atoms) == expected[index]
+                correct_count += int(matches)
+                status = "MATCH" if matches else "MISMATCH"
         except Exception as e:
             metta = f"Error: {e}"
             status = "FAIL"
@@ -602,6 +718,13 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
         print(f"  [{status}] '{sentence[:40]:40s}' -> {metta}")
 
     print(f"\nResults: {valid_count}/{len(test_sentences)} valid")
+    if expected is not None:
+        print(
+            f"Exact relation match: {correct_count}/{len(test_sentences)} "
+            f"({correct_count / len(test_sentences):.1%})"
+        )
+    if valid_count < len(test_sentences):
+        raise ValueError("Evaluation had prediction failures; see results above")
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETE!")
