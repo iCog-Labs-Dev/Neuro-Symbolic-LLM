@@ -498,10 +498,28 @@ class DistilledSemanticParser(_BaseSemanticParser):
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "right"
 
+        # Preserve checkpoint precision only on BF16-capable CUDA devices.
+        # An explicit CPU/MPS request must not depend on a GPU also being present.
+        supports_bf16 = False
+        if torch.cuda.is_available() and (
+            device == "auto" or device.startswith("cuda")
+        ):
+            devices = (
+                list(range(torch.cuda.device_count()))
+                if device == "auto"
+                else [torch.device(device).index]
+            )
+            supports_bf16 = bool(devices)
+            for index in devices:
+                with torch.cuda.device(index):
+                    supports_bf16 = supports_bf16 and torch.cuda.is_bf16_supported()
+        if not supports_bf16:
+            print("Using float32 for distilled inference on the requested device")
+
         # Load model from disk
         self.model = AutoModelForCausalLM.from_pretrained(
             str(self.model_dir),
-            torch_dtype=torch.bfloat16,
+            torch_dtype="auto" if supports_bf16 else torch.float32,
             device_map=device,
         )
         self.model.eval()

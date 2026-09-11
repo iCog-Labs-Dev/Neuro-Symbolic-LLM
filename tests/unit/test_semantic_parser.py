@@ -302,3 +302,52 @@ class TestDistilledSemanticParser:
         parser, _, _ = student
         atoms = parser.parse("A dog has fur.", aliases={"dog": "Rex"})
         assert str(atoms[0]) == "(Has Rex fur)"
+
+
+@pytest.mark.parametrize(
+    "device, capabilities, expected",
+    [
+        ("auto", [], torch.float32),
+        ("auto", [True], "auto"),
+        ("auto", [True, False], torch.float32),
+        ("cpu", [True], torch.float32),
+        ("mps", [True], torch.float32),
+        ("cuda", [True], "auto"),
+        ("cuda:1", [True, False], torch.float32),
+        ("cuda:1", [False, True], "auto"),
+    ],
+)
+def test_distilled_precision_respects_requested_device(
+    monkeypatch, tmp_path, device, capabilities, expected
+):
+    from contextlib import contextmanager
+
+    current = [0]
+
+    @contextmanager
+    def cuda_device(index):
+        previous = current[0]
+        current[0] = previous if index is None else index
+        try:
+            yield
+        finally:
+            current[0] = previous
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: bool(capabilities))
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: len(capabilities))
+    monkeypatch.setattr(torch.cuda, "device", cuda_device)
+    monkeypatch.setattr(
+        torch.cuda, "is_bf16_supported", lambda: capabilities[current[0]]
+    )
+    tokenizer = MagicMock()
+    loader = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        "parser.semantic.semantic_parser.AutoTokenizer.from_pretrained",
+        lambda _: tokenizer,
+    )
+    monkeypatch.setattr(
+        "parser.semantic.semantic_parser.AutoModelForCausalLM.from_pretrained", loader
+    )
+    DistilledSemanticParser.from_pretrained(str(tmp_path), device=device)
+    assert loader.call_args.kwargs["torch_dtype"] == expected
+    assert loader.call_args.kwargs["device_map"] == device
