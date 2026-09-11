@@ -1,0 +1,20 @@
+stage: "Stage A4"
+name: "pc_residual_basic_symbolic_head"
+
+model:
+  d_model: 4096
+  k_dim: 256
+  top_m: 8
+  temperature: 0.1
+
+optimization:
+  lr_sym: 0.0001
+  lambda_key: 1.0
+  lambda_value: 1.0
+  batch_size: 16
+  num_epochs: 5
+
+dataset:
+  name: "tiny_shakespeare"
+  val_split: 0.1
+  num_templates_seeded: 10000

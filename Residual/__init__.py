@@ -1,0 +1,1 @@
+"""Residual components for the frozen-LLM neuro-symbolic architecture."""

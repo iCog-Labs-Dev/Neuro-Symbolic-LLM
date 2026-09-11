@@ -19,15 +19,19 @@ dependencies = [
 
     # Frozen base model (PyTorch, hidden state extraction only)
     "torch>=2.2.0",
-    "transformers>=4.40.0",
-    "datasets>=2.19.0",
+    "transformers>=5.0.0",
+    "accelerate>=0.25.0",
+    "peft>=0.10.0",
+    "datasets>=2.14.0",
+    "sentencepiece>=0.1.99",
+    "protobuf>=3.20.0",
 
     # MORK service
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "httpx>=0.27.0",
     "pydantic>=2.6.0",
-    "hnswlib>=0.8.0",
+    "faiss-cpu>=1.7.0",
 
     # Tier 3 queue
     "redis>=5.0.0",
@@ -35,6 +39,7 @@ dependencies = [
     # Symbolic pipeline
     "numpy>=1.26",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
     "tqdm>=4.66.0",
     "wandb>=0.17.0",
 ]
@@ -46,6 +51,10 @@ gpu = [
 hyperon = [
     "hyperon>=0.2.0",
 ]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.25"]
+gemini = ["google-genai>=2.0.0"]
+ollama = ["ollama>=0.4"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -57,17 +66,18 @@ dev = [
     "types-redis",
 ]
 
+[project.scripts]
+semantic-parser = "parser.semantic.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "fabricpc_ext*",
     "nac*",
-    "tier2_mork*",
     "parser*",
     "embedder*",
     "tier3*",
     "tiers*",
-    "symbolic_pipeline*",
+    "Residual*",
 ]
 
 # ── Black ──────────────────────────────────────────────────────────────────
@@ -103,14 +113,12 @@ ignore = [
 [tool.ruff.lint.isort]
 # tells ruff which packages are "yours" so imports are sorted into the right group
 known-first-party = [
-    "fabricpc_ext",
     "nac",
-    "tier2_mork",
     "parser",
     "embedder",
     "tier3",
     "tiers",
-    "symbolic_pipeline",
+    "Residual",
 ]
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
@@ -127,6 +135,7 @@ ignore_missing_imports = true   # JAX and FabricPC stubs are incomplete
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning:jax",
@@ -134,3 +143,7 @@ filterwarnings = [
 # Run all tests: pytest
 # Run only unit tests: pytest tests/unit/
 # Run with output: pytest -v -s
+
+[[tool.mypy.overrides]]
+module = "parser.semantic.semantic_parser"
+disable_error_code = ["no-any-return"]

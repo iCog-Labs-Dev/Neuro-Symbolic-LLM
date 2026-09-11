@@ -1,0 +1,26 @@
+tier1_gpu:
+  framework: "JAX/Flax"
+  precision: "bf16"
+  batch_size: 16
+  seq_len: 512
+  model_scale: "117M"
+  attached_layers: [20, 24, 28, 31] # Late layers carrying symbolic heads
+
+tier2_cpu:
+  host: "localhost"
+  port: 8000
+  dim: 256
+  space: "cosine"
+  max_capacity: 100000
+  hnsw:
+    M: 16
+    ef_construction: 200
+    ef_query: 50
+  top_m: 8
+
+tier3_async:
+  queue_backend: "redis"
+  queue_name: "high_surprise_contexts"
+  surprise_threshold: 1.5
+  mork_confidence_threshold: 0.4
+  distilled_parser_model: "1B"

@@ -1,0 +1,36 @@
+services:
+  mork-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mork-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - MORK_SERVER_ADDR=0.0.0.0
+      - MORK_SERVER_PORT=8000
+      - RUST_LOG=info
+    volumes:
+      - ./data/mork_data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ | grep -Eq '^(200|404)$'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  redis-queue:
+    image: redis:7-alpine
+    container_name: redis-queue
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
