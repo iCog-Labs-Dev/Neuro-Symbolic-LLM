@@ -143,6 +143,17 @@ class SemanticDatasetBuilder:
 # ── Student Dataset for training ─────────────────────────────────────────────
 
 
+def validate_student_pair(pair: Any) -> None:
+    """Reject malformed input/label records before tokenization or splitting."""
+    if not isinstance(pair, dict) or any(
+        not isinstance(pair.get(key), str) or not pair[key].strip()
+        for key in ("input", "label")
+    ):
+        raise ValueError("input and label must be nonempty strings")
+    if not isinstance(json.loads(pair["label"]), dict):
+        raise ValueError("label must contain a JSON object")
+
+
 class StudentDataset(Dataset):
     """Prepares (input, json_label) pairs for student model training."""
 
@@ -156,19 +167,13 @@ class StudentDataset(Dataset):
         skipped = 0
 
         for pair in pairs:
+            try:
+                validate_student_pair(pair)
+            except ValueError:
+                skipped += 1
+                continue
             text = pair.get("input", "").strip()
             json_label = pair.get("label", "").strip()
-
-            if not text or not json_label:
-                skipped += 1
-                continue
-
-            # Validate JSON label
-            try:
-                json.loads(json_label)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
 
             prompt_text = build_student_prompt(text)
             # Encode the boundary separately: prompt tokens must match inference,
@@ -234,6 +239,11 @@ def structured_to_pairs(
     include_confidence: bool = False,
 ) -> list[dict]:
     """Convert teacher structured output to (input, json_label) pairs."""
+    source, destination = Path(input_file), Path(output_file)
+    if source.resolve() == destination.resolve() or (
+        destination.exists() and source.samefile(destination)
+    ):
+        raise ValueError("Input and output paths must differ")
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
 
     pairs = []
@@ -257,7 +267,10 @@ def structured_to_pairs(
                 skipped += 1
                 continue
 
-            text = record.get("text", "").strip()
+            if not isinstance(record, dict) or not isinstance(record.get("text"), str):
+                skipped += 1
+                continue
+            text = record["text"].strip()
             if not text:
                 skipped += 1
                 continue

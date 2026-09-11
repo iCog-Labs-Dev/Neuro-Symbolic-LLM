@@ -45,3 +45,18 @@ def test_oversized_target_is_rejected_instead_of_truncated():
     dataset = StudentDataset([pair], tokenizer, max_length=length - 1)
     assert len(dataset) == 0
     assert dataset.oversized == 1
+
+
+def test_malformed_record_shapes_are_skipped(capsys):
+    pairs = [
+        None,
+        [],
+        42,
+        {"input": None, "label": "{}"},
+        {"input": "Dog", "label": None},
+        {"input": "Dog", "label": "null"},
+        {"input": "Dog", "label": "{}"},
+    ]
+    dataset = StudentDataset(pairs, CharacterTokenizer(), max_length=512)
+    assert len(dataset) == 1
+    assert "Skipped 6 invalid examples" in capsys.readouterr().out

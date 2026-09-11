@@ -212,3 +212,47 @@ def test_split_rejects_malformed_pairs(pair):
 
 def test_split_empty_input():
     assert split_pairs([]) == ([], [], [])
+
+
+@pytest.mark.parametrize("alias", ["same", "symlink", "hardlink"])
+def test_conversion_preserves_source_when_output_aliases_it(tmp_path, alias):
+    from parser.semantic.dataset import structured_to_pairs
+
+    source = tmp_path / "source.jsonl"
+    source.write_text('{"text": "Dog"}\n', encoding="utf-8")
+    output = source if alias == "same" else tmp_path / "output.jsonl"
+    if alias == "symlink":
+        output.symlink_to(source)
+    elif alias == "hardlink":
+        output.hardlink_to(source)
+    original = source.read_bytes()
+    with pytest.raises(ValueError, match="paths must differ"):
+        structured_to_pairs(str(source), str(output))
+    assert source.read_bytes() == original
+
+
+def test_conversion_skips_malformed_shapes_and_keeps_valid_record(tmp_path):
+    from parser.semantic.dataset import structured_to_pairs
+
+    source, output = tmp_path / "source.jsonl", tmp_path / "output.jsonl"
+    target = {
+        "assertions": [
+            assertion(
+                predicate="Has", values=("dog", "fur"), roles=("owner", "possessed")
+            )
+        ]
+    }
+    records = [
+        None,
+        [],
+        42,
+        {"text": None},
+        {"text": []},
+        {"text": "Dog", "target": target},
+    ]
+    source.write_text(
+        "\n".join(json.dumps(record) for record in records), encoding="utf-8"
+    )
+    pairs = structured_to_pairs(str(source), str(output))
+    assert len(pairs) == 1
+    assert pairs[0]["input"] == "Dog"
