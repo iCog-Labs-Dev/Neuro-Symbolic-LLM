@@ -12,13 +12,13 @@ import numpy as np
 import pytest
 
 from residual.symbolic_head.head import SymbolicHead
-from tier2_mork.retrieval_bridge import Tier2Retrieve
-from tier2_mork.client import (
+from residual.symbolic_head.retrieval_bridge import Tier2Retrieve
+from residual.symbolic_head.mork_client import (
     DockerMorkClient,
     get_mork_client,
     template_record_sexpr,
 )
-from tier2_mork.communication import decode_query
+from residual.symbolic_head.communication import decode_query
 
 
 def test_template_record_sexpr_contains_key_and_val():

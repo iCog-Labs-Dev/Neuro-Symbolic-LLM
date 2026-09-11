@@ -36,6 +36,16 @@ class MorkQueryResult:
     scores: np.ndarray
 
 
+@dataclass(frozen=True)
+class TemplateRecord:
+    """Authoritative template data used to rebuild a local retrieval index."""
+
+    template_id: str
+    metta_expr: str
+    key_vector: np.ndarray
+    val_vector: np.ndarray
+
+
 class MorkClient(ABC):
     """Interface for registering templates and retrieving top-m key/value pairs."""
 
@@ -65,20 +75,59 @@ class _LocalFAISSIndex:
     and must not be used outside of DockerMorkClient.
     """
 
-    def __init__(self, key_dim: int = 256) -> None:
+    def __init__(
+        self,
+        key_dim: int = 256,
+        backend: str = "flat",
+        hnsw_m: int = 16,
+        hnsw_ef_construction: int = 200,
+        hnsw_ef_search: int = 50,
+    ) -> None:
         self.key_dim = key_dim
+        if backend not in {"flat", "hnsw"}:
+            raise ValueError("backend must be 'flat' or 'hnsw'")
         self.key_store: list[np.ndarray] = []
         self.val_store: list[np.ndarray] = []
         self.id_store: list[str] = []
         self.metta_store: list[str] = []
         self._lock = threading.Lock()
         self._faiss_index = None
+        self._backend = backend
+        self._hnsw_ef_search = hnsw_ef_search
         if faiss is not None:
-            self._faiss_index = faiss.IndexFlatIP(key_dim)
+            if backend == "hnsw":
+                self._faiss_index = faiss.IndexHNSWFlat(
+                    key_dim, hnsw_m, faiss.METRIC_INNER_PRODUCT
+                )
+                self._faiss_index.hnsw.efConstruction = hnsw_ef_construction
+                self._faiss_index.hnsw.efSearch = hnsw_ef_search
+            else:
+                self._faiss_index = faiss.IndexFlatIP(key_dim)
 
     @property
     def index_backend(self) -> str:
-        return "faiss" if self._faiss_index is not None else "numpy"
+        if self._faiss_index is None:
+            return "numpy"
+        return self._backend
+
+    def clear(self) -> None:
+        with self._lock:
+            self.key_store.clear()
+            self.val_store.clear()
+            self.id_store.clear()
+            self.metta_store.clear()
+            if self._faiss_index is not None:
+                self._faiss_index.reset()
+
+    def rebuild(self, records: list[TemplateRecord]) -> None:
+        self.clear()
+        for record in records:
+            self.add_template(
+                record.template_id,
+                record.metta_expr,
+                record.key_vector,
+                record.val_vector,
+            )
 
     def add_template(
         self,
@@ -200,6 +249,100 @@ def template_record_sexpr(
     )
 
 
+def _split_top_level_expressions(text: str) -> list[str]:
+    expressions: list[str] = []
+    depth = 0
+    start = None
+    for index, char in enumerate(text):
+        if char == "(":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("MORK export contains an unmatched closing parenthesis")
+            if depth == 0 and start is not None:
+                expressions.append(text[start : index + 1])
+                start = None
+    if depth != 0:
+        raise ValueError("MORK export contains an unclosed expression")
+    return expressions
+
+
+def _parse_sexpr(expression: str) -> list[object]:
+    tokens = expression.replace("(", " ( ").replace(")", " ) ").split()
+    position = 0
+
+    def parse_list() -> list[object]:
+        nonlocal position
+        if position >= len(tokens) or tokens[position] != "(":
+            raise ValueError("Expected an opening parenthesis")
+        position += 1
+        values: list[object] = []
+        while position < len(tokens) and tokens[position] != ")":
+            if tokens[position] == "(":
+                values.append(parse_list())
+            else:
+                values.append(tokens[position])
+                position += 1
+        if position >= len(tokens):
+            raise ValueError("Unclosed S-expression")
+        position += 1
+        return values
+
+    parsed = parse_list()
+    if position != len(tokens):
+        raise ValueError("Unexpected tokens after S-expression")
+    return parsed
+
+
+def _flatten_vector(node: object) -> np.ndarray:
+    if not isinstance(node, list) or not node or node[0] not in {"key", "val"}:
+        raise ValueError("Expected a key or val vector")
+    values: list[float] = []
+    for item in node[1:]:
+        if isinstance(item, list):
+            if not item or item[0] != "chunk":
+                raise ValueError("Unexpected vector group in MORK record")
+            values.extend(float(value) for value in item[1:])
+        else:
+            values.append(float(item))
+    return np.asarray(values, dtype=np.float32)
+
+
+def _render_sexpr(node: object) -> str:
+    if isinstance(node, list):
+        return "(" + " ".join(_render_sexpr(item) for item in node) + ")"
+    return str(node)
+
+
+def _parse_export_records(text: str, key_dim: int) -> list[TemplateRecord]:
+    records: list[TemplateRecord] = []
+    for expression in _split_top_level_expressions(text):
+        parsed = _parse_sexpr(expression)
+        if len(parsed) != 5 or parsed[0] != "record":
+            continue
+        template_id, metta_expr = parsed[1], _render_sexpr(parsed[2])
+        if not isinstance(template_id, str):
+            raise ValueError("MORK record id must be a symbol")
+        key_vector = _flatten_vector(parsed[3])
+        val_vector = _flatten_vector(parsed[4])
+        if key_vector.shape != (key_dim,) or val_vector.shape != (key_dim,):
+            raise ValueError(
+                f"MORK record {template_id!r} has invalid vector dimensions"
+            )
+        records.append(
+            TemplateRecord(
+                template_id=template_id,
+                metta_expr=metta_expr,
+                key_vector=key_vector,
+                val_vector=val_vector,
+            )
+        )
+    return records
+
+
 class DockerMorkClient(MorkClient):
     """Upload Atomese records to MORK and keep a local FAISS key index."""
 
@@ -208,11 +351,22 @@ class DockerMorkClient(MorkClient):
         server_url: str = DEFAULT_MORK_SERVER_URL,
         key_dim: int = 256,
         timeout_sec: float = 10.0,
+        index_backend: str | None = None,
+        hnsw_m: int = 16,
+        hnsw_ef_construction: int = 200,
+        hnsw_ef_search: int = 50,
     ) -> None:
         super().__init__(key_dim=key_dim)
         self.server_url = server_url.rstrip("/")
         self.timeout_sec = timeout_sec
-        self.vector_index = _LocalFAISSIndex(key_dim=key_dim)
+        selected_backend = index_backend or os.getenv("MORK_INDEX_BACKEND", "flat")
+        self.vector_index = _LocalFAISSIndex(
+            key_dim=key_dim,
+            backend=selected_backend,
+            hnsw_m=hnsw_m,
+            hnsw_ef_construction=hnsw_ef_construction,
+            hnsw_ef_search=hnsw_ef_search,
+        )
         self._mork_checked = False
 
     @property
@@ -269,6 +423,37 @@ class DockerMorkClient(MorkClient):
             raise ConnectionError(
                 f"MORK upload HTTP {resp.status_code} at {self._upload_url()}."
             )
+
+    def _export_url(self) -> str:
+        pattern = quote(SEXPR_PATTERN, safe="")
+        template = quote(SEXPR_TEMPLATE, safe="")
+        return f"{self.server_url}/export/{pattern}/{template}/"
+
+    def _export_records(self) -> list[TemplateRecord]:
+        if httpx is None:
+            raise ConnectionError(f"httpx required to export from {self.server_url}.")
+        try:
+            response = httpx.get(
+                self._export_url(),
+                params={"max_write": "0"},
+                timeout=self.timeout_sec,
+            )
+        except Exception as err:
+            raise ConnectionError(
+                f"MORK export failed at {self.server_url}: {err}"
+            ) from err
+        if response.status_code >= 400:
+            raise ConnectionError(
+                f"MORK export HTTP {response.status_code} at {self._export_url()}."
+            )
+        return _parse_export_records(response.text, self.key_dim)
+
+    def rebuild_vector_index_from_mork(self) -> int:
+        """Rebuild the derived local index from the current MORK export."""
+        self._require_mork("rebuild_vector_index_from_mork")
+        records = self._export_records()
+        self.vector_index.rebuild(records)
+        return len(records)
 
     def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
         self._require_mork("query_top_k")

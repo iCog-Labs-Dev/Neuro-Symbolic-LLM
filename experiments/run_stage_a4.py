@@ -10,7 +10,7 @@ import numpy as np
 
 from residual.symbolic_head.head import SymbolicHead
 from residual.symbolic_head.losses import combined_symbolic_loss
-from tier2_mork.client import get_mork_client
+from residual.symbolic_head.mork_client import get_mork_client
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
