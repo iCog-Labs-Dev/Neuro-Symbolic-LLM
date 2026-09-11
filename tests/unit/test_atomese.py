@@ -42,7 +42,7 @@ structural_predicates:
 
     with pytest.raises(
         ValueError,
-        match="Predicates cannot be both semantic and structural: Not",
+        match="Predicate names must be unique across sections: Not",
     ):
         atomese._load_atomese_predicates()
 
@@ -339,3 +339,38 @@ class TestCanonical:
     def test_malformed_returns_stripped(self):
         result = canonical("not valid metta")
         assert result.strip() == "not valid metta"
+
+
+@pytest.mark.parametrize("section", ["predicates", "structural_predicates"])
+def test_rejects_operator_name_collision(tmp_path, monkeypatch, section):
+    import json
+
+    schema = {
+        "predicates": {},
+        "structural_predicates": {},
+        "operators": {"Has": {"arity": 1}},
+    }
+    schema[section] = {"Has": {"arity": 2}}
+    path = tmp_path / "schema.yaml"
+    path.write_text(json.dumps(schema), encoding="utf-8")
+    monkeypatch.setattr(atomese, "_PREDICATE_SCHEMA_PATH", path)
+    with pytest.raises(ValueError, match="unique across sections: Has"):
+        atomese._load_atomese_predicates()
+
+
+def test_distinct_operator_names_preserve_predicate_arities(tmp_path, monkeypatch):
+    path = tmp_path / "schema.yaml"
+    path.write_text(
+        """predicates:
+  Has: {arity: 2}
+structural_predicates:
+  Not: {arity: 1}
+operators:
+  And: {variable_arity: true, min_arity: 2}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(atomese, "_PREDICATE_SCHEMA_PATH", path)
+    fixed, variable = atomese._load_atomese_predicates()
+    assert fixed == {"Has": 2, "Not": 1}
+    assert variable == {"And": (2, None)}
