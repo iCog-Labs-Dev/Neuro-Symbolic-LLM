@@ -10,19 +10,21 @@ HOW TO RUN:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
+import math
 from pathlib import Path
 
 import torch
 import yaml
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, get_scheduler
 
 from parser.grammar.atomese import validate_metta_string
 from parser.semantic.dataset import (
     StudentBatchCollator,
     StudentDataset,
+    split_pairs,
+    validate_student_pair,
     verify_split_overlap,
 )
 from parser.semantic.metta_renderer import render_metta
@@ -47,11 +49,17 @@ def load_pairs(train_file: str) -> list[dict]:
 
     pairs = []
     with open(train_path) as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if line:
-                with contextlib.suppress(json.JSONDecodeError):
-                    pairs.append(json.loads(line))
+                try:
+                    pair = json.loads(line)
+                    validate_student_pair(pair)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Invalid pair at {train_path}:{line_number}: {error}"
+                    ) from error
+                pairs.append(pair)
     print(f"  Loaded {len(pairs)} pairs from {train_file}")
     return pairs
 
@@ -128,15 +136,23 @@ def evaluate(
 
     print("\n" + "=" * 70)
     print("EVALUATING STUDENT MODEL")
+    print(
+        "Syntax checks only: no expected labels supplied; semantic accuracy is not measured."
+    )
     print("=" * 70)
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Preserve the saved precision on BF16-capable CUDA devices. Use float32
+    # elsewhere so a BF16 checkpoint does not force unsupported operations.
+    supports_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    if not supports_bf16:
+        print("  Using float32 for evaluation: BF16-capable CUDA is unavailable")
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        torch_dtype=torch.bfloat16,
+        torch_dtype="auto" if supports_bf16 else torch.float32,
         device_map="auto",
     )
     model.eval()
@@ -215,6 +231,20 @@ def train(
     train_cfg = config["training"]
     lora_cfg = config.get("lora", {})
 
+    accumulation_steps = train_cfg.get("gradient_accumulation_steps", 1)
+    if (
+        isinstance(accumulation_steps, bool)
+        or not isinstance(accumulation_steps, int)
+        or accumulation_steps < 1
+    ):
+        raise ValueError("gradient_accumulation_steps must be a positive integer")
+    bf16 = train_cfg.get("bf16", False)
+    if not isinstance(bf16, bool):
+        raise ValueError("bf16 must be a boolean")
+    use_bf16 = bf16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    if bf16 and not use_bf16:
+        print("  BF16 is unavailable on the current device; using float32")
+
     if output_dir is None:
         output_dir = config["student"]["output_dir"]
 
@@ -238,11 +268,15 @@ def train(
     if val_file is not None:
         train_pairs = all_pairs
         val_pairs = load_pairs(val_file)
-        verify_split_overlap(train_pairs, val_pairs, [])
     else:
-        split_idx = int(len(all_pairs) * (1 - val_split))
-        train_pairs = all_pairs[:split_idx]
-        val_pairs = all_pairs[split_idx:]
+        train_pairs, val_pairs, _ = split_pairs(
+            all_pairs,
+            train_ratio=1 - val_split,
+            val_ratio=val_split,
+            test_ratio=0,
+            seed=train_cfg.get("seed", 42),
+        )
+    verify_split_overlap(train_pairs, val_pairs, [])
     print(f"  Train: {len(train_pairs)} | Val: {len(val_pairs)}")
 
     # Step 2: Load tokenizer
@@ -287,7 +321,7 @@ def train(
     print("\nSTEP 4: Loading base model")
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16 if use_bf16 else torch.float32,
         device_map="auto",
     )
     print(f"  Parameters: {model.num_parameters() / 1e9:.2f}B")
@@ -305,6 +339,14 @@ def train(
 
     # Step 7: Setup optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg["learning_rate"])
+    updates_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
+    scheduler = get_scheduler(
+        train_cfg.get("lr_scheduler", "constant"),
+        optimizer=optimizer,
+        num_warmup_steps=0,
+        num_training_steps=updates_per_epoch * train_cfg["epochs"],
+    )
+    optimizer.zero_grad()
     model.train()
 
     # Step 8: Training loop
@@ -319,15 +361,28 @@ def train(
     for epoch in range(train_cfg["epochs"]):
         print(f"Epoch {epoch + 1}/{train_cfg['epochs']}")
 
-        for batch in train_loader:
+        accumulated_tokens = 0
+        for batch_index, batch in enumerate(train_loader):
             batch = {k: v.to(model.device) for k, v in batch.items()}
 
             outputs = model(**batch)
             loss = outputs.loss
 
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            # Weight by supervised tokens so unequal sequence lengths and the
+            # final partial window match the gradient of a combined batch.
+            batch_tokens = (batch["labels"][:, 1:] != -100).sum().item()
+            (loss * batch_tokens).backward()
+            accumulated_tokens += batch_tokens
+            if (batch_index + 1) % accumulation_steps == 0 or batch_index + 1 == len(
+                train_loader
+            ):
+                for parameter in model.parameters():
+                    if parameter.grad is not None:
+                        parameter.grad.div_(accumulated_tokens)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                accumulated_tokens = 0
 
             # Calculate accuracy
             logits = outputs.logits
