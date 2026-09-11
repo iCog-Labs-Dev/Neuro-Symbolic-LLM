@@ -12,8 +12,8 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from symbolic_pipeline.head import SymbolicHead
-from tier2_mork.client import DockerMorkClient, MorkClient
+from Residual.symbolic_head.head import SymbolicHead
+from Residual.symbolic_head.mork_client import DockerMorkClient, MorkClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,10 +53,11 @@ def run_benchmark_suite(
     top_m: int = 8,
     server_url: str = "http://127.0.0.1:8000",
     warmup_queries: int = 20,
+    index_backend: str = "flat",
 ) -> BenchmarkSummary:
     """Execute performance benchmark. MORK Docker is mandatory."""
     client: MorkClient = DockerMorkClient(
-        server_url=server_url, key_dim=key_dim,
+        server_url=server_url, key_dim=key_dim, index_backend=index_backend,
     )
 
     client_name = client.__class__.__name__
@@ -153,6 +154,7 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=768, help="Continuous hidden dimension")
     parser.add_argument("--top-m", type=int, default=8, help="Top-m retrieval count")
     parser.add_argument("--server-url", type=str, default="http://127.0.0.1:8000", help="MORK server URL")
+    parser.add_argument("--index-backend", choices=["flat", "hnsw"], default="flat", help="FAISS retrieval backend")
     parser.add_argument("--output-json", type=str, default=None, help="Path to save JSON benchmark report")
 
     args = parser.parse_args()
@@ -164,6 +166,7 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         top_m=args.top_m,
         server_url=args.server_url,
+        index_backend=args.index_backend,
     )
 
     if args.output_json:
