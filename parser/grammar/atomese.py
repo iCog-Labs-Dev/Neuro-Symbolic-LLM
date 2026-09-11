@@ -232,7 +232,7 @@ def validate_metta_string(s: str) -> tuple[bool, str]:
     error_message is empty string when is_valid is True.
 
     Used by:
-    - Residual/symbolic_head/mork_client.py to validate/insert payloads
+      - Residual/symbolic_head/mork_client.py to validate/insert payloads
       - mork/tier3_worker.py       to validate parser output before writing
       - parser/grammar/mask.py     automaton state decisions
 
