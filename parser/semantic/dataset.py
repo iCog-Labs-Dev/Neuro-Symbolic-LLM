@@ -11,6 +11,8 @@ This file provides:
 from __future__ import annotations
 
 import json
+import math
+import random
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -239,7 +241,10 @@ def structured_to_pairs(
     valid = 0
     skipped = 0
 
-    with open(input_file) as fin, open(output_file, "w") as fout:
+    with (
+        open(input_file, encoding="utf-8") as fin,
+        open(output_file, "w", encoding="utf-8") as fout,
+    ):
         for line in fin:
             line = line.strip()
             if not line:
@@ -300,3 +305,87 @@ def structured_to_pairs(
 
     print(f"  Total: {total}, Valid: {valid}, Skipped: {skipped}")
     return pairs
+
+
+def split_pairs(
+    pairs: list[dict],
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Deduplicate inputs, shuffle, and split using largest-remainder rounding."""
+
+    ratios = (train_ratio, val_ratio, test_ratio)
+    if any(not math.isfinite(ratio) or not 0 <= ratio <= 1 for ratio in ratios):
+        raise ValueError("Split ratios must be finite numbers between 0 and 1")
+    if abs(sum(ratios) - 1.0) > 1e-8:
+        raise ValueError("Train, validation and test ratios must sum to 1.0")
+
+    unique_pairs = []
+    seen = set()
+
+    for index, pair in enumerate(pairs, start=1):
+        if not isinstance(pair, dict) or not isinstance(pair.get("input", ""), str):
+            raise ValueError(f"Pair {index} must be an object with a string input")
+        text = pair.get("input", "").strip()
+
+        if not text:
+            continue
+
+        if text in seen:
+            continue
+
+        seen.add(text)
+        unique_pairs.append(pair)
+
+    rng = random.Random(seed)
+    rng.shuffle(unique_pairs)
+
+    total = len(unique_pairs)
+    # Normalize tolerated floating-point error before assigning all records.
+    sizes = [total * ratio / sum(ratios) for ratio in ratios]
+    counts = [math.floor(size) for size in sizes]
+    order = sorted(range(3), key=lambda i: sizes[i] - counts[i], reverse=True)
+    for index in order[: total - sum(counts)]:
+        counts[index] += 1
+    train_end = counts[0]
+    val_end = train_end + counts[1]
+
+    train_pairs = unique_pairs[:train_end]
+    val_pairs = unique_pairs[train_end:val_end]
+    test_pairs = unique_pairs[val_end:]
+
+    return train_pairs, val_pairs, test_pairs
+
+
+def verify_split_overlap(
+    train_pairs: list[dict],
+    val_pairs: list[dict],
+    test_pairs: list[dict],
+) -> None:
+    """Ensure the same input text does not appear across dataset splits."""
+
+    train_texts = {pair["input"].strip() for pair in train_pairs}
+    val_texts = {pair["input"].strip() for pair in val_pairs}
+    test_texts = {pair["input"].strip() for pair in test_pairs}
+
+    if not train_texts.isdisjoint(val_texts):
+        raise ValueError("Train and validation sets overlap")
+
+    if not train_texts.isdisjoint(test_texts):
+        raise ValueError("Train and test sets overlap")
+
+    if not val_texts.isdisjoint(test_texts):
+        raise ValueError("Validation and test sets overlap")
+
+
+def write_pairs_jsonl(pairs: list[dict], output_file: str | Path) -> None:
+    """Write student input-label pairs to JSONL"""
+
+    path = Path(output_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as file:
+        for pair in pairs:
+            file.write(json.dumps(pair, ensure_ascii=False) + "\n")

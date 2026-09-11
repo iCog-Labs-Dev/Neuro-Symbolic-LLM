@@ -20,7 +20,11 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from parser.grammar.atomese import validate_metta_string
-from parser.semantic.dataset import StudentBatchCollator, StudentDataset
+from parser.semantic.dataset import (
+    StudentBatchCollator,
+    StudentDataset,
+    verify_split_overlap,
+)
 from parser.semantic.metta_renderer import render_metta
 from parser.semantic.schema import SemanticParseResult
 from parser.semantic.student_prompt import STUDENT_PROMPT, build_student_prompt
@@ -201,6 +205,7 @@ def train(
     config_path: str = "configs/parser_config/student_config.yaml",
     output_dir: str | None = None,
     method: str = "full",
+    val_file: str | None = None,
 ) -> str:
     config = load_config(config_path)
 
@@ -230,9 +235,14 @@ def train(
     if len(all_pairs) == 0:
         raise ValueError(f"No valid pairs found in {train_file}")
 
-    split_idx = int(len(all_pairs) * (1 - val_split))
-    train_pairs = all_pairs[:split_idx]
-    val_pairs = all_pairs[split_idx:]
+    if val_file is not None:
+        train_pairs = all_pairs
+        val_pairs = load_pairs(val_file)
+        verify_split_overlap(train_pairs, val_pairs, [])
+    else:
+        split_idx = int(len(all_pairs) * (1 - val_split))
+        train_pairs = all_pairs[:split_idx]
+        val_pairs = all_pairs[split_idx:]
     print(f"  Train: {len(train_pairs)} | Val: {len(val_pairs)}")
 
     # Step 2: Load tokenizer
@@ -412,6 +422,7 @@ def train(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train-file", default="data/student_train.jsonl")
+    parser.add_argument("--val-file", help="Separate validation pairs JSONL file")
     parser.add_argument("--config", default="configs/parser_config/student_config.yaml")
     parser.add_argument("--output-dir")
     parser.add_argument("--method", choices=["lora", "full"], default="full")
@@ -424,6 +435,7 @@ def main():
     else:
         train(
             train_file=args.train_file,
+            val_file=args.val_file,
             config_path=args.config,
             output_dir=args.output_dir,
             method=args.method,
