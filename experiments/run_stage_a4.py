@@ -8,9 +8,9 @@ import logging
 
 import numpy as np
 
-from symbolic_pipeline.head import SymbolicHead
-from symbolic_pipeline.losses import combined_symbolic_loss
-from tier2_mork.client import get_mork_client
+from Residual.symbolic_head.head import SymbolicHead
+from Residual.symbolic_head.losses import combined_symbolic_loss
+from Residual.symbolic_head.mork_client import get_mork_client
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

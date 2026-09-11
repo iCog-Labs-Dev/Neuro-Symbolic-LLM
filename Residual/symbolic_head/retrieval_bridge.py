@@ -2,8 +2,16 @@
 
 import numpy as np
 
-from tier2_mork.client import MorkClient, MorkQueryResult, get_mork_client
-from tier2_mork.communication import QueryPacket, TemplatePacket, retrieve_on_wire
+from Residual.symbolic_head.communication import (
+    QueryPacket,
+    TemplatePacket,
+    retrieve_on_wire,
+)
+from Residual.symbolic_head.mork_client import (
+    MorkClient,
+    MorkQueryResult,
+    get_mork_client,
+)
 
 
 class Tier2Retrieve:

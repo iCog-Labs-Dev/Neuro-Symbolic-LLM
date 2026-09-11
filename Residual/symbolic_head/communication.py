@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from tier2_mork.client import MorkClient, MorkQueryResult
+from Residual.symbolic_head.mork_client import MorkClient, MorkQueryResult
 
 _QUERY_MAGIC = b"QSYM"
 _TEMPL_MAGIC = b"TMPL"

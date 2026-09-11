@@ -11,14 +11,14 @@ import concurrent.futures
 import numpy as np
 import pytest
 
-from symbolic_pipeline.head import SymbolicHead
-from tier2_mork.retrieval_bridge import Tier2Retrieve
-from tier2_mork.client import (
+from Residual.symbolic_head.head import SymbolicHead
+from Residual.symbolic_head.retrieval_bridge import Tier2Retrieve
+from Residual.symbolic_head.mork_client import (
     DockerMorkClient,
     get_mork_client,
     template_record_sexpr,
 )
-from tier2_mork.communication import decode_query
+from Residual.symbolic_head.communication import decode_query
 
 
 def test_template_record_sexpr_contains_key_and_val():

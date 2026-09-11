@@ -69,12 +69,11 @@ semantic-parser = "parser.semantic.cli:main"
 where = ["."]
 include = [
     "nac*",
-    "tier2_mork*",
     "parser*",
     "embedder*",
     "tier3*",
     "tiers*",
-    "symbolic_pipeline*",
+    "Residual*",
 ]
 
 # ── Black ──────────────────────────────────────────────────────────────────
@@ -111,12 +110,11 @@ ignore = [
 # tells ruff which packages are "yours" so imports are sorted into the right group
 known-first-party = [
     "nac",
-    "tier2_mork",
     "parser",
     "embedder",
     "tier3",
     "tiers",
-    "symbolic_pipeline",
+    "Residual",
 ]
 
 # ── Mypy ───────────────────────────────────────────────────────────────────

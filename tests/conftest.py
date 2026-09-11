@@ -2,7 +2,7 @@
 
 import pytest
 
-from tier2_mork.client import DockerMorkClient, get_mork_client
+from Residual.symbolic_head.mork_client import DockerMorkClient, get_mork_client
 
 
 @pytest.fixture

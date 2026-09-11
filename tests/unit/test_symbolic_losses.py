@@ -1,6 +1,6 @@
 import numpy as np
 
-from symbolic_pipeline.losses import (
+from Residual.symbolic_head.losses import (
     combined_symbolic_loss,
     key_space_alignment_loss,
     value_space_regression_loss,
