@@ -57,15 +57,20 @@ def run_training(monkeypatch, tmp_path):
     )
     original_adam = torch.optim.AdamW
 
-    def run(**settings):
+    def run(*, stop_after_load=False, **settings):
         config["training"].update(settings)
         model = TinyModel()
         loaded = {}
         updates = []
         gradients = []
 
+        class ModelLoadCapturedError(Exception):
+            pass
+
         def load_model(*args, **kwargs):
             loaded.update(kwargs)
+            if stop_after_load:
+                raise ModelLoadCapturedError
             return model
 
         class RecordingAdam(original_adam):
@@ -78,7 +83,12 @@ def run_training(monkeypatch, tmp_path):
             training.AutoModelForCausalLM, "from_pretrained", load_model
         )
         monkeypatch.setattr(torch.optim, "AdamW", RecordingAdam)
-        training.train()
+        if stop_after_load:
+            # Precision tests need no optimizer execution or CUDA driver.
+            with pytest.raises(ModelLoadCapturedError):
+                training.train()
+        else:
+            training.train()
         return model.weight.detach(), updates, gradients, loaded
 
     return run
@@ -117,8 +127,9 @@ def test_cuda_precision_selection(
 ):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: supported)
-    _, _, _, loaded = run_training(bf16=enabled)
+    _, updates, gradients, loaded = run_training(stop_after_load=True, bf16=enabled)
     assert loaded["torch_dtype"] == expected
+    assert updates == gradients == []
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])
