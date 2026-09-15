@@ -1,5 +1,4 @@
 """Hidden-state interception for frozen LLM substrates.
-
 Provides mechanisms for intercepting, caching, and modifying transformer
 hidden states at designated layers during forward execution:
 

@@ -1,4 +1,3 @@
-
 """Drift monitoring between a frozen substrate and the untouched model."""
 
 from __future__ import annotations
