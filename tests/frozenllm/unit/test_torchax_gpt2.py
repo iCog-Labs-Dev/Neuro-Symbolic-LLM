@@ -41,6 +41,7 @@ class TestFunctionalCallCorrectness:
         out = functional_model(model_jax, params, ids.to("jax"))
         jax_logits = out.logits.to("cpu")
 
+        assert torch.allclose(ref_logits, jax_logits, atol=1e-3)
         diff = (ref_logits - jax_logits).abs()
         print(
             f"\nGPT-2 TorchAX fidelity: max_abs_diff={float(diff.max()):.3e}, "
