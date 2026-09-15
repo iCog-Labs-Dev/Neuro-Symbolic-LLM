@@ -61,6 +61,7 @@ __all__ = [
     "detect_architecture_from_config",
     "discover_layers",
     "discover_layers_from_config",
+    "get_block_accessor",
     "validate_interception_layers",
     "get_block_accessor",
     # Substrate & Execution
