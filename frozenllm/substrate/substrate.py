@@ -217,7 +217,6 @@ class FrozenSubstrate:
 
     # ── forward execution ───────────────────────────────────────────────────
 
-
     def __call__(self, input_ids: jax.Array | torch.Tensor) -> ForwardResult:
         """Run the frozen substrate forward pass."""
         return self.run_with_interception(
@@ -371,7 +370,6 @@ class FrozenSubstrate:
             "effective_batch_size": ids.shape[0],
         }
         return result, report
-
 
     def __repr__(self) -> str:
         return (

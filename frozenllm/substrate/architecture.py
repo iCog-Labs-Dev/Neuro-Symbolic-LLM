@@ -428,8 +428,6 @@ def get_block_accessor(
         raise ValueError(f"Unsupported model family: {arch.model_family!r}")
 
 
-
-
 __all__ = [
     "Architecture",
     "detect_architecture",

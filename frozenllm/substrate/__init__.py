@@ -63,7 +63,6 @@ __all__ = [
     "discover_layers_from_config",
     "get_block_accessor",
     "validate_interception_layers",
-    "get_block_accessor",
     # Substrate & Execution
     "ForwardResult",
     "FrozenSubstrate",
