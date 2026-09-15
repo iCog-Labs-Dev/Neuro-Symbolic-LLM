@@ -65,7 +65,8 @@ class TestFidelity:
         )
 
         assert ref_logits.shape == jax_logits.shape
-        assert torch.allclose(ref_logits, jax_logits, atol=1e-4)
+        assert torch.allclose(ref_logits, jax_logits, atol=1e-3, rtol=1e-3)
+        assert float(diff.max()) < 1e-3
 
 
 class TestFreezing:

@@ -428,98 +428,6 @@ def get_block_accessor(
         raise ValueError(f"Unsupported model family: {arch.model_family!r}")
 
 
-def get_embedding_module(model: torch.nn.Module, arch: Architecture) -> torch.nn.Module:
-    """Return the primary token embedding submodule.
-
-    For GPT-2: `model.transformer.wte`
-    For NeoX:  `model.gpt_neox.embed_in`
-
-    Args:
-        model: PyTorch causal LM instance.
-        arch: Architecture metadata for the model.
-
-    Returns:
-        Submodule responsible for token embedding lookup.
-    """
-    unwrapped = _unwrap_model(model)
-    if arch.model_family == "gpt2":
-        transformer = getattr(unwrapped, "transformer", unwrapped)
-        if hasattr(transformer, "wte"):
-            return transformer.wte
-        if hasattr(unwrapped, "wte"):
-            return unwrapped.wte
-        raise AttributeError("Could not locate wte token embedding on GPT-2 model.")
-    elif arch.model_family == "neox":
-        neox = getattr(unwrapped, "gpt_neox", unwrapped)
-        if hasattr(neox, "embed_in"):
-            return neox.embed_in
-        if hasattr(unwrapped, "embed_in"):
-            return unwrapped.embed_in
-        raise AttributeError("Could not locate embed_in embedding on NeoX model.")
-    else:
-        raise ValueError(f"Unsupported model family: {arch.model_family!r}")
-
-
-def get_position_embedding_module(
-    model: torch.nn.Module, arch: Architecture
-) -> torch.nn.Module | None:
-    """Return the position embedding submodule if present (e.g. GPT-2 wpe), or None.
-
-    Args:
-        model: PyTorch causal LM instance.
-        arch: Architecture metadata for the model.
-
-    Returns:
-        Position embedding submodule for GPT-2, or None for architectures using RoPE.
-    """
-    unwrapped = _unwrap_model(model)
-    if arch.model_family == "gpt2":
-        transformer = getattr(unwrapped, "transformer", unwrapped)
-        return getattr(transformer, "wpe", getattr(unwrapped, "wpe", None))
-    return None
-
-
-def get_head_modules(
-    model: torch.nn.Module, arch: Architecture
-) -> list[torch.nn.Module]:
-    """Return the final LayerNorm and LM head submodules in execution order.
-
-    For GPT-2: `[model.transformer.ln_f, model.lm_head]`
-    For NeoX:  `[model.gpt_neox.final_layer_norm, model.embed_out]`
-
-    Args:
-        model: PyTorch causal LM instance.
-        arch: Architecture metadata for the model.
-
-    Returns:
-        List of head submodules to execute after transformer blocks.
-    """
-    unwrapped = _unwrap_model(model)
-    modules: list[torch.nn.Module] = []
-
-    if arch.model_family == "gpt2":
-        transformer = getattr(unwrapped, "transformer", unwrapped)
-        ln_f = getattr(transformer, "ln_f", getattr(unwrapped, "ln_f", None))
-        if ln_f is not None:
-            modules.append(ln_f)
-        lm_head = getattr(unwrapped, "lm_head", None)
-        if lm_head is not None:
-            modules.append(lm_head)
-        return modules
-    elif arch.model_family == "neox":
-        neox = getattr(unwrapped, "gpt_neox", unwrapped)
-        ln_f = getattr(
-            neox, "final_layer_norm", getattr(unwrapped, "final_layer_norm", None)
-        )
-        if ln_f is not None:
-            modules.append(ln_f)
-        lm_head = getattr(unwrapped, "embed_out", getattr(unwrapped, "lm_head", None))
-        if lm_head is not None:
-            modules.append(lm_head)
-        return modules
-    else:
-        raise ValueError(f"Unsupported model family: {arch.model_family!r}")
-
 
 __all__ = [
     "Architecture",
@@ -528,8 +436,5 @@ __all__ = [
     "discover_layers",
     "discover_layers_from_config",
     "get_block_accessor",
-    "get_embedding_module",
-    "get_head_modules",
-    "get_position_embedding_module",
     "validate_interception_layers",
 ]
