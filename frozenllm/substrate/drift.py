@@ -1,3 +1,4 @@
+
 """Drift monitoring between a frozen substrate and the untouched model."""
 
 from __future__ import annotations
@@ -17,11 +18,6 @@ def compute_kl_drift(
     original_logits: jax.Array,
     modified_logits: jax.Array,
 ) -> Mapping[str, float]:
-    """Compute the mean KL divergence ``KL(original || modified)`` over all
-    batch/sequence positions using numerically stable log-softmax.
-
-    With the identity interception hook this should be approximately zero.
-    """
     log_p = _log_softmax(original_logits)
     log_q = _log_softmax(modified_logits)
     p = jnp.exp(log_p)

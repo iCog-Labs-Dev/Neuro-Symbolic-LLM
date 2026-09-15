@@ -1,9 +1,12 @@
+"""TorchAX model utilities: functional execution and numerical fidelity checks."""
+
 from __future__ import annotations
 
 from typing import Any
 
 import torch
 from torch.func import functional_call
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from frozenllm.substrate.torchax_backend import enable_torchax, to_torchax_device
 
@@ -13,7 +16,6 @@ def functional_model(
     params: dict[str, torch.Tensor],
     input_ids: torch.Tensor,
 ) -> Any:
-    """This is a thin wrapper around `torch.func.functional_call`."""
     return functional_call(model, params, (input_ids,))
 
 
@@ -26,12 +28,6 @@ def check_numerical_fidelity(
     dtype: torch.dtype | str = torch.float32,
     torch_dtype: torch.dtype | str | None = None,
 ) -> dict[str, Any]:
-    """Compare the TorchAX-dispatched forward pass against a plain,
-    non-TorchAX PyTorch forward pass on the same loaded weights and the
-    same random input.
-    """
-    from transformers import AutoConfig, AutoModelForCausalLM
-
     enable_torchax()
 
     effective_dtype = torch_dtype if torch_dtype is not None else dtype

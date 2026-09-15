@@ -41,12 +41,6 @@ from .torchax_backend import (
 
 @dataclass(frozen=True)
 class ForwardResult:
-    """Output of a substrate forward pass.
-
-    ``intermediates`` maps each intercepted zero-based layer index to the
-    pre-modification hidden state cached at that layer.
-    """
-
     logits: jax.Array
     intermediates: dict[int, jax.Array]
 
@@ -71,22 +65,6 @@ jax.tree_util.register_dataclass(
 
 
 class FrozenSubstrate:
-    """Top-level frozen LLM substrate using monolithic TorchAX execution.
-
-    PyTorch model / Hugging Face checkpoint
-              │
-              ▼
-           TorchAX
-              │
-              ▼
-         JAX-backed execution
-
-    The base model parameters theta_0 are strictly frozen (requires_grad=False).
-    Forward passes execute the monolithic model on TorchAX with per-layer
-    hidden-state interception via forward hooks, returning JAX-compatible
-    logits and intermediate states.
-    """
-
     def __init__(
         self,
         model_id_or_model: str | torch.nn.Module | None = None,
@@ -186,7 +164,6 @@ class FrozenSubstrate:
 
     @property
     def tokenizer(self) -> Any:
-        """Tokenizer associated with this substrate (if loaded or provided)."""
         return self._tokenizer
 
     def tokenize(
@@ -195,16 +172,6 @@ class FrozenSubstrate:
         return_tensors: str = "jax",
         **kwargs: Any,
     ) -> jax.Array | torch.Tensor:
-        """Tokenize input text directly into device-ready token IDs using torchax_backend.
-
-        Args:
-            text: Input text string or list of text strings.
-            return_tensors: "jax" (default) or "pt".
-            **kwargs: Additional kwargs passed to the Hugging Face tokenizer.
-
-        Returns:
-            2D array/tensor of token IDs ready for forward execution.
-        """
         if self._tokenizer is None:
             raise ValueError(
                 "Tokenizer is not initialized. Initialize FrozenSubstrate with a model ID string or provide a tokenizer."
@@ -218,7 +185,6 @@ class FrozenSubstrate:
     # ── forward execution ───────────────────────────────────────────────────
 
     def __call__(self, input_ids: jax.Array | torch.Tensor) -> ForwardResult:
-        """Run the frozen substrate forward pass."""
         return self.run_with_interception(
             input_ids=input_ids,
             modify_fn=self._modify_hook,
@@ -231,7 +197,6 @@ class FrozenSubstrate:
         modify_fn: Callable[..., Any] | None = None,
         intercept_layers: Sequence[int] | None = None,
     ) -> ForwardResult:
-        """Explicit interception API with custom hook and layers."""
         hook = modify_fn or self._modify_hook or identity_modify
         layers = (
             validate_interception_layers(
@@ -287,16 +252,6 @@ class FrozenSubstrate:
 
     @staticmethod
     def compute_loss(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        """Standard causal LM cross-entropy loss with shifted labels.
-
-        Args:
-            logits: Predicted unnormalized logits of shape [batch, seq_len, vocab_size].
-            labels: Target token IDs of shape [batch, seq_len]. Tokens with label -100
-                are ignored in the loss calculation.
-
-        Returns:
-            Scalar jax.Array representing the mean cross-entropy loss.
-        """
         shift_logits = logits[:, :-1, :]
         shift_labels = labels[:, 1:]
 
@@ -314,7 +269,6 @@ class FrozenSubstrate:
     # ── freezing guarantees ─────────────────────────────────────────────────
 
     def params_unchanged(self) -> bool:
-        """Verify that base model parameters theta_0 have not been modified."""
         for k, pristine_val in self._pristine.items():
             current_val = self._params.get(k)
             if current_val is None:
@@ -326,7 +280,6 @@ class FrozenSubstrate:
         return True
 
     def verify_frozen(self) -> dict[str, Any]:
-        """Run original-vs-wrapper parameter verification and return a report."""
         unchanged = self.params_unchanged()
         return {
             "params_unchanged": unchanged,
@@ -353,7 +306,6 @@ class FrozenSubstrate:
         min_headroom: float | None = None,
         auto_reduce_batch_size: bool = False,
     ) -> tuple[ForwardResult, dict[str, Any]]:
-        """Forward pass plus the memory headroom safety rule."""
         headroom = (
             min_headroom if min_headroom is not None else self._min_memory_headroom
         )

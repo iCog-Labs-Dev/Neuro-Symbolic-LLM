@@ -264,7 +264,6 @@ class TestMultipleInterceptions:
     def test_multiple_interceptions_with_cascade_modifications(
         self, real_gpt2_model: GPT2LMHeadModel
     ):
-        """Verify downstream propagation across multiple interception points."""
         model = real_gpt2_model
         torch.manual_seed(0)
         ids = torch.randint(0, model.config.vocab_size, (2, 8))
@@ -331,7 +330,6 @@ class TestMultipleInterceptions:
         assert not torch.allclose(l0_out.logits, both_out.logits, atol=1e-2)
 
     def test_out_of_order_intercept_layers(self, real_pythia_model: GPTNeoXForCausalLM):
-        """Verify intercept_layers passed unsorted are handled in forward order."""
         model = real_pythia_model
         torch.manual_seed(0)
         ids = torch.randint(0, model.config.vocab_size, (2, 8))
@@ -342,7 +340,6 @@ class TestMultipleInterceptions:
             assert sorted(ctx.intermediates.keys()) == [0, 2, 3]
 
     def test_all_layers_interception(self, real_gpt2_model: GPT2LMHeadModel):
-        """Verify intercepting every layer captures all transformer blocks."""
         model = real_gpt2_model
         torch.manual_seed(0)
         ids = torch.randint(0, model.config.vocab_size, (2, 8))
@@ -358,7 +355,6 @@ class TestMultipleInterceptions:
     def test_run_with_hooks_multiple_interceptions_pythia(
         self, real_pythia_model: GPTNeoXForCausalLM
     ):
-        """Verify run_with_hooks across multiple interception points."""
         model = real_pythia_model
         torch.manual_seed(0)
         ids = torch.randint(0, model.config.vocab_size, (2, 8))

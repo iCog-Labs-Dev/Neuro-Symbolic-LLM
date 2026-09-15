@@ -75,7 +75,6 @@ def _config(family: str):
 
 
 def make_substrate(family: str, intercept_layers=None, modify_hook=None, seed: int = 0):
-    """Build the torch reference model plus a FrozenSubstrate wrapper using TorchAX."""
     model = _torch_model(family, seed=seed)
     model.eval()
     substrate = FrozenSubstrate(

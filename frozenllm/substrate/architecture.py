@@ -17,8 +17,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Architecture:
-    """Normalized description of a frozen causal-LM substrate."""
-
     model_family: str
     num_layers: int
     hidden_size: int
@@ -50,7 +48,6 @@ def _family_from_keys(keys: set[str]) -> str | None:
 
 
 def _family_from_config(config: Any) -> str | None:
-    """Detect model family from an HF config object or mapping."""
     if config is None:
         return None
 
@@ -90,7 +87,6 @@ def _family_from_config(config: Any) -> str | None:
 
 
 def _extract_rope_params(config: Any) -> tuple[float, float]:
-    """Extract rope_theta and rotary_pct respecting HF's rope_parameters schema."""
     rope_params = _config_value(config, "rope_parameters", None)
     if not isinstance(rope_params, Mapping):
         rope_params = {}
@@ -128,7 +124,6 @@ def _config_value(config: Any, name: str, default: Any) -> Any:
 
 
 def _detect_architecture_from_params(params: Any, config: Any = None) -> Architecture:
-    """Inspect parameter tree to auto-detect architecture."""
     keys = _top_keys(params)
     family = _family_from_keys(keys)
     if family is None:
@@ -188,17 +183,6 @@ def _detect_architecture_from_params(params: Any, config: Any = None) -> Archite
 
 
 def detect_architecture_from_config(config: Any) -> Architecture:
-    """Detect architecture directly from an HF config object or dictionary.
-
-    Args:
-        config: HuggingFace PretrainedConfig, dict, or duck-typed config object.
-
-    Returns:
-        Architecture dataclass describing the model layout.
-
-    Raises:
-        ValueError: If config is invalid or unsupported.
-    """
     family = _family_from_config(config)
     if family is None:
         model_type = _config_value(config, "model_type", None)
@@ -311,18 +295,6 @@ def detect_architecture_from_config(config: Any) -> Architecture:
 
 
 def detect_architecture(target: Any, config: Any = None) -> Architecture:
-    """Unified detector: auto-detects architecture from HF config, nn.Module, or parameter mapping.
-
-    Args:
-        target: HuggingFace PretrainedConfig, dict, torch.nn.Module, or parameter mapping.
-        config: Optional HuggingFace configuration when target is a parameter mapping or module.
-
-    Returns:
-        Architecture dataclass describing the model layout.
-
-    Raises:
-        ValueError: If architecture is unsupported or unrecognized.
-    """
     if config is not None and not isinstance(target, Mapping):
         return detect_architecture_from_config(config)
     if hasattr(target, "config") and target.config is not None:
@@ -333,7 +305,6 @@ def detect_architecture(target: Any, config: Any = None) -> Architecture:
 
 
 def discover_layers(target: Any, config: Any = None) -> int:
-    """Return the number of transformer blocks discovered from target (config, model, or params)."""
     return detect_architecture(target, config).num_layers
 
 
@@ -344,11 +315,6 @@ discover_layers_from_config = discover_layers
 def validate_interception_layers(
     intercept_layers: Sequence[int] | None, num_layers: int
 ) -> tuple[int, ...]:
-    """Validate a list of zero-based layer indices.
-
-    Rejects negative indices, out-of-range indices and duplicates. ``None`` or
-    an empty sequence is allowed and means "no interception".
-    """
     if intercept_layers is None:
         return ()
 
@@ -380,7 +346,6 @@ def validate_interception_layers(
 
 
 def _unwrap_model(model: Any) -> Any:
-    """Unwrap wrapper layers (e.g. DistributedDataParallel) if present."""
     while hasattr(model, "module"):
         model = model.module
     return model
@@ -389,18 +354,6 @@ def _unwrap_model(model: Any) -> Any:
 def get_block_accessor(
     model: torch.nn.Module, arch: Architecture
 ) -> Callable[[int], torch.nn.Module]:
-    """Return a function that retrieves block `i` from `model`.
-
-    For GPT-2: `lambda i: model.transformer.h[i]`
-    For NeoX:  `lambda i: model.gpt_neox.layers[i]`
-
-    Args:
-        model: PyTorch causal LM instance.
-        arch: Architecture metadata for the model.
-
-    Returns:
-        Callable taking an integer index `i` (0-based) and returning the submodule.
-    """
     unwrapped = _unwrap_model(model)
     if arch.model_family == "gpt2":
         transformer = getattr(unwrapped, "transformer", unwrapped)

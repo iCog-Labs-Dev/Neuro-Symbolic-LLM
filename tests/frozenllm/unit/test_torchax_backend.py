@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import jax.lax
 import jax.numpy as jnp
 import torch
 
@@ -94,10 +95,8 @@ class TestCallJaxDifferentiable:
     def test_jax_fn_receives_no_torch_syntax_requirement(self):
         # explicitly confirms that jax_fn can
         # use jax.lax / jnp freely, no torch ops required inside it
-        import jax.lax as lax
-
         def uses_lax(x, y):
-            return lax.add(x, y)
+            return jax.lax.add(x, y)
 
         bridge = call_jax_differentiable(uses_lax)
         x = to_torchax_device(torch.ones(3)).requires_grad_()

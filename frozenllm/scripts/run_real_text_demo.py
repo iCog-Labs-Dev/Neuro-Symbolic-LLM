@@ -84,7 +84,6 @@ def section(title: str) -> None:
 
 
 def load_text(path: Path | None) -> str:
-    """User-supplied file, else local data folder, else download, else fallback."""
     candidates: list[Path] = []
     if path is not None:
         candidates.append(path)
@@ -112,7 +111,6 @@ def load_text(path: Path | None) -> str:
 
 
 def parse_layers(spec: str, num_layers: int) -> list[int]:
-    """'all' or a comma-separated list of zero-based layer indices."""
     if spec.strip().lower() == "all":
         return list(range(num_layers))
     layers = [int(x) for x in spec.split(",") if x.strip()]
@@ -136,8 +134,6 @@ def hidden_stats(h: jax.Array) -> str:
 
 
 def make_steer(strength: float):
-    """Dimension-varying perturbation (survives LayerNorm, so KL > 0)."""
-
     def steer(h: jax.Array, layer_idx: int) -> jax.Array:
         pattern = jnp.arange(h.shape[-1], dtype=h.dtype) / h.shape[-1]
         return h + strength * pattern
@@ -274,7 +270,6 @@ def main() -> int:
         return h + 0.0 if not args.steer else make_steer(args.steer)(h, layer_idx)
 
     def recording_hook(h: jax.Array, layer_idx: int) -> jax.Array:
-        """Wraps the active hook and records what goes in / comes out."""
         out = base_hook(h, layer_idx)
         recorded[layer_idx] = (h, out)
         return out

@@ -20,6 +20,9 @@ from __future__ import annotations
 import urllib.request
 from pathlib import Path
 
+from datasets import load_dataset
+from transformers import AutoTokenizer
+
 FROZENLLM_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = FROZENLLM_DIR.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -51,8 +54,6 @@ def extract_wikipedia() -> None:
     if out.is_file():
         print(f"[skip] {out.name} already exists ({out.stat().st_size} bytes)")
         return
-    from datasets import load_dataset
-
     print(f"[get ] loading {WIKI_DATASET}/{WIKI_CONFIG} train split ...")
     ds = load_dataset(WIKI_DATASET, WIKI_CONFIG, split="train")
     chunks: list[str] = []
@@ -71,8 +72,6 @@ def extract_wikipedia() -> None:
 
 
 def save_tokenizer(model_id: str, folder: str) -> None:
-    from transformers import AutoTokenizer
-
     out = DATA_DIR / folder
     if out.is_dir() and any(out.iterdir()):
         print(f"[skip] {folder}/ already exists")

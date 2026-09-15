@@ -10,9 +10,6 @@ import jax
 
 @dataclass(frozen=True)
 class MemoryStatus:
-    """Device memory snapshot. ``available`` is False when the platform does
-    not expose per-device memory statistics."""
-
     available: bool
     total_bytes: int | None = None
     allocated_bytes: int | None = None
@@ -25,16 +22,10 @@ class MemoryStatus:
 
     @property
     def bytes_in_use(self) -> int | None:
-        """Convenience alias for allocated_bytes."""
         return self.allocated_bytes
 
 
 def get_memory_status(device: jax.Device | None = None) -> MemoryStatus:
-    """Query total/allocated/available device memory when supported.
-
-    Environments that do not expose ``memory_stats`` (e.g. CPU-only JAX)
-    return a diagnostic status instead of raising.
-    """
     device = device or jax.devices()[0]
     platform = jax.default_backend()
     stats_fn = getattr(device, "memory_stats", None)
@@ -88,8 +79,6 @@ def get_memory_status(device: jax.Device | None = None) -> MemoryStatus:
 
 
 def compute_memory_headroom(status: MemoryStatus) -> float | None:
-    """Return the available-memory headroom ratio in [0, 1], or None when the
-    platform does not expose memory statistics."""
     if not status.available:
         return None
     if status.total_bytes is None or status.available_bytes is None:
@@ -100,8 +89,6 @@ def compute_memory_headroom(status: MemoryStatus) -> float | None:
 
 
 def check_memory_headroom(status: MemoryStatus, min_headroom: float = 0.5) -> list[str]:
-    """Return a list of warning strings when the headroom falls below
-    ``min_headroom``. An empty list means the headroom is safe."""
     headroom = compute_memory_headroom(status)
     if headroom is None:
         return [
@@ -123,14 +110,6 @@ def maybe_reduce_batch_size(
     min_headroom: float = 0.5,
     auto_reduce: bool = False,
 ) -> tuple[int, bool, list[str]]:
-    """Apply the headroom safety rule.
-
-    Returns ``(new_batch_size, reduced, warnings)``. When ``auto_reduce`` is
-    True and the headroom is unsafe, the batch size is halved until the rule
-    is satisfied (never below 1) and the reduction is reported. Otherwise the
-    configuration is left untouched and only a warning is emitted. The user's
-    configuration is never changed silently.
-    """
     warnings = check_memory_headroom(status, min_headroom)
     if not warnings:
         return batch_size, False, []

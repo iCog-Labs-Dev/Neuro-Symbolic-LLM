@@ -1,8 +1,11 @@
+"""Model and tokenizer loading for frozen LLM substrates via TorchAX."""
+
 from __future__ import annotations
 
 from typing import Any
 
 import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from frozenllm.substrate.torchax_backend import enable_torchax, to_torchax_device
 
@@ -16,12 +19,7 @@ def load_torchax_model(
     attn_implementation: str | None = "eager",
     torch_dtype: torch.dtype | str | None = None,
 ) -> tuple[torch.nn.Module, dict[str, torch.Tensor]]:
-    """Load a real HF model checkpoint, moved onto TorchAX's JAX-backed
-    device, with its parameters frozen and exposed as an explicit dict.
-    """
     enable_torchax()
-
-    from transformers import AutoConfig, AutoModelForCausalLM  # local import: heavy dep
 
     config = AutoConfig.from_pretrained(model_id, revision=revision)
     if config.model_type not in _SUPPORTED_MODEL_TYPES:
@@ -64,7 +62,4 @@ def load_torchax_model(
 
 
 def load_tokenizer(model_id: str) -> Any:
-    """Load the tokenizer for a given HF checkpoint."""
-    from transformers import AutoTokenizer  # local import: heavy dep
-
     return AutoTokenizer.from_pretrained(model_id)
