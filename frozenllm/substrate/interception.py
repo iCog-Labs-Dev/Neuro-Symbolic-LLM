@@ -19,7 +19,12 @@ import jax
 import torch
 from torch.func import functional_call
 
-from .architecture import Architecture, detect_architecture, get_block_accessor, validate_interception_layers
+from .architecture import (
+    Architecture,
+    detect_architecture,
+    get_block_accessor,
+    validate_interception_layers,
+)
 from .torchax_backend import from_jax_array, to_jax_array
 
 # ModifyFn contract: (hidden_state, layer_idx) -> modified_hidden_state
