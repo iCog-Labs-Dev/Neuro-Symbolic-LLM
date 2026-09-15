@@ -372,6 +372,7 @@ class FrozenSubstrate:
         }
         return result, report
 
+
     def __repr__(self) -> str:
         return (
             f"FrozenSubstrate(model_family={self._architecture.model_family!r}, "
