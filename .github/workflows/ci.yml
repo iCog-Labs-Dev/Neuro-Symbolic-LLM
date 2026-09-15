@@ -5,7 +5,7 @@ name: CI
 on:
   push:
     branches:
-      - '**'        # Run on all branches
+      - '**'
   pull_request:
     branches:
       - main
@@ -17,6 +17,7 @@ jobs:
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,17 +32,19 @@ jobs:
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Install pre-commit
-        run: pip install pre-commit
+        run: python -m pip install pre-commit
 
       - name: Run all pre-commit hooks
         env:
           SKIP: no-commit-to-branch
         run: pre-commit run --all-files
 
+
   # Unit tests
   test:
     name: Unit tests
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +61,7 @@ jobs:
           echo "Files in root directory:"
           ls -la
           echo "Checking for pyproject.toml:"
+
           if [ -f "pyproject.toml" ]; then
             echo "pyproject.toml found!"
             head -20 pyproject.toml
