@@ -128,7 +128,7 @@ The test suite in `tests/frozenllm/unit/` covers all critical architectural inva
 ### Dependencies
 Defined in `pyproject.toml`:
 - **Python:** $\ge 3.10$
-- **PyTorch:** `torch==2.6.0`
+- **PyTorch:** `torch>=2.6.0,<2.13.0`
 - **TorchAX:** `torchax==0.0.14.dev20260617`
 - **JAX Ecosystem:** `jax>=0.4.30`, `jaxlib>=0.4.30`, `optax>=0.2.0`, `orbax-checkpoint>=0.5.0`
 - **Transformers:** `transformers>=4.40.0`, `datasets>=2.19.0`
