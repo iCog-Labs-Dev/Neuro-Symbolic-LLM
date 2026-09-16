@@ -15,8 +15,6 @@ torchax.enable_globally()
 
 
 def _tiny_neox_model() -> GPTNeoXForCausalLM:
-    # same scale as test_torchax_gpt2.py's _tiny_model(), same rotary/attention
-    # settings as the project's existing NEOX_CFG fixture in conftest.py
     cfg = GPTNeoXConfig(
         vocab_size=100,
         hidden_size=32,

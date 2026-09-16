@@ -38,8 +38,6 @@ def _top_keys(params: Any) -> set[str]:
 
 
 def _family_from_keys(keys: set[str]) -> str | None:
-    # Family is determined by the presence of the family container keys;
-    # other top-level keys (e.g. a shared 'lm_head') may be present in both.
     if "transformer" in keys:
         return "gpt2"
     if "gpt_neox" in keys:
@@ -69,8 +67,6 @@ def _family_from_config(config: Any) -> str | None:
                 return "gpt2"
             if "neox" in arch_lower or "pythia" in arch_lower:
                 return "neox"
-
-    # Key/attribute heuristics
     if (
         _config_value(config, "n_layer", None) is not None
         and _config_value(config, "n_embd", None) is not None
@@ -308,7 +304,6 @@ def discover_layers(target: Any, config: Any = None) -> int:
     return detect_architecture(target, config).num_layers
 
 
-# Backward compatibility alias
 discover_layers_from_config = discover_layers
 
 

@@ -34,7 +34,7 @@ SHAKESPEARE_URL = (
 
 WIKI_DATASET = "Salesforce/wikitext"
 WIKI_CONFIG = "wikitext-2-raw-v1"
-WIKI_CHARS = 400_000  # how much Wikipedia text to keep
+WIKI_CHARS = 400_000
 
 
 def download_shakespeare() -> None:

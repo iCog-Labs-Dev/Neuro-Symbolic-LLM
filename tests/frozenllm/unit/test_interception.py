@@ -73,7 +73,6 @@ class TestInterceptionContextLifecycle:
             assert len(model.transformer.h[3]._forward_hooks) == 1
             assert len(ctx._handles) == 2
 
-        # Upon exit, all hooks are cleanly removed
         assert len(model.transformer.h[1]._forward_hooks) == 0
         assert len(model.transformer.h[3]._forward_hooks) == 0
         assert len(ctx._handles) == 0
@@ -144,7 +143,6 @@ class TestInterceptionForwardExecution:
             assert out.logits.shape == (2, 8, model.config.vocab_size)
             assert sorted(ctx.intermediates.keys()) == [1, 3]
 
-            # Hidden states have shape [batch, seq, hidden_size]
             for layer_idx in [1, 3]:
                 h = ctx.intermediates[layer_idx]
                 assert isinstance(h, torch.Tensor)
@@ -174,7 +172,6 @@ class TestInterceptionForwardExecution:
         torch.manual_seed(0)
         ids = torch.randint(0, model.config.vocab_size, (2, 8))
 
-        # 1. Run pristine baseline to record unmodified layer 1 output
         with (
             torch.no_grad(),
             InterceptionContext(model, intercept_layers=[1]) as ctx_base,
@@ -182,7 +179,6 @@ class TestInterceptionForwardExecution:
             base_out = model(input_ids=ids)
             base_h1 = ctx_base.intermediates[1].clone()
 
-        # 2. Run with modification: perturb layer 1 hidden state with dimension-varying offset
         def perturb(h: torch.Tensor, layer_idx: int) -> torch.Tensor:
             return h + 0.5 * torch.arange(h.shape[-1], device=h.device, dtype=h.dtype)
 
@@ -195,10 +191,7 @@ class TestInterceptionForwardExecution:
             mod_out = model(input_ids=ids)
             mod_cached_h1 = ctx_mod.intermediates[1]
 
-        # Intermediates MUST capture pristine pre-modification state
         assert torch.allclose(base_h1, mod_cached_h1, atol=1e-6)
-
-        # Output logits MUST change due to downstream perturbation
         assert not torch.allclose(base_out.logits, mod_out.logits, atol=1e-2)
 
 
@@ -233,7 +226,6 @@ class TestRunWithHooks:
         ids = torch.randint(0, model.config.vocab_size, (2, 8))
         params = dict(model.named_parameters())
 
-        # Baseline run
         base_out, base_inter = run_with_hooks(
             model=model,
             params=params,
@@ -241,7 +233,6 @@ class TestRunWithHooks:
             intercept_layers=[1],
         )
 
-        # Perturbed run
         def zero_hook(h: torch.Tensor, layer_idx: int) -> torch.Tensor:
             return h * 0.0
 
@@ -253,10 +244,7 @@ class TestRunWithHooks:
             modify_fn=zero_hook,
         )
 
-        # Pristine hidden states match
         assert torch.allclose(base_inter[1], mod_inter[1], atol=1e-6)
-
-        # Logits differ due to modification
         assert not torch.allclose(base_out.logits, mod_out.logits, atol=1e-2)
 
 
@@ -268,7 +256,6 @@ class TestMultipleInterceptions:
         torch.manual_seed(0)
         ids = torch.randint(0, model.config.vocab_size, (2, 8))
 
-        # 1. Baseline unmodified run
         with (
             torch.no_grad(),
             InterceptionContext(model, intercept_layers=[0, 2]) as ctx_base,
@@ -277,7 +264,6 @@ class TestMultipleInterceptions:
             base_h0 = ctx_base.intermediates[0].clone()
             base_h2 = ctx_base.intermediates[2].clone()
 
-        # 2. Modify layer 0 only with dimension-varying perturbation
         def mod_layer_0_only(h: torch.Tensor, layer_idx: int) -> torch.Tensor:
             if layer_idx == 0:
                 return h + 0.5 * torch.arange(
@@ -295,12 +281,9 @@ class TestMultipleInterceptions:
             l0_h0 = ctx_l0.intermediates[0]
             l0_h2 = ctx_l0.intermediates[2]
 
-        # Pristine h0 MUST match baseline
         assert torch.allclose(base_h0, l0_h0, atol=1e-6)
-        # But h2 in l0 run MUST differ from base_h2 because layer 0's modification cascaded through layer 1
         assert not torch.allclose(base_h2, l0_h2, atol=1e-3)
 
-        # 3. Modify both layer 0 and layer 2 with distinct operations
         def mod_both(h: torch.Tensor, layer_idx: int) -> torch.Tensor:
             if layer_idx == 0:
                 return h + 0.5 * torch.arange(
@@ -320,12 +303,8 @@ class TestMultipleInterceptions:
             both_h0 = ctx_both.intermediates[0]
             both_h2 = ctx_both.intermediates[2]
 
-        # In the combined run:
-        # both_h0 is pristine layer 0 (matches base_h0)
         assert torch.allclose(base_h0, both_h0, atol=1e-6)
-        # both_h2 is pristine layer 2 (matches l0_h2 before layer 2 was scaled by 0.5)
         assert torch.allclose(l0_h2, both_h2, atol=1e-6)
-        # Logits of all three runs differ
         assert not torch.allclose(base_out.logits, l0_out.logits, atol=1e-2)
         assert not torch.allclose(l0_out.logits, both_out.logits, atol=1e-2)
 

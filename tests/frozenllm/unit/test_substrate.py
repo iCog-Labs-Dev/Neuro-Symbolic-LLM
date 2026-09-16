@@ -93,7 +93,6 @@ class TestFrozenSubstrateInit:
         model = real_gpt2_model
         sub = FrozenSubstrate(model)
 
-        # Invariant: every parameter leaf has requires_grad=False
         for name, param in sub.params.items():
             assert not param.requires_grad, f"Param {name} was not frozen!"
 
@@ -132,7 +131,6 @@ class TestFrozenSubstrateForward:
         assert isinstance(result.logits, jax.Array)
         assert result.logits.shape == (batch, seq_len, model.config.vocab_size)
 
-        # Intermediates check
         assert result.layer_indices() == (1,)
         h1 = result.hidden_state(1)
         assert isinstance(h1, jax.Array)
@@ -154,7 +152,6 @@ class TestFrozenSubstrateForward:
         assert isinstance(result.logits, jax.Array)
         assert result.logits.shape == (batch, seq_len, model.config.vocab_size)
 
-        # Intermediates check
         assert result.layer_indices() == (2,)
         h2 = result.hidden_state(2)
         assert isinstance(h2, jax.Array)
@@ -172,7 +169,6 @@ class TestFrozenSubstrateForward:
             sub(jnp.zeros((2, 0), dtype=jnp.int32))
 
     def test_tokenize_helper(self, real_gpt2_model: GPT2LMHeadModel):
-        # Mock tokenizer returning PyTorch tensor
         class MockTokenizer:
             def __call__(self, text, return_tensors="pt", **kw):
                 return {"input_ids": torch.tensor([[10, 20, 30]])}
@@ -210,10 +206,8 @@ class TestInterceptionAndSteering:
 
         input_ids = jnp.ones((1, 4), dtype=jnp.int32)
 
-        # 1. Baseline unsteered run
         baseline = sub(input_ids)
 
-        # 2. Steered run: add dimension-varying perturbation at layer 2
         def steer(h: jax.Array, layer_idx: int) -> jax.Array:
             delta = jnp.linspace(1.0, 5.0, h.shape[-1])
             return h + delta
@@ -224,14 +218,11 @@ class TestInterceptionAndSteering:
             intercept_layers=[2],
         )
 
-        # Both results return valid JAX arrays
         assert isinstance(steered.logits, jax.Array)
 
-        # Logits must diverge due to downstream propagation
         diff = float(jnp.max(jnp.abs(steered.logits - baseline.logits)))
         assert diff > 0.0, "Steering did not affect downstream logits!"
 
-        # Pristine intermediate at layer 2 should match between both runs
         pristine_diff = float(
             jnp.max(jnp.abs(steered.hidden_state(2) - baseline.hidden_state(2)))
         )
@@ -245,10 +236,8 @@ class TestInterceptionAndSteering:
 
         input_ids = jnp.ones((1, 4), dtype=jnp.int32)
 
-        # 1. Baseline unsteered run
         baseline = sub(input_ids)
 
-        # 2. Steered run: add dimension-varying perturbation at layer 1
         def steer(h: jax.Array, layer_idx: int) -> jax.Array:
             delta = jnp.linspace(1.0, 5.0, h.shape[-1])
             return h + delta
@@ -275,7 +264,6 @@ class TestInterceptionAndSteering:
         input_ids = jnp.zeros((1, 4), dtype=jnp.int32)
         _ = sub(input_ids)
 
-        # Hooks must be cleaned up after forward pass
         for block in model.transformer.h:
             assert len(block._forward_hooks) == 0
 
@@ -286,7 +274,6 @@ class TestInterceptionAndSteering:
         input_ids = jnp.zeros((1, 4), dtype=jnp.int32)
         _ = sub(input_ids)
 
-        # Hooks must be cleaned up after forward pass
         for block in model.gpt_neox.layers:
             assert len(block._forward_hooks) == 0
 
@@ -295,7 +282,6 @@ class TestCausalLossComputation:
     def test_compute_loss_causal_shift(self):
         vocab_size = 64
         batch, seq_len = 2, 6
-        # Deterministic logits
         logits = jnp.zeros((batch, seq_len, vocab_size))
         labels = jnp.zeros((batch, seq_len), dtype=jnp.int32)
 
@@ -303,14 +289,12 @@ class TestCausalLossComputation:
 
         assert isinstance(loss, jax.Array)
         assert loss.ndim == 0
-        # Uniform distribution over vocab_size tokens: -ln(1/V) = ln(V)
         expected = float(jnp.log(vocab_size))
         assert abs(float(loss) - expected) < 1e-4
 
     def test_compute_loss_ignores_padding(self):
         batch, seq_len, vocab_size = 1, 4, 10
         logits = jnp.zeros((batch, seq_len, vocab_size))
-        # Mask out all target positions except one
         labels = jnp.array([[-100, -100, 0, -100]], dtype=jnp.int32)
 
         loss = FrozenSubstrate.compute_loss(logits, labels)

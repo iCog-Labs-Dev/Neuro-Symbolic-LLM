@@ -35,7 +35,6 @@ class TestValueConversion:
     def test_to_jax_array_produces_real_jax_array(self):
         t = to_torchax_device(torch.randn(3, 3))
         arr = to_jax_array(t)
-        # genuine jax array math should work directly, no torch involved
         result = jnp.sum(arr)
         assert result.shape == ()
 
@@ -66,15 +65,12 @@ class TestCallJaxDifferentiable:
         w_vals = torch.randn(d, d) * 0.02
         b_vals = torch.zeros(d)
 
-        # ground truth: pure torch, no torchax involved at all
         h0g = h0_vals.clone().requires_grad_()
         w_g = w_vals.clone().requires_grad_()
         bg = b_vals.clone().requires_grad_()
         out_g = h0g + torch.tanh(h0g @ w_g + bg)
         (out_g**2).sum().backward()
 
-        # real raw-JAX function -- no torch syntax anywhere, standing in
-        # for a genuine FabricPC node computation
         def raw_jax_residual(h0, w, b):
             return h0 + jnp.tanh(jnp.matmul(h0, w) + b)
 
@@ -93,8 +89,6 @@ class TestCallJaxDifferentiable:
         assert torch.allclose(bg.grad, bj.grad.to("cpu"), atol=1e-5)
 
     def test_jax_fn_receives_no_torch_syntax_requirement(self):
-        # explicitly confirms that jax_fn can
-        # use jax.lax / jnp freely, no torch ops required inside it
         def uses_lax(x, y):
             return jax.lax.add(x, y)
 
@@ -107,8 +101,6 @@ class TestCallJaxDifferentiable:
         assert x.grad is not None
 
     def test_does_not_require_h0_to_require_grad(self):
-        # matches the real use case: h0 is a frozen model's hidden state
-        # (requires_grad=False), only the residual's own params need grad
         def raw_jax_residual(h0, W, b):
             return h0 + jnp.tanh(jnp.matmul(h0, W) + b)
 

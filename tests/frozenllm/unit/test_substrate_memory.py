@@ -92,10 +92,7 @@ class TestHeadroomRule:
     def test_configurable_threshold(self):
         status = _fake_status(total=1000, allocated=600)
 
-        # Headroom = 0.4, safe under a 0.3 threshold.
         assert check_memory_headroom(status, min_headroom=0.3) == []
-
-        # Headroom = 0.4, unsafe under a 0.5 threshold.
         assert len(check_memory_headroom(status, min_headroom=0.5)) == 1
 
 
@@ -122,7 +119,6 @@ class TestAutoBatchReduction:
             auto_reduce=False,
         )
 
-        # Configuration remains untouched when auto-reduction is disabled.
         assert batch == 8
         assert reduced is False
         assert any("WARNING" in w for w in warnings)
@@ -149,7 +145,6 @@ class TestAutoBatchReduction:
             auto_reduce=False,
         )
 
-        # Never silently changes the user's configuration.
         assert batch == 8
         assert reduced is False
 
@@ -176,7 +171,6 @@ class TestDrift:
         assert result["kl_divergence"] > 0.0
 
     def test_kl_stable(self):
-        # Extreme logits must not produce NaN.
         a = jnp.array([[1e10, -1e10, 0.0]])
         b = jnp.array([[-1e10, 1e10, 0.0]])
 

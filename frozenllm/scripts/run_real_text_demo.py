@@ -28,24 +28,20 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# Ensure repo root and frozenllm are on sys.path even when run directly as a script
+import jax
+import jax.numpy as jnp
+import numpy as np
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+if not hasattr(torch, "float4_e2m1fn_x2"):
+    torch.float4_e2m1fn_x2 = getattr(torch, "float8_e4m3fn", torch.uint8)
+
 FROZENLLM_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = FROZENLLM_DIR.parent
 for _p in (REPO_ROOT, FROZENLLM_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
-
-import jax  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-
-# Compatibility patch for torchax versions expecting FP4 dtype on PyTorch < 2.5
-if not hasattr(torch, "float4_e2m1fn_x2"):
-    torch.float4_e2m1fn_x2 = getattr(torch, "float8_e4m3fn", torch.uint8)
-
-
-from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 from frozenllm.substrate import (  # noqa: E402
     FrozenSubstrate,
@@ -60,7 +56,7 @@ SHAKESPEARE_URL = (
     "master/data/tinyshakespeare/input.txt"
 )
 
-# Public-domain fallback so the demo also works fully offline.
+
 FALLBACK_TEXT = """\
 To be, or not to be, that is the question:
 Whether 'tis nobler in the mind to suffer
@@ -197,7 +193,6 @@ def main() -> int:
     print(f"JAX backend : {jax.default_backend()}")
     print(f"Devices     : {[str(d) for d in jax.devices()]}")
 
-    # ── Real text ───────────────────────────────────────────────────────────
     section("2. REAL TEXT")
     text = load_text(args.text)
     print(f"Preview     : {text[:70]!r}...")
@@ -212,8 +207,6 @@ def main() -> int:
         encoded["input_ids"][0][: args.max_tokens].tolist()
     )
 
-    # Load native PyTorch reference model BEFORE enabling TorchAX dispatch,
-    # so it runs on vanilla CPU PyTorch (prevents nan from TorchAX interception).
     print(f"Pre-loading native PyTorch reference model on CPU ({args.dtype})...")
     ref_kwargs: dict[str, Any] = {"dtype": selected_dtype}
     if args.attn_implementation:
@@ -239,13 +232,11 @@ def main() -> int:
         ref_logits_np = torch_ref_model(
             input_ids=torch.from_numpy(input_ids)
         ).logits.numpy()
-    del torch_ref_model  # free CPU memory before TorchAX model load
+    del torch_ref_model
 
-    # Now enable TorchAX global dispatch
     enable_torchax()
     print("TorchAX     : enabled (monolithic JAX-backed PyTorch execution)")
 
-    # ── Frozen substrate from the real checkpoint ───────────────────────────
     section("3. LOADING FROZEN SUBSTRATE")
     print(
         f"Loading     : {args.model} via TorchAX ({args.dtype}, attn={args.attn_implementation})"
@@ -274,23 +265,16 @@ def main() -> int:
         recorded[layer_idx] = (h, out)
         return out
 
-    # ── Forward pass with interception ──────────────────────────────────────
     section("4. FORWARD PASS (EVERY INTERCEPTED LAYER)")
     ids = jnp.asarray(input_ids, dtype=jnp.int32)
 
-    # 1. Plain reference run (no modification)
     plain_result = sub.run_with_interception(
         input_ids=ids,
         modify_fn=None,
         intercept_layers=layers,
     )
-    # Materialise logits: to_jax_array uses a zero-copy view into the XLA
-    # output buffer.  A second forward pass may reuse that buffer, silently
-    # overwriting plain_result.logits.  Roundtrip through numpy to guarantee
-    # an owned copy (jnp.array(copy=True) may be unsupported in older JAX).
     plain_logits = jnp.asarray(np.array(plain_result.logits))
 
-    # 2. Recorded run with active hook
     result = sub.run_with_interception(
         input_ids=ids,
         modify_fn=recording_hook,
@@ -329,7 +313,6 @@ def main() -> int:
             f"applied +0.0 and returned it unchanged: {identity_ok}"
         )
 
-    # ── Original-vs-wrapper equivalence on real data ────────────────────────
     section("5. ORIGINAL TORCH MODEL VS TORCHAX SUBSTRATE")
     print("Comparing against native PyTorch reference (pre-loaded on CPU)...")
     max_abs = float(np.max(np.abs(ref_logits_np - np.asarray(plain_logits))))
@@ -337,7 +320,6 @@ def main() -> int:
     print(f"max |torch - torchax| logit diff : {max_abs:.3e}")
     print(f"KL(torch || torchax substrate)   : {kl_ref:.3e}")
 
-    # ── Next-token predictions you can read ────────────────────────────────
     section("6. TOP NEXT-TOKEN PREDICTIONS (LAST POSITION)")
     last_logits = np.asarray(plain_logits)[0, -1]
     top_ids = np.argsort(last_logits)[::-1][: args.topk]
@@ -354,7 +336,6 @@ def main() -> int:
             "steered : " + " | ".join(repr(tokenizer.decode([int(t)])) for t in s_top)
         )
 
-    # ── Memory monitoring and headroom rule ─────────────────────────────────
     section("8. MEMORY STATUS AND HEADROOM RULE")
     status = get_memory_status()
     print(f"platform    : {status.platform}")
@@ -382,7 +363,6 @@ def main() -> int:
         f"effective_batch={report['effective_batch_size']}"
     )
 
-    # ── Freeze guarantee ────────────────────────────────────────────────────
     section("9. FREEZE VERIFICATION")
     frozen = sub.verify_frozen()
     print(f"params_unchanged : {frozen['params_unchanged']}")

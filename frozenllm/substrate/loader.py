@@ -38,7 +38,6 @@ def load_torchax_model(
             model_id, revision=revision, **load_kwargs
         )
     except TypeError:
-        # Backward compatibility for transformers versions using torch_dtype or lacking attn_implementation
         load_kwargs.pop("dtype", None)
         load_kwargs["torch_dtype"] = effective_dtype
         try:

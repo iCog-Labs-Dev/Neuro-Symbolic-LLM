@@ -103,7 +103,6 @@ class InterceptionContext(AbstractContextManager["InterceptionContext"]):
         def hook(module: Any, args: Any, output: Any) -> Any:
             h, is_tuple, rest = _extract_hidden(output)
 
-            # 1. Cache pristine h_l^0 (pre-modification state)
             h_cached = (
                 h.clone() if (self.clone_intermediates and hasattr(h, "clone")) else h
             )
@@ -114,10 +113,8 @@ class InterceptionContext(AbstractContextManager["InterceptionContext"]):
                 self.intermediates[layer_idx] = h_cached
                 h_input = h
 
-            # 2. Apply modify_fn to pristine state
             h_mod = self.modify_fn(h_input, layer_idx)
 
-            # Convert back to torch/torchax tensor if a JAX array was returned
             if hasattr(h_mod, "__class__") and "jax" in str(type(h_mod)).lower():
                 h_modified = from_jax_array(h_mod)
             elif isinstance(h_mod, torch.Tensor):
@@ -131,7 +128,6 @@ class InterceptionContext(AbstractContextManager["InterceptionContext"]):
                 except Exception:
                     h_modified = h_mod
 
-            # 3. Return modified state to flow into downstream blocks
             return _wrap_hidden(h_modified, is_tuple, rest)
 
         return hook

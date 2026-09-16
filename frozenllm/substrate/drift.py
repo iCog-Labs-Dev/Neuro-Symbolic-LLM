@@ -22,6 +22,5 @@ def compute_kl_drift(
     p = jnp.exp(log_p)
     kl_per_position = jnp.sum(p * (log_p - log_q), axis=-1)
     mean_kl = float(jnp.mean(kl_per_position))
-    # KL divergence is non-negative in exact arithmetic; clamp float noise.
     mean_kl = max(0.0, mean_kl)
     return {"kl_divergence": mean_kl}
