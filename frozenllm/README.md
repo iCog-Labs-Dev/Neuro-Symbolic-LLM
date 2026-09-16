@@ -9,19 +9,17 @@ Supports arbitrary per-layer hidden-state interception, activation caching, bi-d
 ## Table of Contents
 
 1. [Architectural Overview](#architectural-overview)
-2. [What Was Built & Current Status](#what-was-built--current-status)
-3. [Implementation Design & Data Flow](#implementation-design--data-flow)
-4. [File Breakdown](#file-breakdown)
-5. [Test Suite Documentation](#test-suite-documentation)
+2. [Implementation Design & Data Flow](#implementation-design--data-flow)
+3. [File Breakdown](#file-breakdown)
+4. [Test Suite Documentation](#test-suite-documentation)
    - [Consolidated Unit Test Modules](#consolidated-unit-test-modules)
-6. [Installation & Requirements](#installation--requirements)
-7. [How to Run](#how-to-run)
-   - [Prepare offline text and tokenizers](#1-prepare-offline-data)
-   - [Run the real-text demo](#2-run-the-real-text-demo)
-   - [Run the test suites](#3-run-tests)
-   - [Run pre-commit / lint checks](#4-code-quality-checks)
-   - [Quickstart: Use FrozenSubstrate in Python](#5-quickstart-python-example)
-8. [Core Architectural Guarantees](#core-architectural-guarantees)
+5. [Installation & Requirements](#installation--requirements)
+6. [How to Run](#how-to-run)
+   - [Run the real-text demo](#1-run-the-real-text-demo)
+   - [Run the test suites](#2-run-tests)
+   - [Run pre-commit / lint checks](#3-code-quality-checks)
+   - [Quickstart: Use FrozenSubstrate in Python](#4-quickstart-python-example)
+7. [Core Architectural Guarantees](#core-architectural-guarantees)
 
 ---
 
@@ -36,24 +34,6 @@ The repository uses **monolithic TorchAX dispatch architecture**:
 5. **LayerNorm Invariance Resolution:** Standardized all steering interventions to use dimension-varying vectors (e.g. `jnp.linspace`), resolving mathematical cancellation where uniform perturbations are eliminated by LayerNorm.
 6. **Bi-directional JAX $\leftrightarrow$ TorchAX Bridge:** Passes a pure `jax.Array` to `modify_fn` when `to_jax=True` via zero-copy `torchax.interop.jax_view`, and automatically converts returned JAX arrays back via `torchax.interop.torch_view` before handing control to downstream blocks.
 7. **Pristine State Guarantee:** Cached intermediates strictly store pre-modification activations $h_l^0$, ensuring downstream steering cannot corrupt recorded activations.
-
----
-
-## What Was Built & Current Status
-
-| Requirement / Milestone | Status | Details |
-|---|---|---|
-| **Monolithic TorchAX Substrate** | **Completed** | `FrozenSubstrate` in `frozenllm/substrate/substrate.py` executes full models on device `"jax"`. |
-| **Multi-Architecture Support** | **Completed** | Auto-detects GPT-2 and Pythia/GPT-NeoX configurations and weight hierarchies. |
-| **Strict Base Freezing ($\nabla \theta_0 = 0$)** | **Completed** | `requires_grad=False` on all parameter leaves; verified with `sub.params_unchanged()`. |
-| **In-Flight Layer Interception** | **Completed** | Dynamic forward hooks with lifecycle safety in `InterceptionContext`. |
-| **Pristine Activation Caching** | **Completed** | Pre-modification hidden states $h_l^0$ cached in `ForwardResult.intermediates`. |
-| **Bi-Directional JAX Bridge** | **Completed** | Zero-copy `to_jax_array` and `from_jax_array` via TorchAX interop views. |
-| **Autograd Residual Bridge** | **Completed** | `call_jax_differentiable` via `torchax.interop.j2t_autograd` enables gradient flow to trainable parameters $\phi$. |
-| **Causal Loss Computation** | **Completed** | `FrozenSubstrate.compute_loss` evaluates shifted cross-entropy with padding masking. |
-| **KL Drift Monitoring** | **Completed** | `compute_kl_drift` computes numerically stable $D_{\text{KL}}(P_{\text{base}} \parallel P_{\text{steered}})$. |
-| **Device Memory Guard** | **Completed** | Headroom monitoring + 50% safety rule with automatic batch-size reduction option. |
-| **Verification Suite** | **Completed** | Comprehensive test suite covering substrate execution, interception invariants, and autograd bridging. |
 
 ---
 
@@ -122,8 +102,7 @@ FrozenSubstrate.compute_loss(logits, labels) [Optional Loss Step]
 
 ### Scripts (`frozenllm/scripts/`)
 
-- **`prepare_data.py`**: One-time offline downloader for the Shakespeare corpus, sample Wikipedia text, and Hugging Face tokenizers.
-- **`run_real_text_demo.py`**: Interactive end-to-end demonstration featuring text tokenization, monolithic forward execution, layer-by-layer identity verification, steering interventions, and memory telemetry.
+- **`run_real_text_demo.py`**: Single entry-point script combining data preparation (Shakespeare download, Wikipedia extraction, tokenizer caching) and the interactive end-to-end demonstration (text tokenization, monolithic forward execution, layer-by-layer identity verification, steering interventions, and memory telemetry). Data is auto-prepared on first run; use `--prepare` to run data preparation only.
 
 ---
 
@@ -172,35 +151,45 @@ pre-commit install
 
 ## How to Run
 
-### 1. Prepare Offline Data
-Downloads datasets and tokenizers to `data/`:
-```bash
-python frozenllm/scripts/prepare_data.py
-```
-
-### 2. Run the Real-Text Demo
+### 1. Run the Real-Text Demo
+Data (Shakespeare, Wikipedia text, tokenizers) is downloaded automatically on first run:
 ```bash
 # Run GPT-2 on Shakespeare text with all layers intercepted
 python frozenllm/scripts/run_real_text_demo.py --max-tokens 96
 
 # Run Pythia-70m with dimension-varying steering at layers 0, 3, 5
 python frozenllm/scripts/run_real_text_demo.py --model EleutherAI/pythia-70m --layers 0,3,5 --steer 2.0
+
+# Use your own text file
+python frozenllm/scripts/run_real_text_demo.py --text hamlet.txt --max-tokens 64
+
+# Use Wikipedia text with steering and top-10 predictions
+python frozenllm/scripts/run_real_text_demo.py --text data/wiki.txt --steer 1.5 --topk 10
+
+# Use bfloat16 precision with SDPA attention
+python frozenllm/scripts/run_real_text_demo.py --dtype bfloat16 --attn-implementation sdpa
+
+# Intercept only specific layers (zero-based)
+python frozenllm/scripts/run_real_text_demo.py --layers 0,5,11
+
+# Prepare data only (download datasets and cache tokenizers) without running the demo
+python frozenllm/scripts/run_real_text_demo.py --prepare
 ```
 
-### 3. Run Tests
+### 2. Run Tests
 ```bash
 # Run all unit tests
 pytest tests/frozenllm/unit/ -v
 ```
 
-### 4. Code Quality Checks
+### 3. Code Quality Checks
 All checks configured in `.pre-commit-config.yaml`:
 ```bash
 # Run all hooks across the codebase
 pre-commit run --all-files
 ```
 
-### 5. Quickstart: Python Example
+### 4. Quickstart: Python Example
 
 ```python
 import jax.numpy as jnp

@@ -13,8 +13,13 @@ through a pretrained causal LM wrapped in ``FrozenSubstrate``:
 6. reports device memory status and applies the 50% headroom rule,
 7. verifies the parameters were never modified.
 
+Data preparation (Shakespeare download, Wikipedia extraction, tokenizer
+caching) is performed automatically on the first run. Use ``--prepare``
+to run data preparation only and exit.
+
 Usage:
     python frozenllm/scripts/run_real_text_demo.py
+    python frozenllm/scripts/run_real_text_demo.py --prepare
     python frozenllm/scripts/run_real_text_demo.py --model EleutherAI/pythia-70m
     python frozenllm/scripts/run_real_text_demo.py --text hamlet.txt --layers 0,5,11
     python frozenllm/scripts/run_real_text_demo.py --steer 2.0
@@ -32,6 +37,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 if not hasattr(torch, "float4_e2m1fn_x2"):
@@ -51,10 +57,16 @@ from frozenllm.substrate import (  # noqa: E402
     get_memory_status,
 )
 
+DATA_DIR = REPO_ROOT / "data"
+
 SHAKESPEARE_URL = (
     "https://raw.githubusercontent.com/karpathy/char-rnn/"
     "master/data/tinyshakespeare/input.txt"
 )
+
+WIKI_DATASET = "Salesforce/wikitext"
+WIKI_CONFIG = "wikitext-2-raw-v1"
+WIKI_CHARS = 400_000
 
 
 FALLBACK_TEXT = """\
@@ -73,6 +85,70 @@ When we have shuffled off this mortal coil,
 Must give us pause. There's the respect
 That makes calamity of so long life.
 """
+
+
+def download_shakespeare() -> None:
+    out = DATA_DIR / "shakespeare.txt"
+    if out.is_file():
+        print(f"[skip] {out.name} already exists ({out.stat().st_size} bytes)")
+        return
+    print("[get ] downloading tinyshakespeare ...")
+    with urllib.request.urlopen(SHAKESPEARE_URL, timeout=30) as resp:
+        text = resp.read().decode("utf-8")
+    out.write_text(text, encoding="utf-8")
+    print(f"[ok  ] {out} ({len(text)} chars, {text.count(chr(10))} lines)")
+
+
+def extract_wikipedia() -> None:
+    out = DATA_DIR / "wiki.txt"
+    if out.is_file():
+        print(f"[skip] {out.name} already exists ({out.stat().st_size} bytes)")
+        return
+    print(f"[get ] loading {WIKI_DATASET}/{WIKI_CONFIG} train split ...")
+    ds = load_dataset(WIKI_DATASET, WIKI_CONFIG, split="train")
+    chunks: list[str] = []
+    total = 0
+    for row in ds:
+        line = row["text"]
+        if not line or not line.strip():
+            continue
+        chunks.append(line.strip())
+        total += len(line) + 1
+        if total >= WIKI_CHARS:
+            break
+    text = "\n".join(chunks)
+    out.write_text(text, encoding="utf-8")
+    print(f"[ok  ] {out} ({len(text)} chars from {len(chunks)} paragraphs)")
+
+
+def save_tokenizer(model_id: str, folder: str) -> None:
+    out = DATA_DIR / folder
+    if out.is_dir() and any(out.iterdir()):
+        print(f"[skip] {folder}/ already exists")
+        return
+    print(f"[get ] tokenizer for {model_id} ...")
+    tok = AutoTokenizer.from_pretrained(model_id)
+    tok.save_pretrained(out)
+    n_files = len(list(out.iterdir()))
+    print(f"[ok  ] {out} ({n_files} files, vocab={tok.vocab_size})")
+
+
+def prepare_data() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Data folder : {DATA_DIR}\n")
+    download_shakespeare()
+    extract_wikipedia()
+    save_tokenizer("gpt2", "tokenizer_gpt2")
+    save_tokenizer("EleutherAI/pythia-70m", "tokenizer_pythia")
+    print("\nAll data ready.")
+
+
+def ensure_data() -> None:
+    if (DATA_DIR / "shakespeare.txt").is_file():
+        return
+    print("Data not found — running automatic preparation ...\n")
+    prepare_data()
+    print()
 
 
 def section(title: str) -> None:
@@ -140,6 +216,11 @@ def make_steer(strength: float):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Download datasets and cache tokenizers to data/, then exit",
+    )
+    parser.add_argument(
         "--model",
         default="gpt2",
         help="HuggingFace model id (gpt2 family or Pythia/GPT-NeoX)",
@@ -181,6 +262,12 @@ def main() -> int:
         help="Attention implementation (default: eager to avoid cuDNN version mismatches)",
     )
     args = parser.parse_args()
+
+    if args.prepare:
+        prepare_data()
+        return 0
+
+    ensure_data()
 
     dtype_map = {
         "float32": torch.float32,
