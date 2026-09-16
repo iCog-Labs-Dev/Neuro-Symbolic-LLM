@@ -163,11 +163,8 @@ python frozenllm/scripts/run_real_text_demo.py --model EleutherAI/pythia-70m --l
 # Use your own text file
 python frozenllm/scripts/run_real_text_demo.py --text hamlet.txt --max-tokens 64
 
-# Use Wikipedia text with steering and top-10 predictions
-python frozenllm/scripts/run_real_text_demo.py --text data/wiki.txt --steer 1.5 --topk 10
-
-# Use bfloat16 precision with SDPA attention
-python frozenllm/scripts/run_real_text_demo.py --dtype bfloat16 --attn-implementation sdpa
+# Use Wikipedia text with steering
+python frozenllm/scripts/run_real_text_demo.py --text data/wiki.txt --steer 1.5 
 
 # Intercept only specific layers (zero-based)
 python frozenllm/scripts/run_real_text_demo.py --layers 0,5,11
