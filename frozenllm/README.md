@@ -164,7 +164,7 @@ python frozenllm/scripts/run_real_text_demo.py --model EleutherAI/pythia-70m --l
 python frozenllm/scripts/run_real_text_demo.py --text hamlet.txt --max-tokens 64
 
 # Use Wikipedia text with steering
-python frozenllm/scripts/run_real_text_demo.py --text data/wiki.txt --steer 1.5 
+python frozenllm/scripts/run_real_text_demo.py --text data/wiki.txt --steer 1.5
 
 # Intercept only specific layers (zero-based)
 python frozenllm/scripts/run_real_text_demo.py --layers 0,5,11
