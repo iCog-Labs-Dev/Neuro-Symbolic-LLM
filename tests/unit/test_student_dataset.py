@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from parser.semantic.dataset import StudentBatchCollator, StudentDataset
-from parser.semantic.student_prompt import build_student_prompt
+from parser.student.student_prompt import build_student_prompt
 
 
 class CharacterTokenizer:

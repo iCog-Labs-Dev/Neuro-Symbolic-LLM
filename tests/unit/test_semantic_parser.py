@@ -270,7 +270,7 @@ def student(monkeypatch, tmp_path):
 
 class TestDistilledSemanticParser:
     def test_uses_shared_pipeline_and_student_prompt(self, student):
-        from parser.semantic.student_prompt import build_student_prompt
+        from parser.student.student_prompt import build_student_prompt
 
         parser, tokenizer, model = student
         tokenizer.decode.return_value = (

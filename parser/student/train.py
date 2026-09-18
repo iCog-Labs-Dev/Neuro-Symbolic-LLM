@@ -30,7 +30,7 @@ from parser.semantic.dataset import (
 )
 from parser.semantic.metta_renderer import render_metta
 from parser.semantic.schema import SemanticParseResult
-from parser.semantic.student_prompt import STUDENT_PROMPT, build_student_prompt
+from parser.student.student_prompt import STUDENT_PROMPT, build_student_prompt
 
 # ── Load config ───────────────────────────────────────────────────────────────
 

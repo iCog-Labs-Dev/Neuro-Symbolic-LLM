@@ -29,7 +29,7 @@ from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParseError,
 )
-from parser.semantic.student_prompt import build_student_prompt
+from parser.student.student_prompt import build_student_prompt
 
 # ── Dataset records ────────────────────────────────────────────────────────────
 

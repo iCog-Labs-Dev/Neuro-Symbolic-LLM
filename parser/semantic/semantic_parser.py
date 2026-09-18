@@ -39,7 +39,7 @@ from parser.semantic.normalization import (
     normalize_semantic_result,
 )
 from parser.semantic.schema import SemanticParseResult
-from parser.semantic.student_prompt import build_student_prompt
+from parser.student.student_prompt import build_student_prompt
 
 
 class SemanticParseError(ValueError):
