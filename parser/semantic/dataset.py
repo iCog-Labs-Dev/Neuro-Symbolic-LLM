@@ -11,12 +11,15 @@ This file provides:
 from __future__ import annotations
 
 import json
+import math
+import random
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from parser.semantic.normalization import normalize_semantic_result
@@ -26,6 +29,7 @@ from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParseError,
 )
+from parser.student.student_prompt import build_student_prompt
 
 # ── Dataset records ────────────────────────────────────────────────────────────
 
@@ -139,57 +143,60 @@ class SemanticDatasetBuilder:
 # ── Student Dataset for training ─────────────────────────────────────────────
 
 
+def validate_student_pair(pair: Any) -> None:
+    """Reject malformed input/label records before tokenization or splitting."""
+    if not isinstance(pair, dict) or any(
+        not isinstance(pair.get(key), str) or not pair[key].strip()
+        for key in ("input", "label")
+    ):
+        raise ValueError("input and label must be nonempty strings")
+    if not isinstance(json.loads(pair["label"]), dict):
+        raise ValueError("label must contain a JSON object")
+
+
 class StudentDataset(Dataset):
     """Prepares (input, json_label) pairs for student model training."""
 
     def __init__(self, pairs: list[dict], tokenizer, max_length: int = 256):
+        if max_length <= 0:
+            raise ValueError("max_length must be positive")
+        if tokenizer.eos_token_id is None:
+            raise ValueError("Student training requires an EOS token")
         self.examples = []
+        self.oversized = 0
         skipped = 0
 
         for pair in pairs:
+            try:
+                validate_student_pair(pair)
+            except ValueError:
+                skipped += 1
+                continue
             text = pair.get("input", "").strip()
             json_label = pair.get("label", "").strip()
 
-            if not text or not json_label:
-                skipped += 1
-                continue
-
-            # Validate JSON label
-            try:
-                json.loads(json_label)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
-
-            prompt_text = (
-                f"Extract triples from this sentence as JSON:\nSentence: {text}\nJSON:"
-            )
-            full_text = prompt_text + json_label + tokenizer.eos_token
-
-            full_enc = tokenizer(
-                full_text, truncation=True, max_length=max_length, padding=False
-            )
-            prompt_enc = tokenizer(
-                prompt_text, truncation=True, max_length=max_length, padding=False
-            )
-
-            prompt_len = len(prompt_enc["input_ids"])
-            input_ids = full_enc["input_ids"]
-
-            # Mask prompt tokens: -100 means "ignore for loss"
-            labels = [-100] * min(prompt_len, len(input_ids)) + input_ids[prompt_len:]
-            labels = labels[:max_length]
-
-            if all(i == -100 for i in labels):
-                skipped += 1
+            prompt_text = build_student_prompt(text)
+            # Encode the boundary separately: prompt tokens must match inference,
+            # and every target token must contribute to the loss.
+            prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+            target_ids = tokenizer(json_label, add_special_tokens=False)["input_ids"]
+            target_ids = target_ids + [tokenizer.eos_token_id]
+            input_ids = prompt_ids + target_ids
+            if len(input_ids) > max_length:
+                self.oversized += 1
                 continue
 
             self.examples.append(
                 {
-                    "input_ids": input_ids[:max_length],
-                    "attention_mask": full_enc["attention_mask"][:max_length],
-                    "labels": labels,
+                    "input_ids": input_ids,
+                    "attention_mask": [1] * len(input_ids),
+                    "labels": [-100] * len(prompt_ids) + target_ids,
                 }
+            )
+
+        if self.oversized:
+            print(
+                f"  Skipped {self.oversized} oversized examples (max_length={max_length})"
             )
 
         if skipped > 0:
@@ -202,6 +209,26 @@ class StudentDataset(Dataset):
         return {k: torch.tensor(v) for k, v in self.examples[idx].items()}
 
 
+@dataclass(frozen=True)
+class StudentBatchCollator:
+    """Right-pad inputs while excluding padding from attention and loss."""
+
+    pad_token_id: int
+
+    def __call__(
+        self, examples: list[dict[str, torch.Tensor]]
+    ) -> dict[str, torch.Tensor]:
+        padding = {"input_ids": self.pad_token_id, "attention_mask": 0, "labels": -100}
+        return {
+            key: pad_sequence(
+                [example[key] for example in examples],
+                batch_first=True,
+                padding_value=value,
+            )
+            for key, value in padding.items()
+        }
+
+
 # ── Converter: Structured → Pairs (for student training) ─────────────────────
 
 
@@ -212,6 +239,11 @@ def structured_to_pairs(
     include_confidence: bool = False,
 ) -> list[dict]:
     """Convert teacher structured output to (input, json_label) pairs."""
+    source, destination = Path(input_file), Path(output_file)
+    if source.resolve() == destination.resolve() or (
+        destination.exists() and source.samefile(destination)
+    ):
+        raise ValueError("Input and output paths must differ")
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
 
     pairs = []
@@ -219,7 +251,10 @@ def structured_to_pairs(
     valid = 0
     skipped = 0
 
-    with open(input_file) as fin, open(output_file, "w") as fout:
+    with (
+        open(input_file, encoding="utf-8") as fin,
+        open(output_file, "w", encoding="utf-8") as fout,
+    ):
         for line in fin:
             line = line.strip()
             if not line:
@@ -232,7 +267,10 @@ def structured_to_pairs(
                 skipped += 1
                 continue
 
-            text = record.get("text", "").strip()
+            if not isinstance(record, dict) or not isinstance(record.get("text"), str):
+                skipped += 1
+                continue
+            text = record["text"].strip()
             if not text:
                 skipped += 1
                 continue
@@ -280,3 +318,87 @@ def structured_to_pairs(
 
     print(f"  Total: {total}, Valid: {valid}, Skipped: {skipped}")
     return pairs
+
+
+def split_pairs(
+    pairs: list[dict],
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Deduplicate inputs, shuffle, and split using largest-remainder rounding."""
+
+    ratios = (train_ratio, val_ratio, test_ratio)
+    if any(not math.isfinite(ratio) or not 0 <= ratio <= 1 for ratio in ratios):
+        raise ValueError("Split ratios must be finite numbers between 0 and 1")
+    if abs(sum(ratios) - 1.0) > 1e-8:
+        raise ValueError("Train, validation and test ratios must sum to 1.0")
+
+    unique_pairs = []
+    seen = set()
+
+    for index, pair in enumerate(pairs, start=1):
+        if not isinstance(pair, dict) or not isinstance(pair.get("input", ""), str):
+            raise ValueError(f"Pair {index} must be an object with a string input")
+        text = pair.get("input", "").strip()
+
+        if not text:
+            continue
+
+        if text in seen:
+            continue
+
+        seen.add(text)
+        unique_pairs.append(pair)
+
+    rng = random.Random(seed)
+    rng.shuffle(unique_pairs)
+
+    total = len(unique_pairs)
+    # Normalize tolerated floating-point error before assigning all records.
+    sizes = [total * ratio / sum(ratios) for ratio in ratios]
+    counts = [math.floor(size) for size in sizes]
+    order = sorted(range(3), key=lambda i: sizes[i] - counts[i], reverse=True)
+    for index in order[: total - sum(counts)]:
+        counts[index] += 1
+    train_end = counts[0]
+    val_end = train_end + counts[1]
+
+    train_pairs = unique_pairs[:train_end]
+    val_pairs = unique_pairs[train_end:val_end]
+    test_pairs = unique_pairs[val_end:]
+
+    return train_pairs, val_pairs, test_pairs
+
+
+def verify_split_overlap(
+    train_pairs: list[dict],
+    val_pairs: list[dict],
+    test_pairs: list[dict],
+) -> None:
+    """Ensure the same input text does not appear across dataset splits."""
+
+    train_texts = {pair["input"].strip() for pair in train_pairs}
+    val_texts = {pair["input"].strip() for pair in val_pairs}
+    test_texts = {pair["input"].strip() for pair in test_pairs}
+
+    if not train_texts.isdisjoint(val_texts):
+        raise ValueError("Train and validation sets overlap")
+
+    if not train_texts.isdisjoint(test_texts):
+        raise ValueError("Train and test sets overlap")
+
+    if not val_texts.isdisjoint(test_texts):
+        raise ValueError("Validation and test sets overlap")
+
+
+def write_pairs_jsonl(pairs: list[dict], output_file: str | Path) -> None:
+    """Write student input-label pairs to JSONL"""
+
+    path = Path(output_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as file:
+        for pair in pairs:
+            file.write(json.dumps(pair, ensure_ascii=False) + "\n")

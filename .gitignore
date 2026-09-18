@@ -39,32 +39,17 @@ htmlcov/
 venv/
 env/
 .venv/
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-*.log
-
-# Type checking
-.mypy_cache/
-
-# Linting / Formatting
-.ruff_cache/
-.black_cache/
+ENV/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 .DS_Store
 
-# Project data (large files)
+# Project data
 data/
 models/
 checkpoints/
@@ -77,16 +62,27 @@ logs/
 # Jupyter
 .ipynb_checkpoints/
 
-# Build artifacts
-*.egg-info/
-dist/
+# Build
 build/
+dist/
+*.egg-info/
+
+# Type checking
+.mypy_cache/
+.pytype/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Temporary
+*.tmp
+*.bak
+*.orig
+*.rej
 
 # OS
 Thumbs.db
 .DS_Store
-
-# Temporary files
-*.tmp
-*.bak
-*.orig
