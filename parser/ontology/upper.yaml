@@ -1,0 +1,73 @@
+version: "upper-v1"
+relations:
+  Entity:
+    arity: 1
+    arguments:
+      - name: object_id
+        type: String
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: "Extract explicit physical objects, named entities, or abstract artifacts mentioned in the text."
+  Event:
+    arity: 1
+    arguments:
+      - name: event_id
+        type: String
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: "Extract discrete actions, occurrences, or state changes. Assign a unique identifier."
+  Proposition:
+    arity: 1
+    arguments:
+      - name: stmt_id
+        type: String
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract abstract claims or statements that carry a truth value (true or false)."
+  Clause:
+    arity: 1
+    arguments:
+      - name: clause_id
+        type: String
+    confidence_range: [0.9, 1.0]
+    extraction_instruction: "Identify distinct grammatical clauses (subject + predicate) directly from the text syntax."
+  Agent:
+    arity: 2
+    arguments:
+      - name: action
+        type: Event
+      - name: actor
+        type: Entity
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Link an entity to an event where the entity is the deliberate actor, initiator, or instigator."
+  Patient:
+    arity: 2
+    arguments:
+      - name: action
+        type: Event
+      - name: receiver
+        type: Entity
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Link an entity to an event where the entity is the target being acted upon or undergoing change."
+  Time:
+    arity: 2
+    arguments:
+      - name: event
+        type: Event
+      - name: temporal_marker
+        type: Entity
+    confidence_range: [0.6, 1.0]
+    extraction_instruction: "Link an event to the specific time, date, or temporal marker indicating when it occurred."
+  Negated:
+    arity: 1
+    arguments:
+      - name: target
+        type: Proposition|Event
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: "Wrap an extracted proposition or event that the text explicitly states is false or did not occur."
+  Causes:
+    arity: 2
+    arguments:
+      - name: cause
+        type: Event|Proposition
+      - name: effect
+        type: Event|Proposition
+    confidence_range: [0.6, 1.0]
+    extraction_instruction: "Link two events/propositions where the first explicitly brings about or is directly responsible for the second."

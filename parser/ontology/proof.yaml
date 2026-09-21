@@ -1,0 +1,51 @@
+version: "proof-v1"
+relations:
+  CounterexampleTo:
+    arity: 2
+    arguments:
+      - name: instance
+        type: Entity
+      - name: theorem
+        type: Proposition
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract when an entity or case explicitly disproves a general proposition."
+  ArgMin:
+    arity: 3
+    arguments:
+      - name: instance
+        type: Entity
+      - name: set_or_condition
+        type: Proposition
+      - name: measure
+        type: Entity
+    confidence_range: [0.6, 1.0]
+    extraction_instruction: "Extract when an item is chosen because it minimizes some measure over a set."
+  Transformation:
+    arity: 3
+    arguments:
+      - name: operation
+        type: Event
+      - name: input
+        type: Entity
+      - name: output
+        type: Entity
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract an operation that maps an input structure to an output structure."
+  MeasureDecrease:
+    arity: 3
+    arguments:
+      - name: measure
+        type: Entity
+      - name: original_state
+        type: Entity
+      - name: new_state
+        type: Entity
+    confidence_range: [0.5, 1.0]
+    extraction_instruction: "Extract an explicit claim that a measure has decreased strictly."
+  OpenObligation:
+    arity: 1
+    arguments:
+      - name: required_condition
+        type: Proposition
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract a condition or property that the text explicitly states must still be satisfied or verified."
