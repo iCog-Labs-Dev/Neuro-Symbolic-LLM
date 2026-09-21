@@ -36,7 +36,9 @@ _PREDICATE_SCHEMA_PATH = (
 )
 
 
-def _load_atomese_predicates() -> tuple[dict[str, int], dict[str, tuple[int, int]]]:
+def _load_atomese_predicates() -> (
+    tuple[dict[str, int], dict[str, tuple[int, int | None]]]
+):
     """Load the shared predicate vocabulary and its Atomese-level arities."""
     with _PREDICATE_SCHEMA_PATH.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
@@ -45,20 +47,27 @@ def _load_atomese_predicates() -> tuple[dict[str, int], dict[str, tuple[int, int
 
     semantic = config.get("predicates")
     structural = config.get("structural_predicates")
+    operators = config.get("operators", {})
+    if not isinstance(operators, dict):
+        raise ValueError("Predicate schema 'operators' must be a mapping")
     if not isinstance(semantic, dict) or not isinstance(structural, dict):
         raise ValueError(
             "Predicate schema must define 'predicates' and "
             "'structural_predicates' mappings"
         )
 
-    duplicates = semantic.keys() & structural.keys()
+    duplicates = (
+        (semantic.keys() & structural.keys())
+        | (semantic.keys() & operators.keys())
+        | (structural.keys() & operators.keys())
+    )
     if duplicates:
         names = ", ".join(sorted(duplicates))
-        raise ValueError(f"Predicates cannot be both semantic and structural: {names}")
+        raise ValueError(f"Predicate names must be unique across sections: {names}")
 
     fixed: dict[str, int] = {}
-    variable: dict[str, tuple[int, int]] = {}
-    for name, definition in {**semantic, **structural}.items():
+    variable: dict[str, tuple[int, int | None]] = {}
+    for name, definition in {**semantic, **structural, **operators}.items():
         if not isinstance(name, str) or not isinstance(definition, dict):
             raise ValueError("Every Atomese predicate requires a mapping")
 
@@ -80,10 +89,15 @@ def _load_atomese_predicates() -> tuple[dict[str, int], dict[str, tuple[int, int
         if (
             not isinstance(minimum, int)
             or isinstance(minimum, bool)
-            or not isinstance(maximum, int)
-            or isinstance(maximum, bool)
             or minimum < 1
-            or maximum < minimum
+            or (
+                maximum is not None
+                and (
+                    not isinstance(maximum, int)
+                    or isinstance(maximum, bool)
+                    or maximum < minimum
+                )
+            )
         ):
             raise ValueError(f"Invalid variable Atomese arity for {name!r}")
         variable[name] = (minimum, maximum)
@@ -285,7 +299,12 @@ def _validate_atom(atom: Atom) -> str:
             )
     else:
         minimum, maximum = VARIABLE_ARITY[atom.predicate]
-        if not minimum <= child_count <= maximum:
+        if child_count < minimum or (maximum is not None and child_count > maximum):
+            if maximum is None:
+                return (
+                    f"'{atom.predicate}' requires at least {minimum} children, "
+                    f"got {child_count}"
+                )
             return (
                 f"'{atom.predicate}' requires between {minimum} and {maximum} "
                 f"children, got {child_count}"

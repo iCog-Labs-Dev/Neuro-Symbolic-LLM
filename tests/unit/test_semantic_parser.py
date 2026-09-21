@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from parser.grammar.atomese import LinkAtom
 from parser.semantic import (
     ALLOWED_PREDICATES,
+    DistilledSemanticParser,
     ModelGenerationError,
     ReferenceSemanticParser,
     SemanticParseError,
@@ -240,38 +243,111 @@ class TestReferenceSemanticParser:
             parser.parse("A dog has fur.")
 
 
+@pytest.fixture
+def student(monkeypatch, tmp_path):
+    tokenizer = MagicMock()
+    tokenizer.pad_token = "<pad>"
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 1
+    encoding = {"input_ids": torch.tensor([[2, 3]]), "attention_mask": torch.ones(1, 2)}
+    tokenizer.return_value.to.return_value = encoding
+    tokenizer.decode.return_value = structured_output(assertion())
+    model = MagicMock()
+    model.device = "cpu"
+    model.generate.return_value = torch.tensor([[2, 3, 4]])
+    monkeypatch.setattr(
+        "parser.semantic.semantic_parser.AutoTokenizer.from_pretrained",
+        lambda *args, **kwargs: tokenizer,
+    )
+    monkeypatch.setattr(
+        "parser.semantic.semantic_parser.AutoModelForCausalLM.from_pretrained",
+        lambda *args, **kwargs: model,
+    )
+    parser = DistilledSemanticParser.from_pretrained(
+        str(tmp_path), max_new_tokens=42, num_beams=2
+    )
+    return parser, tokenizer, model
+
+
 class TestDistilledSemanticParser:
-    def test_uses_the_same_structured_pipeline(self) -> None:
-        # Since DistilledSemanticParser now uses from_pretrained,
-        # we need to mock the model loading or use a different approach
-        # For testing, we can use a mock backend approach
-        backend = FakeBackend(
-            structured_output(
-                assertion(
-                    predicate="Cause",
-                    values=("Rain", "Flood"),
-                    roles=("cause", "effect"),
-                )
-            )
+    def test_uses_shared_pipeline_and_student_prompt(self, student):
+        from parser.student.student_prompt import build_student_prompt
+
+        parser, tokenizer, model = student
+        tokenizer.decode.return_value = (
+            "```json\n" + structured_output(assertion()) + "\n```"
         )
-
-        # Use a custom constructor for testing
-        # Since the actual DistilledSemanticParser loads from disk,
-        # we test the reference parser instead for the pipeline
-        parser = ReferenceSemanticParser(
-            backend=backend,
-            config=SemanticParserConfig(model_name="student-model"),
+        assert str(parser.parse(" A dog has fur. ")[0]) == "(Has dog fur)"
+        tokenizer.assert_called_once_with(
+            build_student_prompt("A dog has fur."),
+            return_tensors="pt",
+            add_special_tokens=False,
         )
+        assert model.generate.call_args.kwargs["max_new_tokens"] == 42
+        assert model.generate.call_args.kwargs["num_beams"] == 2
 
-        assert str(parser.parse("Rain causes flooding.")[0]) == "(Cause Rain Flood)"
-
-    def test_reports_distilled_role_on_failure(self) -> None:
-        # Similar to above, test the reference parser with a failure
-        backend = FakeBackend(error=RuntimeError("local inference failed"))
-        parser = ReferenceSemanticParser(
-            backend=backend,
-            config=SemanticParserConfig(model_name="student-model"),
-        )
-
-        with pytest.raises(ModelGenerationError, match="reference"):
+    def test_reports_distilled_role_on_failure(self, student):
+        parser, _, model = student
+        model.generate.side_effect = RuntimeError("local inference failed")
+        with pytest.raises(ModelGenerationError, match="distilled parser"):
             parser.parse("A dog has fur.")
+
+    def test_rejects_empty_input_before_generation(self, student):
+        parser, _, model = student
+        with pytest.raises(ValueError, match="empty"):
+            parser.parse("  ")
+        model.generate.assert_not_called()
+
+    def test_applies_aliases(self, student):
+        parser, _, _ = student
+        atoms = parser.parse("A dog has fur.", aliases={"dog": "Rex"})
+        assert str(atoms[0]) == "(Has Rex fur)"
+
+
+@pytest.mark.parametrize(
+    "device, capabilities, expected",
+    [
+        ("auto", [], torch.float32),
+        ("auto", [True], "auto"),
+        ("auto", [True, False], torch.float32),
+        ("cpu", [True], torch.float32),
+        ("mps", [True], torch.float32),
+        ("cuda", [True], "auto"),
+        ("cuda:1", [True, False], torch.float32),
+        ("cuda:1", [False, True], "auto"),
+    ],
+)
+def test_distilled_precision_respects_requested_device(
+    monkeypatch, tmp_path, device, capabilities, expected
+):
+    from contextlib import contextmanager
+
+    current = [0]
+
+    @contextmanager
+    def cuda_device(index):
+        previous = current[0]
+        current[0] = previous if index is None else index
+        try:
+            yield
+        finally:
+            current[0] = previous
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: bool(capabilities))
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: len(capabilities))
+    monkeypatch.setattr(torch.cuda, "device", cuda_device)
+    monkeypatch.setattr(
+        torch.cuda, "is_bf16_supported", lambda: capabilities[current[0]]
+    )
+    tokenizer = MagicMock()
+    loader = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(
+        "parser.semantic.semantic_parser.AutoTokenizer.from_pretrained",
+        lambda _: tokenizer,
+    )
+    monkeypatch.setattr(
+        "parser.semantic.semantic_parser.AutoModelForCausalLM.from_pretrained", loader
+    )
+    DistilledSemanticParser.from_pretrained(str(tmp_path), device=device)
+    assert loader.call_args.kwargs["torch_dtype"] == expected
+    assert loader.call_args.kwargs["device_map"] == device
