@@ -17,6 +17,7 @@ from parser.semantic import (
     SemanticParseError,
     SemanticParserConfig,
 )
+from parser.semantic.semantic_parser import DistilledSemanticParser
 
 
 def assertion(

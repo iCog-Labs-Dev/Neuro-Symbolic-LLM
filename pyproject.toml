@@ -41,7 +41,6 @@ dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
-    "python-dotenv>=1.0.0",
     "tqdm>=4.66.0",
     "wandb>=0.17.0",
 ]
@@ -113,8 +112,9 @@ select = [
 ]
 ignore = [
     "E501",  # line too long — black handles this
-    "B008",  # do not perform function calls in default arguments (FastAPI uses this),
-    "N806", "N803"
+    "B008",  # do not perform function calls in default arguments (FastAPI uses this)
+    "N806",  # variable in function should be lowercase
+    "N803",  # argument name should be lowercase
 ]
 
 [tool.ruff.lint.isort]
@@ -152,12 +152,15 @@ follow_imports = "skip"
 # Run manually: mypy .
 # Runs automatically on every commit via pre-commit.
 
+[[tool.mypy.overrides]]
+module = "parser.semantic.semantic_parser"
+disable_error_code = ["no-any-return"]
+
 # ── Pytest ─────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "frozenllm"]
 asyncio_mode = "auto"
-pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning:jax",
@@ -165,7 +168,3 @@ filterwarnings = [
 # Run all tests: pytest
 # Run only unit tests: pytest tests/unit/
 # Run with output: pytest -v -s
-
-[[tool.mypy.overrides]]
-module = "parser.semantic.semantic_parser"
-disable_error_code = ["no-any-return"]
