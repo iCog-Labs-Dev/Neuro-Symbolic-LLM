@@ -94,6 +94,11 @@ Residual/symbolic_head/
   contracts/
     ontology_catalog.py
     pattern_record.py
+    template_record.py
+  retrieval/
+    config.py
+    faiss_index.py
+  mork_client.py
   README.md
 
 parser/ontology/
@@ -120,7 +125,6 @@ implementations:
 ```text
 contracts/   runtime wire formats and template-installation receipts
 promotion/   validated request-to-template promotion and F0 embedding
-storage/     MORK authority and derived FAISS index
 service/     CPU retrieval server
 client/      Tier 1-facing retrieval client
 metrics/     promotion, retrieval, and cross-tier measurements
@@ -190,6 +194,29 @@ available because they are required by the Q1 greedy-mining evaluation.
 The contract is not yet connected to Hyperon Miner output or MORK promotion.
 Those integrations require the mining and promotion modules.
 
+## CPU retrieval index
+
+`mork_client.py` owns MORK HTTP upload/export and record serialization.
+`retrieval/faiss_index.py` owns the derived, in-memory FAISS index. The latter
+does not persist templates or replace MORK as the authoritative store.
+`contracts/template_record.py` defines the record and query-result types used
+across this boundary.
+
+The Tier 2 settings in `configs/tiers.yaml` select FAISS HNSW with cosine
+similarity for the Q1 path. The configured dimension and HNSW parameters are
+loaded and validated at client construction. Keys and queries are normalized
+before inner-product search. `index_backend="flat"` explicitly selects exact
+FAISS search as a retrieval-quality reference; it is not a silent fallback.
+An unavailable FAISS dependency raises an error. A failed MORK export or an
+invalid record cannot replace the current index; a successful rebuild swaps
+the complete index and its metadata together.
+
+This establishes the configured retrieval mechanism, not the Q1 performance
+or semantic-quality claims. Those require corpus-derived keys, an operational
+MORK service, recall comparison against the Flat reference, and measured
+latency at the target template count. The MORK client and FAISS index remain
+co-located in the same process; no network retrieval service is implemented.
+
 ## Current implementation status
 
 ### Implemented and verified
@@ -199,13 +226,14 @@ Those integrations require the mining and promotion modules.
   serialization, and Q1 scope enforcement.
 - MORK HTTP upload/export foundations.
 - Rebuilding a local index from exported MORK records.
-- Fail-closed FAISS Flat and HNSW index foundations.
+- Configured, fail-closed FAISS HNSW retrieval with an explicit Flat reference.
+- Atomic derived-index replacement after MORK export and validation.
 - Explicit empty and short retrieval results without fabricated templates.
 - Rejection of duplicate identifiers and invalid template/query inputs.
 
 The ontology and pattern-record contracts are covered by paper-aligned unit
-tests. MORK/FAISS storage and retrieval remain in one module and require the
-structural separation described below.
+tests. MORK HTTP storage and FAISS retrieval are separate modules, while the
+production retrieval service and hardware measurements remain outstanding.
 
 ### Removed non-production paths
 
@@ -229,7 +257,6 @@ and production protocols defined in this document.
 - validated PatternRecord-to-TemplateRecord promotion;
 - QSYM v2;
 - the retrieval TCP server and client;
-- separation of MORK storage from the derived FAISS index;
 - production frozen-LLM/GPU integration;
 - hardware cross-tier latency measurement; and
 - held-out semantic retrieval precision/recall.
@@ -261,6 +288,7 @@ Current ontology verification:
 ```bash
 python -m pytest tests/unit/symbolic_head/test_ontology_catalog.py -q
 python -m pytest tests/unit/symbolic_head/test_pattern_record.py -q
+python -m pytest tests/unit/test_retrieval_index.py -q
 ```
 
 Docker-dependent MORK tests are located under
@@ -270,9 +298,8 @@ Docker-dependent MORK tests are located under
 
 1. Publish and pin the versioned `hybrid-miner` contract package.
 2. Migrate local ontology and pattern-record contract authority.
-3. Separate MORK storage from the derived FAISS retrieval index.
-4. Implement promotion-request validation, F0 embedding, and template receipts.
-5. Implement and freeze QSYM v2 and TMPL.
-6. Implement the retrieval service and production Tier 1 client.
-7. Integrate real `hybrid-miner` candidate artifacts.
-8. Run corpus-derived quality evaluation and hardware measurements.
+3. Implement promotion-request validation, F0 embedding, and template receipts.
+4. Implement and freeze QSYM v2 and TMPL.
+5. Implement the retrieval service and production Tier 1 client.
+6. Integrate real `hybrid-miner` candidate artifacts.
+7. Run corpus-derived quality evaluation and hardware measurements.
