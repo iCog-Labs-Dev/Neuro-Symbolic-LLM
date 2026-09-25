@@ -6,15 +6,16 @@ import os
 import socket
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from urllib.parse import quote, urlparse
 
 import numpy as np
 
-try:
-    import faiss
-except ImportError:
-    faiss = None
+from Residual.symbolic_head.contracts.template_record import (
+    MorkQueryResult,
+    TemplateRecord,
+    validate_template_record,
+)
+from Residual.symbolic_head.retrieval import FaissTemplateIndex, load_retrieval_config
 
 try:
     import httpx
@@ -26,30 +27,6 @@ SEXPR_PATTERN = "$x"
 SEXPR_TEMPLATE = "$x"
 
 
-@dataclass
-class MorkQueryResult:
-    """Retrieved keys, values, identifiers, and scores.
-
-    The result count is at most the requested ``top_m`` and can be zero. Missing
-    results are never represented by fabricated identifiers or zero templates.
-    """
-
-    keys: np.ndarray
-    values: np.ndarray
-    template_ids: list[list[str]]
-    scores: np.ndarray
-
-
-@dataclass(frozen=True)
-class TemplateRecord:
-    """Authoritative template data used to rebuild a local retrieval index."""
-
-    template_id: str
-    metta_expr: str
-    key_vector: np.ndarray
-    val_vector: np.ndarray
-
-
 class MorkClient(ABC):
     """Interface for registering templates and retrieving top-m key/value pairs."""
 
@@ -57,7 +34,9 @@ class MorkClient(ABC):
         self.key_dim = key_dim
 
     @abstractmethod
-    def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
+    def query_top_k(
+        self, query_vectors: np.ndarray, top_m: int | None = None
+    ) -> MorkQueryResult:
         """Return top_m template key/value pairs matching query_vectors."""
 
     @abstractmethod
@@ -69,188 +48,6 @@ class MorkClient(ABC):
         val_vector: np.ndarray,
     ) -> bool:
         """Register a template key/value pair in the vector index."""
-
-
-def _validate_template_record(
-    template_id: str,
-    metta_expr: str,
-    key_vector: np.ndarray,
-    val_vector: np.ndarray,
-    key_dim: int,
-) -> tuple[str, str, np.ndarray, np.ndarray]:
-    template_id = template_id.strip()
-    metta_expr = metta_expr.strip()
-    key_vec = np.asarray(key_vector, dtype=np.float32)
-    val_vec = np.asarray(val_vector, dtype=np.float32)
-
-    if not template_id:
-        raise ValueError("Template id cannot be empty")
-    if not metta_expr:
-        raise ValueError("MeTTa expression cannot be empty")
-    if key_vec.shape != (key_dim,):
-        raise ValueError(
-            f"Key vector dim mismatch: expected ({key_dim},), got {key_vec.shape}"
-        )
-    if val_vec.shape != (key_dim,):
-        raise ValueError(
-            f"Value vector dim mismatch: expected ({key_dim},), got {val_vec.shape}"
-        )
-    if not np.isfinite(key_vec).all() or not np.isfinite(val_vec).all():
-        raise ValueError("Template vectors must contain only finite values")
-    if np.linalg.norm(key_vec) == 0:
-        raise ValueError("Template key vector must have non-zero norm")
-    return template_id, metta_expr, key_vec, val_vec
-
-
-class _LocalFAISSIndex:
-    """In-memory cosine similarity search backed by FAISS.
-
-    This is an internal component used exclusively inside DockerMorkClient
-    for cosine ANN on the same CPU node. It is NOT a standalone MorkClient
-    and must not be used outside of DockerMorkClient.
-    """
-
-    def __init__(
-        self,
-        key_dim: int = 256,
-        backend: str = "flat",
-        hnsw_m: int = 16,
-        hnsw_ef_construction: int = 200,
-        hnsw_ef_search: int = 50,
-    ) -> None:
-        if faiss is None:
-            raise RuntimeError(
-                "FAISS is required for symbolic template retrieval; install faiss-cpu"
-            )
-        self.key_dim = key_dim
-        if backend not in {"flat", "hnsw"}:
-            raise ValueError("backend must be 'flat' or 'hnsw'")
-        self.key_store: list[np.ndarray] = []
-        self.val_store: list[np.ndarray] = []
-        self.id_store: list[str] = []
-        self.metta_store: list[str] = []
-        self._lock = threading.Lock()
-        self._backend = backend
-        self._hnsw_ef_search = hnsw_ef_search
-        if backend == "hnsw":
-            self._faiss_index = faiss.IndexHNSWFlat(
-                key_dim, hnsw_m, faiss.METRIC_INNER_PRODUCT
-            )
-            self._faiss_index.hnsw.efConstruction = hnsw_ef_construction
-            self._faiss_index.hnsw.efSearch = hnsw_ef_search
-        else:
-            self._faiss_index = faiss.IndexFlatIP(key_dim)
-
-    @property
-    def index_backend(self) -> str:
-        return self._backend
-
-    def clear(self) -> None:
-        with self._lock:
-            self.key_store.clear()
-            self.val_store.clear()
-            self.id_store.clear()
-            self.metta_store.clear()
-            self._faiss_index.reset()
-
-    def rebuild(self, records: list[TemplateRecord]) -> None:
-        self.clear()
-        for record in records:
-            self.add_template(
-                record.template_id,
-                record.metta_expr,
-                record.key_vector,
-                record.val_vector,
-            )
-
-    def add_template(
-        self,
-        template_id: str,
-        metta_expr: str,
-        key_vector: np.ndarray,
-        val_vector: np.ndarray,
-    ) -> bool:
-        template_id, metta_expr, key_vec, val_vec = _validate_template_record(
-            template_id, metta_expr, key_vector, val_vector, self.key_dim
-        )
-        key_norm = np.linalg.norm(key_vec)
-
-        with self._lock:
-            if template_id in self.id_store:
-                raise ValueError(f"Duplicate template id: {template_id}")
-            normalized = key_vec / key_norm
-            self._faiss_index.add(np.expand_dims(normalized, axis=0))
-            self.key_store.append(key_vec)
-            self.val_store.append(val_vec)
-            self.id_store.append(template_id)
-            self.metta_store.append(metta_expr)
-
-        return True
-
-    def contains_template(self, template_id: str) -> bool:
-        """Return whether a template identifier is already indexed."""
-
-        with self._lock:
-            return template_id.strip() in self.id_store
-
-    def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
-        if top_m <= 0:
-            raise ValueError("top_m must be greater than zero")
-        queries = np.asarray(query_vectors, dtype=np.float32)
-        if queries.ndim == 1:
-            queries = np.expand_dims(queries, axis=0)
-
-        if queries.ndim != 2 or queries.shape[-1] != self.key_dim:
-            raise ValueError(
-                f"Query vector dim mismatch: expected (*, {self.key_dim}), got {queries.shape}"
-            )
-        if not np.isfinite(queries).all():
-            raise ValueError("Query vectors must contain only finite values")
-
-        num_queries = queries.shape[0]
-
-        with self._lock:
-            num_items = len(self.key_store)
-
-            if num_items == 0:
-                return MorkQueryResult(
-                    keys=np.empty((num_queries, 0, self.key_dim), dtype=np.float32),
-                    values=np.empty((num_queries, 0, self.key_dim), dtype=np.float32),
-                    template_ids=[[] for _ in range(num_queries)],
-                    scores=np.empty((num_queries, 0), dtype=np.float32),
-                )
-
-            k_actual = min(top_m, num_items)
-
-            q_norms = np.linalg.norm(queries, axis=1, keepdims=True)
-            norm_q = np.where(q_norms > 0, queries / (q_norms + 1e-8), queries)
-            scores, labels = self._faiss_index.search(norm_q, k_actual)
-            scores = np.atleast_2d(np.asarray(scores))
-            labels = np.atleast_2d(np.asarray(labels))
-
-            matched_keys = np.empty(
-                (num_queries, k_actual, self.key_dim), dtype=np.float32
-            )
-            matched_vals = np.empty(
-                (num_queries, k_actual, self.key_dim), dtype=np.float32
-            )
-            matched_scores = np.empty((num_queries, k_actual), dtype=np.float32)
-            matched_ids: list[list[str]] = [[] for _ in range(num_queries)]
-
-            for i in range(num_queries):
-                for j in range(k_actual):
-                    item_idx = int(labels[i, j])
-                    matched_keys[i, j] = self.key_store[item_idx]
-                    matched_vals[i, j] = self.val_store[item_idx]
-                    matched_scores[i, j] = scores[i, j]
-                    matched_ids[i].append(self.id_store[item_idx])
-
-        return MorkQueryResult(
-            keys=matched_keys,
-            values=matched_vals,
-            template_ids=matched_ids,
-            scores=matched_scores,
-        )
 
 
 def _floats_sexpr(vec: np.ndarray) -> str:
@@ -386,23 +183,31 @@ class DockerMorkClient(MorkClient):
     def __init__(
         self,
         server_url: str = DEFAULT_MORK_SERVER_URL,
-        key_dim: int = 256,
+        key_dim: int | None = None,
         timeout_sec: float = 10.0,
         index_backend: str | None = None,
-        hnsw_m: int = 16,
-        hnsw_ef_construction: int = 200,
-        hnsw_ef_search: int = 50,
+        hnsw_m: int | None = None,
+        hnsw_ef_construction: int | None = None,
+        hnsw_ef_search: int | None = None,
     ) -> None:
-        super().__init__(key_dim=key_dim)
+        config = load_retrieval_config()
+        effective_key_dim = key_dim if key_dim is not None else config.key_dim
+        super().__init__(key_dim=effective_key_dim)
         self.server_url = server_url.rstrip("/")
         self.timeout_sec = timeout_sec
-        selected_backend = index_backend or os.getenv("MORK_INDEX_BACKEND") or "flat"
-        self.vector_index = _LocalFAISSIndex(
-            key_dim=key_dim,
-            backend=selected_backend,
-            hnsw_m=hnsw_m,
-            hnsw_ef_construction=hnsw_ef_construction,
-            hnsw_ef_search=hnsw_ef_search,
+        self.default_top_m = config.top_m
+        self.vector_index = FaissTemplateIndex(
+            key_dim=effective_key_dim,
+            backend=index_backend if index_backend is not None else config.backend,
+            hnsw_m=hnsw_m if hnsw_m is not None else config.hnsw_m,
+            hnsw_ef_construction=(
+                hnsw_ef_construction
+                if hnsw_ef_construction is not None
+                else config.hnsw_ef_construction
+            ),
+            hnsw_ef_search=(
+                hnsw_ef_search if hnsw_ef_search is not None else config.hnsw_ef_search
+            ),
         )
         self._mork_checked = False
         self._mutation_lock = threading.Lock()
@@ -488,15 +293,19 @@ class DockerMorkClient(MorkClient):
 
     def rebuild_vector_index_from_mork(self) -> int:
         """Rebuild the derived local index from the current MORK export."""
-        self._require_mork("rebuild_vector_index_from_mork")
-        records = self._export_records()
-        self.vector_index.rebuild(records)
+        with self._mutation_lock:
+            self._require_mork("rebuild_vector_index_from_mork")
+            records = self._export_records()
+            self.vector_index.rebuild(records)
         return len(records)
 
-    def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
+    def query_top_k(
+        self, query_vectors: np.ndarray, top_m: int | None = None
+    ) -> MorkQueryResult:
         self._require_mork("query_top_k")
         return self.vector_index.query_top_k(
-            np.asarray(query_vectors, dtype=np.float32), top_m=top_m
+            np.asarray(query_vectors, dtype=np.float32),
+            top_m=top_m if top_m is not None else self.default_top_m,
         )
 
     def add_template(
@@ -506,7 +315,7 @@ class DockerMorkClient(MorkClient):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        template_id, metta_expr, key_vec, val_vec = _validate_template_record(
+        template_id, metta_expr, key_vec, val_vec = validate_template_record(
             template_id, metta_expr, key_vector, val_vector, self.key_dim
         )
         with self._mutation_lock:
@@ -519,7 +328,7 @@ class DockerMorkClient(MorkClient):
         return True
 
 
-def get_mork_client(key_dim: int = 256) -> MorkClient:
+def get_mork_client(key_dim: int | None = None) -> MorkClient:
     """Create the Docker-backed MORK client used by Tier 2."""
     server_url = os.getenv("MORK_SERVER_URL", DEFAULT_MORK_SERVER_URL)
     return DockerMorkClient(server_url=server_url, key_dim=key_dim)

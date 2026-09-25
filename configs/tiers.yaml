@@ -12,6 +12,7 @@ tier2_cpu:
   dim: 256
   space: "cosine"
   max_capacity: 100000
+  index_backend: "hnsw"
   hnsw:
     M: 16
     ef_construction: 200
