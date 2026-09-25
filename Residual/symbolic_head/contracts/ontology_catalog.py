@@ -108,7 +108,9 @@ def _parse_argument(value: Any, context: str) -> ArgumentSpec:
 def _parse_confidence_range(value: Any, context: str) -> tuple[float, float]:
     if not isinstance(value, list) or len(value) != 2:
         raise OntologyCatalogError(f"{context} must contain exactly two numbers")
-    if any(isinstance(item, bool) or not isinstance(item, int | float) for item in value):
+    if any(
+        isinstance(item, bool) or not isinstance(item, int | float) for item in value
+    ):
         raise OntologyCatalogError(f"{context} must contain only numbers")
     lower, upper = (float(value[0]), float(value[1]))
     if not 0.0 <= lower <= upper <= 1.0:
@@ -180,13 +182,17 @@ def load_ontology_catalog(directory: Path | None = None) -> OntologyCatalog:
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError) as error:
-            raise OntologyCatalogError(f"Cannot load ontology file {path}: {error}") from error
+            raise OntologyCatalogError(
+                f"Cannot load ontology file {path}: {error}"
+            ) from error
         raw = _require_mapping(document, path.name)
         _require_exact_fields(raw, _DOCUMENT_FIELDS, path.name)
 
         version = raw["version"]
         if not isinstance(version, str) or not version.strip():
-            raise OntologyCatalogError(f"{path.name}.version must be a non-empty string")
+            raise OntologyCatalogError(
+                f"{path.name}.version must be a non-empty string"
+            )
         if version in versions:
             raise OntologyCatalogError(f"Duplicate ontology version {version!r}")
         versions.append(version)
