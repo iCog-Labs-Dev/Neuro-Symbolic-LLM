@@ -167,15 +167,15 @@ class PatternRecord(_ContractModel):
             variable = variable.strip()
             type_name = type_name.strip()
             if not variable or not type_name:
-                raise ValueError("type constraints require non-empty variables and types")
+                raise ValueError(
+                    "type constraints require non-empty variables and types"
+                )
             normalized[variable] = type_name
         return normalized
 
     @field_validator("parser_confidences")
     @classmethod
-    def validate_parser_confidences(
-        cls, value: tuple[float, ...]
-    ) -> tuple[float, ...]:
+    def validate_parser_confidences(cls, value: tuple[float, ...]) -> tuple[float, ...]:
         if any(
             not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0
             for confidence in value
@@ -194,7 +194,9 @@ class PatternRecord(_ContractModel):
     @classmethod
     def validate_nonnegative_metric(cls, value: float | None) -> float | None:
         if value is not None and (not math.isfinite(value) or value < 0.0):
-            raise ValueError("uncertainty and runtime cost must be finite and non-negative")
+            raise ValueError(
+                "uncertainty and runtime cost must be finite and non-negative"
+            )
         return value
 
     @field_validator("causal_statistics")
@@ -296,5 +298,7 @@ def validate_q1_pattern_record(record: PatternRecord) -> PatternRecord:
     if record.causal_statistics is not None:
         violations.append("causal_statistics are outside Q1 scope")
     if violations:
-        raise PatternRecordError("Q1 PatternRecord violations: " + "; ".join(violations))
+        raise PatternRecordError(
+            "Q1 PatternRecord violations: " + "; ".join(violations)
+        )
     return record

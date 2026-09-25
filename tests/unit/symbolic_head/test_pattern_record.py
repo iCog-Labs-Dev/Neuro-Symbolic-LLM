@@ -25,9 +25,7 @@ def valid_record_data() -> dict[str, object]:
         "semantic_level": "extracted",
         "ontology_groundings": ["discourse-v1:Concession"],
         "semantic_consequences": None,
-        "source_spans": [
-            {"document_id": "doc-17", "start": 438, "end": 521}
-        ],
+        "source_spans": [{"document_id": "doc-17", "start": 438, "end": 521}],
         "parser_confidences": [0.91],
         "derivation_or_definition": None,
         "provenance": {
@@ -96,7 +94,9 @@ def test_rejects_overlapping_variable_classes() -> None:
 
 def test_rejects_constraint_for_undeclared_variable() -> None:
     data = valid_record_data()
-    constraints = dict(data["type_constraints"])
+    raw_constraints = data["type_constraints"]
+    assert isinstance(raw_constraints, dict)
+    constraints = dict(raw_constraints)
     constraints["$missing"] = "Clause"
     data["type_constraints"] = constraints
 
@@ -106,9 +106,7 @@ def test_rejects_constraint_for_undeclared_variable() -> None:
 
 def test_rejects_span_document_absent_from_provenance() -> None:
     data = valid_record_data()
-    data["source_spans"] = [
-        {"document_id": "doc-untracked", "start": 0, "end": 5}
-    ]
+    data["source_spans"] = [{"document_id": "doc-untracked", "start": 0, "end": 5}]
 
     with pytest.raises(ValidationError, match="absent from provenance"):
         PatternRecord.model_validate(data)
@@ -146,7 +144,9 @@ def test_q1_policy_rejects_later_stage_fields() -> None:
 
 def test_q1_policy_requires_mining_provenance_and_features() -> None:
     data = valid_record_data()
-    provenance = dict(data["provenance"])
+    raw_provenance = data["provenance"]
+    assert isinstance(raw_provenance, dict)
+    provenance = dict(raw_provenance)
     provenance["miner_version"] = None
     data["provenance"] = provenance
     data["generator_history"] = []
