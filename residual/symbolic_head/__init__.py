@@ -1,10 +1,8 @@
-"""Stage A symbolic head and Tier 2 retrieval integration."""
+"""Tier 2 symbolic mining, storage, and retrieval component."""
 
-from residual.symbolic_head.head import SymbolicHead
-from residual.symbolic_head.losses import (
-    combined_symbolic_loss,
-    key_space_alignment_loss,
-    value_space_regression_loss,
+from residual.symbolic_head.contracts import (
+    PatternRecord,
+    validate_q1_pattern_record,
 )
 from residual.symbolic_head.mork_client import (
     DockerMorkClient,
@@ -13,25 +11,13 @@ from residual.symbolic_head.mork_client import (
     TemplateRecord,
     get_mork_client,
 )
-from residual.symbolic_head.miner_adapter import (
-    PublishedTemplate,
-    adapt_miner_payload,
-    publish_miner_payload,
-)
-from residual.symbolic_head.retrieval_bridge import Tier2Retrieve
 
 __all__ = [
-    "SymbolicHead",
-    "combined_symbolic_loss",
-    "key_space_alignment_loss",
-    "value_space_regression_loss",
     "DockerMorkClient",
     "MorkClient",
     "MorkQueryResult",
+    "PatternRecord",
     "TemplateRecord",
-    "Tier2Retrieve",
     "get_mork_client",
-    "PublishedTemplate",
-    "adapt_miner_payload",
-    "publish_miner_payload",
+    "validate_q1_pattern_record",
 ]

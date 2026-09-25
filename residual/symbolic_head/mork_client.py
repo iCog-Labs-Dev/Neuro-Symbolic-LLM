@@ -28,7 +28,11 @@ SEXPR_TEMPLATE = "$x"
 
 @dataclass
 class MorkQueryResult:
-    """Top-m keys/values/ids/scores from the vector index."""
+    """Retrieved keys, values, identifiers, and scores.
+
+    The result count is at most the requested ``top_m`` and can be zero. Missing
+    results are never represented by fabricated identifiers or zero templates.
+    """
 
     keys: np.ndarray
     values: np.ndarray
@@ -67,8 +71,39 @@ class MorkClient(ABC):
         """Register a template key/value pair in the vector index."""
 
 
+def _validate_template_record(
+    template_id: str,
+    metta_expr: str,
+    key_vector: np.ndarray,
+    val_vector: np.ndarray,
+    key_dim: int,
+) -> tuple[str, str, np.ndarray, np.ndarray]:
+    template_id = template_id.strip()
+    metta_expr = metta_expr.strip()
+    key_vec = np.asarray(key_vector, dtype=np.float32)
+    val_vec = np.asarray(val_vector, dtype=np.float32)
+
+    if not template_id:
+        raise ValueError("Template id cannot be empty")
+    if not metta_expr:
+        raise ValueError("MeTTa expression cannot be empty")
+    if key_vec.shape != (key_dim,):
+        raise ValueError(
+            f"Key vector dim mismatch: expected ({key_dim},), got {key_vec.shape}"
+        )
+    if val_vec.shape != (key_dim,):
+        raise ValueError(
+            f"Value vector dim mismatch: expected ({key_dim},), got {val_vec.shape}"
+        )
+    if not np.isfinite(key_vec).all() or not np.isfinite(val_vec).all():
+        raise ValueError("Template vectors must contain only finite values")
+    if np.linalg.norm(key_vec) == 0:
+        raise ValueError("Template key vector must have non-zero norm")
+    return template_id, metta_expr, key_vec, val_vec
+
+
 class _LocalFAISSIndex:
-    """In-memory cosine similarity search via FAISS with NumPy fallback.
+    """In-memory cosine similarity search backed by FAISS.
 
     This is an internal component used exclusively inside DockerMorkClient
     for cosine ANN on the same CPU node. It is NOT a standalone MorkClient
@@ -83,6 +118,10 @@ class _LocalFAISSIndex:
         hnsw_ef_construction: int = 200,
         hnsw_ef_search: int = 50,
     ) -> None:
+        if faiss is None:
+            raise RuntimeError(
+                "FAISS is required for symbolic template retrieval; install faiss-cpu"
+            )
         self.key_dim = key_dim
         if backend not in {"flat", "hnsw"}:
             raise ValueError("backend must be 'flat' or 'hnsw'")
@@ -91,23 +130,19 @@ class _LocalFAISSIndex:
         self.id_store: list[str] = []
         self.metta_store: list[str] = []
         self._lock = threading.Lock()
-        self._faiss_index = None
         self._backend = backend
         self._hnsw_ef_search = hnsw_ef_search
-        if faiss is not None:
-            if backend == "hnsw":
-                self._faiss_index = faiss.IndexHNSWFlat(
-                    key_dim, hnsw_m, faiss.METRIC_INNER_PRODUCT
-                )
-                self._faiss_index.hnsw.efConstruction = hnsw_ef_construction
-                self._faiss_index.hnsw.efSearch = hnsw_ef_search
-            else:
-                self._faiss_index = faiss.IndexFlatIP(key_dim)
+        if backend == "hnsw":
+            self._faiss_index = faiss.IndexHNSWFlat(
+                key_dim, hnsw_m, faiss.METRIC_INNER_PRODUCT
+            )
+            self._faiss_index.hnsw.efConstruction = hnsw_ef_construction
+            self._faiss_index.hnsw.efSearch = hnsw_ef_search
+        else:
+            self._faiss_index = faiss.IndexFlatIP(key_dim)
 
     @property
     def index_backend(self) -> str:
-        if self._faiss_index is None:
-            return "numpy"
         return self._backend
 
     def clear(self) -> None:
@@ -116,8 +151,7 @@ class _LocalFAISSIndex:
             self.val_store.clear()
             self.id_store.clear()
             self.metta_store.clear()
-            if self._faiss_index is not None:
-                self._faiss_index.reset()
+            self._faiss_index.reset()
 
     def rebuild(self, records: list[TemplateRecord]) -> None:
         self.clear()
@@ -136,23 +170,16 @@ class _LocalFAISSIndex:
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        key_vec = np.asarray(key_vector, dtype=np.float32)
-        val_vec = np.asarray(val_vector, dtype=np.float32)
-
-        if key_vec.shape != (self.key_dim,):
-            raise ValueError(
-                f"Key vector dim mismatch: expected ({self.key_dim},), got {key_vec.shape}"
-            )
-        if val_vec.shape != (self.key_dim,):
-            raise ValueError(
-                f"Value vector dim mismatch: expected ({self.key_dim},), got {val_vec.shape}"
-            )
+        template_id, metta_expr, key_vec, val_vec = _validate_template_record(
+            template_id, metta_expr, key_vector, val_vector, self.key_dim
+        )
+        key_norm = np.linalg.norm(key_vec)
 
         with self._lock:
-            if self._faiss_index is not None:
-                norm = np.linalg.norm(key_vec)
-                normalized = key_vec / (norm + 1e-8) if norm > 0 else key_vec
-                self._faiss_index.add(np.expand_dims(normalized, axis=0))
+            if template_id in self.id_store:
+                raise ValueError(f"Duplicate template id: {template_id}")
+            normalized = key_vec / key_norm
+            self._faiss_index.add(np.expand_dims(normalized, axis=0))
             self.key_store.append(key_vec)
             self.val_store.append(val_vec)
             self.id_store.append(template_id)
@@ -160,7 +187,15 @@ class _LocalFAISSIndex:
 
         return True
 
+    def contains_template(self, template_id: str) -> bool:
+        """Return whether a template identifier is already indexed."""
+
+        with self._lock:
+            return template_id.strip() in self.id_store
+
     def query_top_k(self, query_vectors: np.ndarray, top_m: int = 8) -> MorkQueryResult:
+        if top_m <= 0:
+            raise ValueError("top_m must be greater than zero")
         queries = np.asarray(query_vectors, dtype=np.float32)
         if queries.ndim == 1:
             queries = np.expand_dims(queries, axis=0)
@@ -169,6 +204,8 @@ class _LocalFAISSIndex:
             raise ValueError(
                 f"Query vector dim mismatch: expected (*, {self.key_dim}), got {queries.shape}"
             )
+        if not np.isfinite(queries).all():
+            raise ValueError("Query vectors must contain only finite values")
 
         num_queries = queries.shape[0]
 
@@ -177,34 +214,28 @@ class _LocalFAISSIndex:
 
             if num_items == 0:
                 return MorkQueryResult(
-                    keys=np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32),
-                    values=np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32),
-                    template_ids=[["empty"] * top_m for _ in range(num_queries)],
-                    scores=np.zeros((num_queries, top_m), dtype=np.float32),
+                    keys=np.empty((num_queries, 0, self.key_dim), dtype=np.float32),
+                    values=np.empty((num_queries, 0, self.key_dim), dtype=np.float32),
+                    template_ids=[[] for _ in range(num_queries)],
+                    scores=np.empty((num_queries, 0), dtype=np.float32),
                 )
 
             k_actual = min(top_m, num_items)
 
-            if self._faiss_index is not None:
-                q_norms = np.linalg.norm(queries, axis=1, keepdims=True)
-                norm_q = np.where(q_norms > 0, queries / (q_norms + 1e-8), queries)
-                scores, labels = self._faiss_index.search(norm_q, k_actual)
-                scores = np.atleast_2d(np.asarray(scores))
-                labels = np.atleast_2d(np.asarray(labels))
-            else:
-                keys_mat = np.stack(self.key_store, axis=0)
-                q_norms = np.linalg.norm(queries, axis=1, keepdims=True)
-                k_norms = np.linalg.norm(keys_mat, axis=1, keepdims=True)
-                norm_q = np.where(q_norms > 0, queries / (q_norms + 1e-8), queries)
-                norm_k = np.where(k_norms > 0, keys_mat / (k_norms + 1e-8), keys_mat)
-                sim_mat = np.matmul(norm_q, norm_k.T)
-                labels = np.argsort(-sim_mat, axis=1)[:, :k_actual]
-                scores = np.take_along_axis(sim_mat, labels, axis=1)
+            q_norms = np.linalg.norm(queries, axis=1, keepdims=True)
+            norm_q = np.where(q_norms > 0, queries / (q_norms + 1e-8), queries)
+            scores, labels = self._faiss_index.search(norm_q, k_actual)
+            scores = np.atleast_2d(np.asarray(scores))
+            labels = np.atleast_2d(np.asarray(labels))
 
-            matched_keys = np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32)
-            matched_vals = np.zeros((num_queries, top_m, self.key_dim), dtype=np.float32)
-            matched_scores = np.zeros((num_queries, top_m), dtype=np.float32)
-            matched_ids = [["empty"] * top_m for _ in range(num_queries)]
+            matched_keys = np.empty(
+                (num_queries, k_actual, self.key_dim), dtype=np.float32
+            )
+            matched_vals = np.empty(
+                (num_queries, k_actual, self.key_dim), dtype=np.float32
+            )
+            matched_scores = np.empty((num_queries, k_actual), dtype=np.float32)
+            matched_ids: list[list[str]] = [[] for _ in range(num_queries)]
 
             for i in range(num_queries):
                 for j in range(k_actual):
@@ -212,7 +243,7 @@ class _LocalFAISSIndex:
                     matched_keys[i, j] = self.key_store[item_idx]
                     matched_vals[i, j] = self.val_store[item_idx]
                     matched_scores[i, j] = scores[i, j]
-                    matched_ids[i][j] = self.id_store[item_idx]
+                    matched_ids[i].append(self.id_store[item_idx])
 
         return MorkQueryResult(
             keys=matched_keys,
@@ -223,7 +254,9 @@ class _LocalFAISSIndex:
 
 
 def _floats_sexpr(vec: np.ndarray) -> str:
-    return " ".join(f"{float(x):.8g}" for x in np.asarray(vec, dtype=np.float32).tolist())
+    return " ".join(
+        f"{float(x):.8g}" for x in np.asarray(vec, dtype=np.float32).tolist()
+    )
 
 
 def _vector_sexpr(label: str, vec: np.ndarray) -> str:
@@ -233,7 +266,9 @@ def _vector_sexpr(label: str, vec: np.ndarray) -> str:
         return f"({label} {_floats_sexpr(vec)})"
 
     chunks = [
-        "(chunk " + " ".join(f"{float(x):.8g}" for x in values[i : i + chunk_size]) + ")"
+        "(chunk "
+        + " ".join(f"{float(x):.8g}" for x in values[i : i + chunk_size])
+        + ")"
         for i in range(0, len(values), chunk_size)
     ]
     return f"({label} {' '.join(chunks)})"
@@ -261,7 +296,9 @@ def _split_top_level_expressions(text: str) -> list[str]:
         elif char == ")":
             depth -= 1
             if depth < 0:
-                raise ValueError("MORK export contains an unmatched closing parenthesis")
+                raise ValueError(
+                    "MORK export contains an unmatched closing parenthesis"
+                )
             if depth == 0 and start is not None:
                 expressions.append(text[start : index + 1])
                 start = None
@@ -359,7 +396,7 @@ class DockerMorkClient(MorkClient):
         super().__init__(key_dim=key_dim)
         self.server_url = server_url.rstrip("/")
         self.timeout_sec = timeout_sec
-        selected_backend = index_backend or os.getenv("MORK_INDEX_BACKEND", "flat")
+        selected_backend = index_backend or os.getenv("MORK_INDEX_BACKEND") or "flat"
         self.vector_index = _LocalFAISSIndex(
             key_dim=key_dim,
             backend=selected_backend,
@@ -368,6 +405,7 @@ class DockerMorkClient(MorkClient):
             hnsw_ef_search=hnsw_ef_search,
         )
         self._mork_checked = False
+        self._mutation_lock = threading.Lock()
 
     @property
     def index_backend(self) -> str:
@@ -468,12 +506,16 @@ class DockerMorkClient(MorkClient):
         key_vector: np.ndarray,
         val_vector: np.ndarray,
     ) -> bool:
-        key_vec = np.asarray(key_vector, dtype=np.float32)
-        val_vec = np.asarray(val_vector, dtype=np.float32)
-        payload = template_record_sexpr(template_id, metta_expr, key_vec, val_vec)
-        self._require_mork("add_template")
-        self._upload_record(payload)
-        self.vector_index.add_template(template_id, metta_expr, key_vec, val_vec)
+        template_id, metta_expr, key_vec, val_vec = _validate_template_record(
+            template_id, metta_expr, key_vector, val_vector, self.key_dim
+        )
+        with self._mutation_lock:
+            if self.vector_index.contains_template(template_id):
+                raise ValueError(f"Duplicate template id: {template_id}")
+            payload = template_record_sexpr(template_id, metta_expr, key_vec, val_vec)
+            self._require_mork("add_template")
+            self._upload_record(payload)
+            self.vector_index.add_template(template_id, metta_expr, key_vec, val_vec)
         return True
 
 

@@ -1,4 +1,4 @@
-"""Pytest configuration — MORK Docker is mandatory for all tests."""
+"""Fixtures for tests requiring a live MORK Docker service."""
 
 import pytest
 
@@ -18,7 +18,7 @@ def mork_client():
         raise ConnectionError(
             "MORK server is not reachable at "
             f"{client.server_url}. "
-            "All tests require a live MORK Docker container. "
+            "MORK integration tests require a live Docker container. "
             "Start it with: docker compose up -d --build"
         )
     return client
