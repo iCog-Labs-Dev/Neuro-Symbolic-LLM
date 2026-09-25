@@ -1,10 +1,11 @@
-"""Stage A symbolic head and Tier 2 retrieval integration."""
+# ruff: noqa: N999 - The repository uses the capitalized ``Residual`` namespace.
+"""Tier 2 symbolic mining, storage, and retrieval component."""
 
-from Residual.symbolic_head.head import SymbolicHead
-from Residual.symbolic_head.losses import (
-    combined_symbolic_loss,
-    key_space_alignment_loss,
-    value_space_regression_loss,
+from Residual.symbolic_head.contracts import (
+    OntologyCatalog,
+    PatternRecord,
+    load_ontology_catalog,
+    validate_q1_pattern_record,
 )
 from Residual.symbolic_head.mork_client import (
     DockerMorkClient,
@@ -13,25 +14,15 @@ from Residual.symbolic_head.mork_client import (
     TemplateRecord,
     get_mork_client,
 )
-from Residual.symbolic_head.miner_adapter import (
-    PublishedTemplate,
-    adapt_miner_payload,
-    publish_miner_payload,
-)
-from Residual.symbolic_head.retrieval_bridge import Tier2Retrieve
 
 __all__ = [
-    "SymbolicHead",
-    "combined_symbolic_loss",
-    "key_space_alignment_loss",
-    "value_space_regression_loss",
     "DockerMorkClient",
     "MorkClient",
     "MorkQueryResult",
+    "OntologyCatalog",
+    "PatternRecord",
     "TemplateRecord",
-    "Tier2Retrieve",
     "get_mork_client",
-    "PublishedTemplate",
-    "adapt_miner_payload",
-    "publish_miner_payload",
+    "load_ontology_catalog",
+    "validate_q1_pattern_record",
 ]
