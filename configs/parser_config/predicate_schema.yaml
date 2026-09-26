@@ -7,143 +7,202 @@ predicates:
   Inheritance:
     arity: 2
     roles: [instance, class]
-    description: "X is a type or kind of Y"
+    description: >
+      X is a type, kind, or subclass/instance relation of Y.
+      Use only for taxonomic classification, not for temporary states or properties.
 
   MemberOf:
     arity: 2
     roles: [member, group]
-    description: "X is a member of Y"
+    description: >
+      X is a member of group, collection, organization, or set Y.
 
   PartOf:
     arity: 2
     roles: [part, whole]
-    description: "X is part of Y"
+    description: >
+      X is a structural or conceptual part of Y.
 
   # POSSESSION / ATTRIBUTE / STATE
   Has:
     arity: 2
     roles: [owner, possessed]
-    description: "X has or possesses Y"
+    description: >
+      X has, owns, possesses, or contains Y in a possession-like relation.
+      Do not use for ordinary transitive events such as hire, launch, approve,
+      collect, or process.
 
   PropertyOf:
     arity: 2
     roles: [entity, property]
-    description: "X has property or attribute Y"
+    description: >
+      X has property or attribute Y.
+      Use for descriptive attributes, not actions or events.
 
   StateOf:
     arity: 2
     roles: [entity, state]
-    description: "X is in state Y"
+    description: >
+      X is in state Y.
+      Use for states or conditions, not ordinary action events.
 
   # ACTION / CAPABILITY / FUNCTION
   CanDo:
     arity: 2
     roles: [agent, action]
-    description: "X is capable of performing Y"
+    description: >
+      X is capable of performing action Y.
+      Use only for capability or ability, not for an action that actually occurred.
 
   Performs:
     arity: 2
     roles: [agent, action]
-    description: "X performs or performed action Y"
+    description: >
+      X performs or performed action Y when the complete relevant proposition
+      can be represented using only an agent and an action.
+      Do not use when an explicitly stated patient/object or other core participant
+      would be lost. In such cases use Evaluation unless another known predicate
+      directly preserves the full meaning.
 
   UsedFor:
     arity: 2
     roles: [entity, purpose]
-    description: "X is used for Y"
+    description: >
+      X is used for purpose or function Y.
+      Use only when purpose or function is explicitly expressed.
+      Do not use for ordinary events.
 
   Requires:
     arity: 2
     roles: [entity_or_process, requirement]
-    description: "X requires Y"
+    description: >
+      X explicitly requires Y as a prerequisite, dependency, or necessary condition.
 
   Enables:
     arity: 2
     roles: [enabler, enabled_action_or_state]
-    description: "X enables Y"
+    description: >
+      X enables or makes possible Y.
+      Use only for an enabling relation, not general causation.
 
   # CAUSAL / RESULT
   Cause:
     arity: 2
     roles: [cause, effect]
-    description: "X causes Y"
+    description: >
+      X causes Y as an explicit causal consequence.
+      Use only when causation is the semantic relation itself.
+      Do not use merely because X performs an action that affects Y.
 
   Produces:
     arity: 2
     roles: [producer_or_process, result]
-    description: "X produces Y"
+    description: >
+      X produces, generates, yields, or outputs Y as a result.
+      Use when the sentence explicitly expresses a production/result relation.
+      Active and passive paraphrases must preserve the same Produces relation
+      when this predicate is appropriate.
 
   Prevents:
     arity: 2
     roles: [preventer, prevented_event_or_state]
-    description: "X prevents Y"
+    description: >
+      X prevents Y from occurring or continuing.
 
   # SPATIAL
   LocatedIn:
     arity: 2
     roles: [entity, location]
-    description: "X is located in Y"
+    description: >
+      X is located in Y.
 
   "On":
     arity: 2
     roles: [entity, surface]
-    description: "X is physically on Y"
+    description: >
+      X is physically on surface Y.
 
   Contains:
     arity: 2
     roles: [container, contained]
-    description: "X contains Y"
+    description: >
+      X contains Y spatially or structurally.
 
   Near:
     arity: 2
     roles: [entity, nearby_entity]
-    description: "X is near Y"
+    description: >
+      X is near Y.
 
   Between:
     arity: 3
     roles: [entity, reference_a, reference_b]
-    description: "X is spatially or conceptually between Y and Z"
+    description: >
+      X is spatially or conceptually between Y and Z.
 
   # TEMPORAL
   Before:
     arity: 2
     roles: [earlier, later]
-    description: "X happens before Y"
+    description: >
+      X happens before Y.
 
   After:
     arity: 2
     roles: [later, earlier]
-    description: "X happens after Y"
+    description: >
+      X happens after Y.
 
   During:
     arity: 2
     roles: [event_or_state, time_or_event]
-    description: "X occurs during Y"
+    description: >
+      Event or state X occurs during time or event Y.
+      The first argument must be the event/state being temporally located.
+      The second argument must be the containing time/event.
+      Never reverse these roles.
 
   StartsAt:
     arity: 2
     roles: [event, start_time]
-    description: "X starts at Y"
+    description: >
+      Event X starts at time Y.
 
   EndsAt:
     arity: 2
     roles: [event, end_time]
-    description: "X ends at Y"
+    description: >
+      Event X ends at time Y.
 
   # GENERAL ENTITY RELATIONS
   SameAs:
     arity: 2
     roles: [entity, equivalent_entity]
-    description: "X and Y refer to the same entity or concept"
+    description: >
+      X and Y refer to the same entity or concept.
 
   CreatedBy:
     arity: 2
     roles: [creation, creator]
-    description: "X was created, authored, built, or produced by Y"
+    description: >
+      Persistent creator-origin relation: creation X was created, authored,
+      constructed, or originated by creator Y.
+      Use when the intended meaning is authorship/origin identity.
+      Do not select CreatedBy merely because the sentence is passive or has
+      the form "X was <verb> by Y".
+      Do not use it to replace an ordinary event such as release, deploy,
+      revise, publish, launch, process, or similar actions when the sentence
+      is describing the event itself.
+      When used, argument order must always be:
+      creation first, creator second.
 
   WorksFor:
     arity: 2
     roles: [person, organization]
-    description: "X works for Y"
+    description: >
+      Person X works for organization Y.
+      Use only for an employment or affiliation relation, not merely because
+      one entity hired another in a single event.
 
   # FALLBACK
   Evaluation:
@@ -152,8 +211,14 @@ predicates:
     max_arity: 4
     atomese_arity: 2
     fallback: true
-    description: "Free-form relation not represented by a known predicate"
-
+    description: >
+      Canonical free-form semantic relation used when no known predicate
+      directly represents the full meaning while preserving all explicitly
+      stated core participants.
+      Use a canonical base-form relation and semantic roles such as agent
+      and patient.
+      Prefer Evaluation over a known predicate when using that known predicate
+      would discard an explicitly stated core participant or distort the event.
 
 # Query/reasoning operations: world relations.
 operators:
@@ -206,7 +271,6 @@ operators:
     arity: 2
     roles: [collection, attribute]
     description: "Select the entity with the minimum value of an attribute"
-
 
 structural_predicates:
 

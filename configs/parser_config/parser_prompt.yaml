@@ -16,54 +16,324 @@ parser:
 
     {predicate_guide}
 
-    If none of the allowed predicates directly represents the relation,
-    use:
+    If none of the allowed predicates directly and completely represents
+    the relation and its explicitly stated semantic participants, use:
     "predicate": "Evaluation"
-    and put the base-form relation in:
+    and put the canonical base-form relation in:
     "relation": "<verb>"
 
     ## SEMANTIC RULES
 
-    1. Prefer a known predicate only when its meaning directly matches.
-       Never invent new predicates.
+    1. Use only predicates listed in ALLOWED PREDICATES.
+       Never invent, rename, pluralize, or otherwise modify predicate names.
 
-    2. For Evaluation, use the canonical base-form relation.
+    2. Prefer a known predicate only when:
+       - its meaning directly matches the meaning expressed in the sentence;
+       - it preserves all explicitly stated core semantic participants;
+       - its required number of arguments exactly matches the representation;
+       - its required role names and role order can be followed exactly.
+
+       If any of these conditions is not satisfied, use Evaluation instead.
+
+    3. Preserve all explicitly stated core semantic participants.
+
+       Do not discard an agent, patient, object, recipient, or other core
+       participant merely to fit a known predicate.
+
+    4. Distinguish event descriptions from persistent semantic relations.
+
+       When a sentence describes an event involving an agent and a patient,
+       represent that event using Evaluation with the canonical base-form
+       relation, unless a known predicate directly represents the same event
+       without changing its meaning or discarding participants.
+
+       Use entity-level predicates such as CreatedBy only when the sentence
+       primarily asserts a persistent relation such as creator, authorship,
+       origin, membership, location, possession, or another stable relation.
+
+       Do not convert an event into a persistent relation merely because:
+       - the event resulted in the creation or modification of an object;
+       - the sentence is written in passive voice;
+       - the sentence contains "by".
+
+    5. For an ordinary transitive event with an explicitly stated agent
+       and patient/object, use Evaluation unless a known predicate directly
+       represents the same event meaning and preserves all explicitly stated
+       core participants.
+
        Example:
-       bought/purchased -> buy
+       "Alice opened the door."
 
-    3. For a known predicate, use its listed role names exactly and preserve
-       their listed order. Do not replace predicate-specific roles with generic
-       agent/patient roles. For Evaluation, use agent first, patient second,
-       then other explicitly stated semantic roles.
+       Use:
+       predicate: Evaluation
+       relation: open
+       arguments:
+         agent: Alice
+         patient: door
 
-    4. Never invent missing information.
+    6. Grammatical voice must not change the underlying semantic
+       representation.
 
-    5. Resolve pronouns and referring expressions only when the antecedent
-       is unambiguous from context.
+       Active and passive sentences expressing the same event must preserve:
+       - the same predicate or canonical relation;
+       - the same semantic participants;
+       - the same semantic roles;
+       - the same semantic argument order.
 
-    6. Preserve negation using:
-       "polarity": "negative"
+       Determine roles from semantic meaning, never from surface word order.
 
-       Otherwise use:
-       "polarity": "positive"
+       Example:
+       "Alice opened the door."
+       "The door was opened by Alice."
 
-    7. If a known predicate is used:
-       "fallback": false
-       "relation": null
+       Both represent:
+       relation: open
+       agent: Alice
+       patient: door
 
-    8. If Evaluation is used:
-       "fallback": true
-       "relation": the canonical base-form relation
+    7. For Evaluation, argument order is determined by semantic role,
+       never by sentence word order.
 
-    9. A sentence may contain multiple independent facts.
-       Return one object inside "assertions" for each fact.
+       When both agent and patient are present:
+       - agent MUST be first;
+       - patient MUST be second.
 
-    10. confidence must be a number between 0.0 and 1.0.
+       Example:
+       "The data was processed by the machine."
 
-    11. source_span must contain the narrowest supporting text span.
+       Correct:
+       relation: process
+       arguments:
+         agent: machine
+         patient: data
 
-    12. If an interpretation is ambiguous, place alternative interpretations
-        in "alternatives". Otherwise use an empty list.
+       Incorrect:
+       arguments:
+         patient: data
+         agent: machine
+
+    8. In an agentless passive construction, do not invent an agent.
+
+       The grammatical subject of an agentless passive is normally the
+       patient or theme of the event, not the agent.
+
+       Example:
+       "The door was opened."
+
+       Use:
+       predicate: Evaluation
+       relation: open
+       arguments:
+         patient: door
+
+    9. Use Performs only when the complete relevant meaning can be represented
+       by exactly these roles in this order:
+
+       agent
+       action
+
+       If a transitive event explicitly contains a patient/object that must
+       be represented, DO NOT use Performs.
+
+       Use Evaluation instead unless another known predicate directly
+       represents the complete event.
+
+    10. Use CreatedBy only when the sentence primarily asserts a persistent
+        creator-origin or authorship relation.
+
+        Use CreatedBy for meanings such as:
+        - X's creator is Y;
+        - X was authored by Y;
+        - X originates from Y as its creator.
+
+        Do not use CreatedBy merely because an event produced, modified,
+        built, wrote, generated, painted, published, or otherwise affected
+        an object.
+
+        If the sentence is describing the event itself, preserve the event
+        using Evaluation.
+
+        Examples:
+
+        "Mary wrote the report."
+        "The report was written by Mary."
+
+        Both describe the same writing event and should use:
+        Evaluation(write, Mary, report)
+
+        "The workers built the house."
+        "The house was built by the workers."
+
+        Both describe the same building event and should use:
+        Evaluation(build, workers, house)
+
+        "The system generated the report."
+        "The report was generated by the system."
+
+        Both describe the same generation event and should use:
+        Evaluation(generate, system, report)
+
+        When CreatedBy is genuinely appropriate, its arguments must be:
+
+        first:
+        role: creation
+
+        second:
+        role: creator
+
+        Never reverse these roles.
+
+    11. Use Produces only when the sentence explicitly asserts a
+        production/result relation rather than merely describing a generic
+        transitive event.
+
+        Active and passive forms of the same production relation must preserve
+        the same predicate and role ordering.
+
+    12. Use Cause only when the sentence explicitly asserts causation as the
+        semantic relation itself.
+
+        Do not use Cause merely because an action has an effect on another entity.
+
+    13. Use UsedFor only when the sentence explicitly expresses purpose
+        or function.
+
+        Do not use UsedFor as a generic representation for an ordinary event.
+
+    14. Apply the same requirements to every known predicate.
+
+        Select a known predicate because its semantic meaning matches the
+        sentence, not because of isolated keywords, grammatical constructions,
+        or surface word order.
+
+        When using a known predicate:
+        - use exactly the required number of arguments;
+        - use exactly the required role names;
+        - preserve exactly the required role order.
+
+    15. For Evaluation, use the canonical base-form relation.
+
+        Examples:
+        opened -> open
+        bought/purchased -> buy
+        wrote/written -> write
+        examined -> examine
+        approved -> approve
+        repaired -> repair
+        processed -> process
+        generated -> generate
+        built -> build
+
+    16. For Evaluation, assign roles according to semantic meaning.
+
+        Order explicitly stated roles as:
+        agent first,
+        patient second,
+        then other explicitly stated semantic roles.
+
+        If no agent is stated, do not create one merely to occupy the
+        first position.
+
+    17. Temporal and other secondary relations must not replace the core
+        event when both are explicitly stated.
+
+        Preserve the core event participants and represent additional
+        explicitly stated relations when the schema supports them.
+
+        For During, the required role order is:
+
+        first:
+        event_or_state
+
+        second:
+        time_or_event
+
+        Example:
+        "The researcher collected the data during the experiment."
+
+        The collection event is the event being temporally located.
+        The experiment is the containing time/event.
+
+        Never reverse these roles.
+
+    18. Never invent missing information.
+
+        If an agent, patient, location, time, or other participant is not
+        explicitly stated and cannot be unambiguously resolved from context,
+        do not invent it.
+
+    19. Resolve pronouns and referring expressions only when the antecedent
+        is unambiguous from the provided context.
+
+    20. Preserve negation using:
+        "polarity": "negative"
+
+        Otherwise use:
+        "polarity": "positive"
+
+    21. If a known predicate is used:
+        "fallback": false
+        "relation": null
+
+    22. If Evaluation is used:
+        "fallback": true
+        "relation": the canonical base-form relation
+
+    23. A sentence may contain multiple independent facts.
+
+        Return one object inside "assertions" for each independently expressed
+        fact when multiple assertions are required to preserve the meaning.
+
+    24. confidence must be a number between 0.0 and 1.0.
+
+    25. source_span must contain the narrowest supporting text span from the
+        input sentence.
+
+    26. If an interpretation is genuinely ambiguous, place alternative
+        interpretations in "alternatives".
+
+        Otherwise use an empty list.
+
+    ## VALIDATION RULES
+
+    Before returning the JSON, validate every assertion.
+
+    1. Verify that every predicate is exactly one of the predicates listed
+       in ALLOWED PREDICATES.
+
+    2. If using a known predicate, verify that:
+       - the number of arguments exactly matches its required arity;
+       - every role name exactly matches the predicate guide;
+       - roles occur in exactly the required order.
+
+    3. Verify that no explicitly stated core semantic participant was
+       discarded merely to fit a known predicate.
+
+    4. If a known predicate cannot satisfy its schema while preserving the
+       meaning of the sentence, use Evaluation instead.
+
+    5. If using Evaluation, verify that:
+       - relation is in canonical base form;
+       - roles reflect semantic meaning rather than surface word order;
+       - agent precedes patient whenever both are present.
+
+    6. Verify voice invariance:
+       active and passive descriptions of the same event must preserve the
+       same underlying semantic representation.
+
+    7. Verify event-vs-relation consistency:
+       if the sentence describes an event, do not replace that event with
+       CreatedBy or another persistent relation merely because the sentence
+       is passive.
+
+    8. For a transitive event containing an explicit patient/object, verify
+       that Performs has NOT been used if it would discard that participant.
+
+    9. For During, verify that:
+       event_or_state is first;
+       time_or_event is second.
+
+    10. Verify that no unstated participant or fact was invented.
 
     ## OUTPUT FORMAT
 
@@ -95,8 +365,137 @@ parser:
       ]
     }
 
-    Example with a known predicate:
+    ## EXAMPLES
 
+    Example 1 - ordinary transitive event:
+
+    Sentence:
+    "Alice opened the door."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "open",
+          "arguments": [
+            {
+              "value": "Alice",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "door",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "Alice opened the door.",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 2 - equivalent passive event:
+
+    Sentence:
+    "The door was opened by Alice."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "open",
+          "arguments": [
+            {
+              "value": "Alice",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "door",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The door was opened by Alice.",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 3 - agentless passive event:
+
+    Sentence:
+    "The door was opened."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "open",
+          "arguments": [
+            {
+              "value": "door",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The door was opened.",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 4 - event that could otherwise be confused with CreatedBy:
+
+    Sentence:
+    "The report was written by Mary."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "write",
+          "arguments": [
+            {
+              "value": "Mary",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "report",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The report was written by Mary.",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 5 - known predicate:
+
+    Sentence:
+    "A dog is an animal."
+
+    Output:
     {
       "assertions": [
         {
@@ -139,4 +538,5 @@ parser:
     {sentence}
     </sentence>
 
-    Parse only the sentence. Use context only for reference resolution.
+    Parse only the sentence.
+    Use context only for reference resolution.
