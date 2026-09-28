@@ -234,7 +234,143 @@ parser:
         If no agent is stated, do not create one merely to occupy the
         first position.
 
-    17. Temporal and other secondary relations must not replace the core event.
+    17. Quantitative properties and measurements must preserve both the
+        numeric value and the semantic relation.
+
+        Numeric quantities, measurements, percentages, durations, counts,
+        and units are semantic content and must not be dropped.
+
+        When using any known predicate:
+        "relation" MUST be null.
+
+        Never attach a free-form relation such as:
+        weigh,
+        temperature,
+        distance,
+        discount,
+        duration,
+        count,
+        length,
+        height,
+        or another measurement relation
+        to a known predicate.
+
+        If the measurement relation itself carries important meaning and no
+        known predicate directly represents that complete meaning, use
+        Evaluation.
+
+        ### Possession-like quantities
+
+        Example:
+        "April has 30 days."
+
+        Use:
+        predicate: Has
+        relation: null
+        arguments:
+          owner: April
+          possessed: 30 days
+
+        Do not use PropertyOf with a non-null relation.
+
+        ### Measurement events or relations
+
+        Example:
+        "The package weighs 10 kg."
+
+        The relation "weigh" carries semantic meaning.
+
+        Use:
+        predicate: Evaluation
+        relation: weigh
+        arguments:
+          patient: package
+          measurement: 10 kg
+
+        Example:
+        "The meeting lasted 90 minutes."
+
+        Use:
+        predicate: Evaluation
+        relation: last
+        arguments:
+          patient: meeting
+          duration: 90 minutes
+
+        ### Direct quantitative properties
+
+        Example:
+        "The discount is 25%."
+
+        Use:
+        predicate: PropertyOf
+        relation: null
+        arguments:
+          entity: discount
+          property: 25%
+
+        Example:
+        "The temperature is 37.5 degrees."
+
+        Use:
+        predicate: PropertyOf
+        relation: null
+        arguments:
+          entity: temperature
+          property: 37.5 degrees
+
+        Example:
+        "The distance is 5 km."
+
+        Use:
+        predicate: PropertyOf
+        relation: null
+        arguments:
+          entity: distance
+          property: 5 km
+
+        ### Quantified participants
+
+        Quantified noun phrases must remain attached to the participant they
+        describe.
+
+        Example:
+        "The company hired 1,000 employees."
+
+        Use:
+        predicate: Evaluation
+        relation: hire
+        arguments:
+          agent: company
+          patient: 1,000 employees
+
+        Example:
+        "The tank contains 25 liters."
+
+        If Contains directly captures the intended relation, use:
+        predicate: Contains
+        relation: null
+        arguments:
+          container: tank
+          contained: 25 liters
+
+        Do not discard units such as:
+        kg,
+        km,
+        liters,
+        minutes,
+        days,
+        degrees,
+        percent,
+        or explicitly stated count nouns.
+
+        Do not expand, convert, or mathematically reinterpret numeric values
+        unless the input explicitly provides the converted value.
+
+        Representation cleanup such as making a value MeTTa-safe is handled
+        after semantic parsing and must not change the meaning.
+
+    18. Temporal and other secondary relations must not replace the core event.
 
         Always preserve the core event as its own assertion when the sentence
         explicitly states an event with semantic participants.
@@ -353,7 +489,7 @@ parser:
         Do not use OccursAt for another event or process when During is the
         intended relation.
 
-    18. Spatial modifiers must not replace the core event.
+    19. Spatial modifiers must not replace the core event.
 
         Always preserve the core event as its own assertion when the sentence
         explicitly states an event with semantic participants.
@@ -427,7 +563,7 @@ parser:
           event_or_state: examine
           location: hospital
 
-    19. Preserve facts expressed in subordinate, relative, and embedded clauses.
+    20. Preserve facts expressed in subordinate, relative, and embedded clauses.
 
         A sentence may express multiple independent facts through:
         - relative clauses such as "which..." or "that...";
@@ -552,30 +688,135 @@ parser:
         5. Do not replace a specific event or relation with a broader relation
            solely because it appears in a subordinate clause.
 
-    20. Never invent missing information.
+    21. Never invent missing information.
 
-        If an agent, patient, location, time, or other participant is not
-        explicitly stated and cannot be unambiguously resolved from context,
-        do not invent it.
+        If an agent, patient, location, time, quantity, unit, or other
+        participant is not explicitly stated and cannot be unambiguously
+        resolved from context, do not invent it.
 
-    21. Resolve pronouns and referring expressions only when the antecedent
-        is unambiguous from the provided context.
+    22. Resolve omitted participants and elliptical expressions from context
+        only when the missing participant is unambiguous.
 
-    22. Preserve negation using:
+        The sentence being parsed may omit a subject or another semantic
+        participant that is recoverable from the provided context.
+
+        Context may be used to fill such an omitted participant only when
+        there is exactly one clearly supported antecedent for the required
+        semantic role.
+
+        Do not treat a missing grammatical subject as meaning that the event
+        has no semantic agent when the context unambiguously supplies one.
+
+        Example:
+
+        Context:
+        "Alice opened the door."
+
+        Sentence:
+        "Then entered the room."
+
+        The subject of "entered" is omitted, but the continuation
+        unambiguously refers to Alice.
+
+        Use:
+
+        predicate: Evaluation
+        relation: enter
+        arguments:
+          agent: Alice
+          patient: room
+
+        Another example:
+
+        Context:
+        "The scientist collected the data."
+
+        Sentence:
+        "Then analyzed the samples."
+
+        Use:
+
+        predicate: Evaluation
+        relation: analyze
+        arguments:
+          agent: scientist
+          patient: samples
+
+        ### Ambiguous ellipsis
+
+        Never guess an omitted participant when multiple antecedents are
+        plausibly available from context.
+
+        Example:
+
+        Context:
+        "Alice met Mary."
+
+        Sentence:
+        "Then entered the room."
+
+        Both Alice and Mary are available discourse participants, and the
+        sentence does not explicitly identify which one entered the room.
+
+        Therefore:
+        - do not arbitrarily select Alice;
+        - do not arbitrarily select Mary;
+        - do not encode another phrase such as "the room" as the agent;
+        - do not invent a new agent.
+
+        Preserve only semantic participants that are explicitly stated in
+        the sentence or unambiguously resolved from context.
+
+        If the omitted participant remains ambiguous, leave that participant
+        absent from the assertion and record the ambiguity in "alternatives"
+        when useful.
+
+        The remaining explicit event should still be represented.
+
+        For the ambiguous example above, preserve:
+
+        predicate: Evaluation
+        relation: enter
+        arguments:
+          patient: room
+
+        Do not assign an agent.
+
+        ### Ellipsis resolution requirements
+
+        Before resolving an omitted participant from context:
+
+        1. Determine which semantic role is omitted.
+        2. Identify candidate antecedents in the provided context.
+        3. Resolve the participant only if one candidate is unambiguously
+           supported for that semantic role.
+        4. Preserve the resolved participant using its semantic role.
+        5. If multiple candidates remain plausible, do not choose among them.
+        6. Never move another explicitly stated participant into the missing
+           role merely to make the assertion structurally complete.
+
+    23. Resolve pronouns and other referring expressions only when the
+        antecedent is unambiguous from the provided context.
+
+        Apply the same non-guessing requirement used for omitted participants.
+
+        If multiple antecedents are plausible, do not arbitrarily choose one.
+
+    24. Preserve negation using:
         "polarity": "negative"
 
         Otherwise use:
         "polarity": "positive"
 
-    23. If a known predicate is used:
+    25. If a known predicate is used:
         "fallback": false
         "relation": null
 
-    24. If Evaluation is used:
+    26. If Evaluation is used:
         "fallback": true
         "relation": the canonical base-form relation
 
-    25. A sentence may contain multiple independent facts.
+    27. A sentence may contain multiple independent facts.
 
         Return one object inside "assertions" for each independently expressed
         fact when multiple assertions are required to preserve the meaning.
@@ -583,12 +824,12 @@ parser:
         A core event together with an explicitly stated temporal or spatial
         modifier may therefore require multiple assertions.
 
-    26. confidence must be a number between 0.0 and 1.0.
+    28. confidence must be a number between 0.0 and 1.0.
 
-    27. source_span must contain the narrowest supporting text span from the
+    29. source_span must contain the narrowest supporting text span from the
         input sentence.
 
-    28. If an interpretation is genuinely ambiguous, place alternative
+    30. If an interpretation is genuinely ambiguous, place alternative
         interpretations in "alternatives".
 
         Otherwise use an empty list.
@@ -601,6 +842,7 @@ parser:
        in ALLOWED PREDICATES.
 
     2. If using a known predicate, verify that:
+       - relation is null;
        - the number of arguments exactly matches its required arity;
        - every role name exactly matches the predicate guide;
        - roles occur in exactly the required order.
@@ -628,27 +870,47 @@ parser:
     8. For a transitive event containing an explicit patient/object, verify
        that Performs has NOT been used if it would discard that participant.
 
-    9. Verify temporal relations:
+    9. Verify quantitative representations:
 
-       - If a temporal relation modifies an explicitly stated core event,
-         verify that the core event is also preserved as its own assertion.
+       - Preserve explicitly stated numeric values and units.
 
-       - Verify that the canonical base-form event relation is used when
-         referring to the core event.
+       - Do not use a known predicate with a non-null relation.
 
-       For During:
-       - event_or_state is first;
-       - time_or_event is second;
-       - use it for an event occurring during another event or interval.
+       - For PropertyOf, use exactly:
+         entity, property
 
-       For OccursAt:
-       - event_or_state is first;
-       - time is second;
-       - use it for an explicit date, year, clock time, or named time value.
+       - For Has, use exactly:
+         owner, possessed
 
-       A temporal assertion must not replace or discard the core event.
+       - If a measurement verb such as "weigh" or "last" carries semantic
+         meaning that is not directly represented by a known predicate,
+         use Evaluation.
 
-    10. Verify spatial relations:
+       - Do not discard units or quantified nouns.
+
+       - Do not invent or mathematically convert quantities.
+
+    10. Verify temporal relations:
+
+        - If a temporal relation modifies an explicitly stated core event,
+          verify that the core event is also preserved as its own assertion.
+
+        - Verify that the canonical base-form event relation is used when
+          referring to the core event.
+
+        For During:
+        - event_or_state is first;
+        - time_or_event is second;
+        - use it for an event occurring during another event or interval.
+
+        For OccursAt:
+        - event_or_state is first;
+        - time is second;
+        - use it for an explicit date, year, clock time, or named time value.
+
+        A temporal assertion must not replace or discard the core event.
+
+    11. Verify spatial relations:
 
         - If a location modifies an explicitly stated core event, verify that
           the core event is preserved as its own assertion.
@@ -667,7 +929,7 @@ parser:
 
         A spatial assertion must not replace or discard the core event.
 
-    11. Verify complex-sentence preservation:
+    12. Verify complex-sentence preservation:
 
         - Every independently asserted proposition in a relative,
           subordinate, or coordinated clause is preserved.
@@ -681,7 +943,26 @@ parser:
         - If multiple events are explicitly related temporally, preserve
           both events and the supported temporal relation between them.
 
-    12. Verify that no unstated participant or fact was invented.
+    13. Verify contextual and elliptical resolution:
+
+        - If a semantic participant is omitted from the sentence, add it
+          from context only when its antecedent is unambiguous.
+
+        - Verify that the resolved entity occupies the correct semantic role.
+
+        - Do not select an antecedent merely because it is the nearest noun
+          or the grammatical subject/object of the previous sentence.
+
+        - If multiple context entities are plausible antecedents, do not
+          choose one arbitrarily.
+
+        - Do not move an explicitly stated patient, location, quantity,
+          or other participant into an omitted agent role.
+
+        - An unresolved participant may remain absent when context does not
+          support a unique resolution.
+
+    14. Verify that no unstated participant or fact was invented.
 
     ## OUTPUT FORMAT
 
@@ -779,66 +1060,103 @@ parser:
       ]
     }
 
-    Example 3 - agentless passive event:
+    Example 3 - quantitative possession:
 
     Sentence:
-    "The door was opened."
+    "April has 30 days."
 
     Output:
     {
       "assertions": [
         {
-          "predicate": "Evaluation",
-          "relation": "open",
+          "predicate": "Has",
+          "relation": null,
           "arguments": [
             {
-              "value": "door",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "confidence": 0.99,
-          "source_span": "The door was opened.",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 4 - event that could otherwise be confused with CreatedBy:
-
-    Sentence:
-    "The report was written by Mary."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "write",
-          "arguments": [
-            {
-              "value": "Mary",
-              "role": "agent",
+              "value": "April",
+              "role": "owner",
               "type": null
             },
             {
-              "value": "report",
+              "value": "30 days",
+              "role": "possessed",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "April has 30 days.",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 4 - measurement relation:
+
+    Sentence:
+    "The package weighs 10 kg."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "weigh",
+          "arguments": [
+            {
+              "value": "package",
               "role": "patient",
+              "type": null
+            },
+            {
+              "value": "10 kg",
+              "role": "measurement",
               "type": null
             }
           ],
           "fallback": true,
           "polarity": "positive",
           "confidence": 0.99,
-          "source_span": "The report was written by Mary.",
+          "source_span": "The package weighs 10 kg.",
           "alternatives": []
         }
       ]
     }
 
-    Example 5 - event during another event:
+    Example 5 - direct quantitative property:
+
+    Sentence:
+    "The temperature is 37.5 degrees."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "PropertyOf",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "temperature",
+              "role": "entity",
+              "type": null
+            },
+            {
+              "value": "37.5 degrees",
+              "role": "property",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The temperature is 37.5 degrees.",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 6 - event during another event:
 
     Sentence:
     "The researcher collected the data during the experiment."
@@ -891,7 +1209,7 @@ parser:
       ]
     }
 
-    Example 6 - event at an explicit time:
+    Example 7 - event at an explicit time:
 
     Sentence:
     "The engineer designed the bridge in 2025."
@@ -944,7 +1262,7 @@ parser:
       ]
     }
 
-    Example 7 - event with explicit location:
+    Example 8 - event with explicit location:
 
     Sentence:
     "The doctor examined the patient at the hospital."
@@ -997,7 +1315,7 @@ parser:
       ]
     }
 
-    Example 8 - relative clause:
+    Example 9 - relative clause:
 
     Sentence:
     "Paris, which is the capital of France, is a large city."
@@ -1050,7 +1368,7 @@ parser:
       ]
     }
 
-    Example 9 - embedded passive event:
+    Example 10 - embedded passive event:
 
     Sentence:
     "John bought a car that was manufactured in Germany."
@@ -1119,7 +1437,7 @@ parser:
       ]
     }
 
-    Example 10 - temporally related events:
+    Example 11 - temporally related events:
 
     Sentence:
     "The doctor examined the patient while the nurse prepared the medicine."
@@ -1193,7 +1511,75 @@ parser:
       ]
     }
 
-    Example 11 - known predicate:
+    Example 12 - unambiguous omitted subject:
+
+    Context:
+    "Alice opened the door."
+
+    Sentence:
+    "Then entered the room."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "enter",
+          "arguments": [
+            {
+              "value": "Alice",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "room",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "entered the room",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 13 - ambiguous omitted subject:
+
+    Context:
+    "Alice met Mary."
+
+    Sentence:
+    "Then entered the room."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "enter",
+          "arguments": [
+            {
+              "value": "room",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.70,
+          "source_span": "entered the room",
+          "alternatives": [
+            "agent could be Alice",
+            "agent could be Mary"
+          ]
+        }
+      ]
+    }
+
+    Example 14 - known predicate:
 
     Sentence:
     "A dog is an animal."
