@@ -1,0 +1,45 @@
+version: "lexical-v1"
+relations:
+  Kick:
+    arity: 3
+    arguments:
+      - name: event
+        type: Event
+      - name: actor
+        type: Entity
+      - name: object
+        type: Entity
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract an explicit kicking event together with its actor and kicked object."
+  Bucket:
+    arity: 1
+    arguments:
+      - name: object
+        type: Entity
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: "Identify an entity explicitly mentioned as a bucket."
+  IdiomaticSense:
+    arity: 2
+    arguments:
+      - name: event
+        type: Event
+      - name: sense
+        type: Entity
+    confidence_range: [0.4, 1.0]
+    extraction_instruction: "Record an ontology-constrained idiomatic interpretation proposed for an event."
+  DeathEvent:
+    arity: 2
+    arguments:
+      - name: event
+        type: Event
+      - name: deceased
+        type: Entity
+    confidence_range: [0.5, 1.0]
+    extraction_instruction: "Extract an event hypothesized to be a death and identify the deceased entity."
+  LiteralMotionContext:
+    arity: 1
+    arguments:
+      - name: event
+        type: Event
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Mark a motion event whose surrounding context supports a literal interpretation."

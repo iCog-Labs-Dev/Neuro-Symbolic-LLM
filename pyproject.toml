@@ -85,6 +85,9 @@ include = [
     "substrate*",
 ]
 
+[tool.setuptools.package-data]
+"parser.ontology" = ["*.yaml"]
+
 # ── Black ──────────────────────────────────────────────────────────────────
 [tool.black]
 line-length = 88

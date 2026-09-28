@@ -1,0 +1,40 @@
+version: "narrative-v1"
+relations:
+  CreatesObligation:
+    arity: 2
+    arguments:
+      - name: trigger_event
+        type: Event
+      - name: obligation
+        type: Entity
+    confidence_range: [0.6, 1.0]
+    extraction_instruction: "Extract when an event creates a binding duty, debt, or expected action."
+  Owes:
+    arity: 3
+    arguments:
+      - name: debtor
+        type: Entity
+      - name: creditor
+        type: Entity
+      - name: obligation
+        type: Entity
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: "Extract when an agent has a specific unfulfilled duty toward another."
+  Content:
+    arity: 2
+    arguments:
+      - name: container_or_obligation
+        type: Entity
+      - name: required_action
+        type: Proposition|Event
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract the substantive requirement of an obligation or promise."
+  Discharges:
+    arity: 2
+    arguments:
+      - name: fulfilling_event
+        type: Event
+      - name: obligation
+        type: Entity
+    confidence_range: [0.7, 1.0]
+    extraction_instruction: "Extract when an action successfully resolves a prior obligation or debt."

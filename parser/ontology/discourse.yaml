@@ -1,0 +1,45 @@
+version: "discourse-v1"
+relations:
+  Concession:
+    arity: 2
+    arguments:
+      - name: statement
+        type: Clause
+      - name: counter_statement
+        type: Clause
+    confidence_range: [0.4, 1.0]
+    extraction_instruction: "Extract when a valid point is acknowledged despite going against the main thrust."
+  Contrast:
+    arity: 2
+    arguments:
+      - name: item1
+        type: Entity|Proposition
+      - name: item2
+        type: Entity|Proposition
+    confidence_range: [0.5, 1.0]
+    extraction_instruction: "Extract when two items are presented as dissimilar."
+  EvokesExpectation:
+    arity: 2
+    arguments:
+      - name: trigger
+        type: Clause
+      - name: expected_result
+        type: Proposition
+    confidence_range: [0.3, 1.0]
+    extraction_instruction: "Extract when an event sets up a strong predictive expectation of a subsequent event."
+  Defeats:
+    arity: 2
+    arguments:
+      - name: outcome
+        type: Event
+      - name: prior_expectation
+        type: Proposition
+    confidence_range: [0.6, 1.0]
+    extraction_instruction: "Extract when an outcome directly contradicts an evoked expectation."
+  DiscourseFocus:
+    arity: 1
+    arguments:
+      - name: focal_item
+        type: Entity|Proposition
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: "Extract the primary subject of a discourse segment."
