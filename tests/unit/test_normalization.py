@@ -86,3 +86,61 @@ def test_normalizes_compatible_unicode() -> None:
 def test_rejects_whitespace_only_symbols() -> None:
     with pytest.raises(SemanticNormalizationError, match="cannot be empty"):
         normalize_symbol(" \t ")
+
+
+@pytest.mark.parametrize(
+    "role,value,expected",
+    [
+        ("time", "2025", "time_2025"),
+        ("time", "10 AM", "time_10_AM"),
+        ("start_time", "2025", "time_2025"),
+        ("end_time", "2026", "time_2026"),
+        ("time_or_event", "2025", "time_2025"),
+    ],
+)
+def test_prefixes_numeric_temporal_values(
+    role: str,
+    value: str,
+    expected: str,
+) -> None:
+    """Numeric temporal values become safe MeTTa symbols."""
+    normalized = normalize_semantic_result(
+        make_result(
+            value=value,
+            role=role,
+            argument_type=None,
+            relation="occur",
+        )
+    )
+
+    argument = normalized.assertions[0].arguments[0]
+
+    assert argument.value == expected
+    assert argument.role == role
+
+
+def test_does_not_prefix_non_temporal_numeric_values() -> None:
+    """Numbers are not changed merely because they begin with a digit."""
+    normalized = normalize_semantic_result(
+        make_result(
+            value="2025",
+            role="patient",
+            argument_type=None,
+            relation="measure",
+        )
+    )
+
+    assert normalized.assertions[0].arguments[0].value == "2025"
+
+
+def test_does_not_double_prefix_normalized_temporal_values() -> None:
+    normalized = normalize_semantic_result(
+        make_result(
+            value="time_2025",
+            role="time",
+            argument_type=None,
+            relation="occur",
+        )
+    )
+
+    assert normalized.assertions[0].arguments[0].value == "time_2025"

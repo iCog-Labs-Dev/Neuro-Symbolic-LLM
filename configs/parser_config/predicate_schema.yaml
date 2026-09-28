@@ -115,7 +115,14 @@ predicates:
     roles: [entity, location]
     description: >
       X is located in Y.
-
+  OccursIn:
+    arity: 2
+    roles: [event_or_state, location]
+    description: >
+      Event or state X occurs in or at location Y.
+      Use when the location modifies an event.
+      Do not use for the persistent location of an entity;
+      use LocatedIn for that case.
   "On":
     arity: 2
     roles: [entity, surface]
@@ -161,7 +168,16 @@ predicates:
       The first argument must be the event/state being temporally located.
       The second argument must be the containing time/event.
       Never reverse these roles.
-
+  OccursAt:
+    arity: 2
+    roles: [event_or_state, time]
+    description: >
+      Event or state X occurs at or within explicit time Y.
+      Use for explicit dates, years, clock times, or named time points/intervals,
+      such as 2025, 10_AM, or January_2026.
+      Do not use for another event or process; use During for that case.
+      The first argument must be the event/state.
+      The second argument must be the explicit time value.
   StartsAt:
     arity: 2
     roles: [event, start_time]

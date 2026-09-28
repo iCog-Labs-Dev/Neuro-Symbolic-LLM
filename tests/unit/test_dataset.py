@@ -21,16 +21,18 @@ def assertion(
     predicate: str,
     values: tuple[str, ...],
     roles: tuple[str, ...],
+    relation: str | None = None,
+    fallback: bool = False,
 ) -> dict[str, Any]:
     """Return one valid structured assertion."""
     return {
         "predicate": predicate,
-        "relation": None,
+        "relation": relation,
         "arguments": [
             {"value": value, "role": role, "type": None}
             for value, role in zip(values, roles, strict=True)
         ],
-        "fallback": False,
+        "fallback": fallback,
         "polarity": "positive",
         "confidence": 0.99,
         "source_span": "supporting text",
@@ -60,6 +62,54 @@ def make_parser() -> ReferenceSemanticParser:
                     predicate="CanDo",
                     values=("dog", "bark"),
                     roles=("agent", "action"),
+                ),
+            ]
+        },
+        "The researcher collected the data during the experiment.": {
+            "assertions": [
+                assertion(
+                    predicate="Evaluation",
+                    relation="collect",
+                    values=("researcher", "data"),
+                    roles=("agent", "patient"),
+                    fallback=True,
+                ),
+                assertion(
+                    predicate="During",
+                    values=("collect", "experiment"),
+                    roles=("event_or_state", "time_or_event"),
+                ),
+            ]
+        },
+        "The engineer designed the bridge in 2025.": {
+            "assertions": [
+                assertion(
+                    predicate="Evaluation",
+                    relation="design",
+                    values=("engineer", "bridge"),
+                    roles=("agent", "patient"),
+                    fallback=True,
+                ),
+                assertion(
+                    predicate="OccursAt",
+                    values=("design", "2025"),
+                    roles=("event_or_state", "time"),
+                ),
+            ]
+        },
+        "The doctor examined the patient at the hospital.": {
+            "assertions": [
+                assertion(
+                    predicate="Evaluation",
+                    relation="examine",
+                    values=("doctor", "patient"),
+                    roles=("agent", "patient"),
+                    fallback=True,
+                ),
+                assertion(
+                    predicate="OccursIn",
+                    values=("examine", "hospital"),
+                    roles=("event_or_state", "location"),
                 ),
             ]
         },
@@ -163,6 +213,57 @@ class TestSemanticDatasetBuilder:
         record = json.loads(output_path.read_text(encoding="utf-8"))
         assert record["text"] == "Unknown statement."
         assert "invalid structured semantic output" in record["error"]
+
+    @pytest.mark.parametrize(
+        "sentence,expected_predicates,expected_metta",
+        [
+            (
+                "The researcher collected the data during the experiment.",
+                ["Evaluation", "During"],
+                (
+                    "(Evaluation collect (List researcher data))",
+                    "(During collect experiment)",
+                ),
+            ),
+            (
+                "The engineer designed the bridge in 2025.",
+                ["Evaluation", "OccursAt"],
+                (
+                    "(Evaluation design (List engineer bridge))",
+                    "(OccursAt design time_2025)",
+                ),
+            ),
+            (
+                "The doctor examined the patient at the hospital.",
+                ["Evaluation", "OccursIn"],
+                (
+                    "(Evaluation examine (List doctor patient))",
+                    "(OccursIn examine hospital)",
+                ),
+            ),
+        ],
+    )
+    def test_preserves_event_modifiers_in_dataset(
+        self,
+        sentence: str,
+        expected_predicates: list[str],
+        expected_metta: tuple[str, ...],
+    ) -> None:
+        builder = SemanticDatasetBuilder(
+            make_parser(),
+            include_metta=True,
+        )
+
+        accepted, rejected = builder.generate([sentence])
+
+        assert rejected == []
+        assert len(accepted) == 1
+
+        assertions = accepted[0].target["assertions"]
+
+        assert [item["predicate"] for item in assertions] == expected_predicates
+
+        assert accepted[0].metta == expected_metta
 
 
 @pytest.mark.parametrize(

@@ -113,6 +113,16 @@ class TestPrompt:
         assert "Return valid JSON only" in prompt
         assert "Do not output MeTTa" in prompt
 
+    def test_contains_temporal_and_spatial_modifier_contract(self) -> None:
+        prompt = ReferenceSemanticParser.build_prompt(
+            "The engineer designed the bridge in 2025."
+        )
+
+        assert "OccursAt(event_or_state, time)" in prompt
+        assert "OccursIn(event_or_state, location)" in prompt
+        assert "Temporal and other secondary relations must not replace" in prompt
+        assert "Spatial modifiers must not replace the core event" in prompt
+
 
 class TestReferenceSemanticParser:
     def test_generates_normalized_structured_semantics(self) -> None:
@@ -241,6 +251,152 @@ class TestReferenceSemanticParser:
 
         with pytest.raises(ModelGenerationError, match="reference parser"):
             parser.parse("A dog has fur.")
+
+    def test_preserves_core_event_with_during_modifier(self) -> None:
+        output = structured_output(
+            assertion(
+                predicate="Evaluation",
+                relation="collect",
+                values=("researcher", "data"),
+                roles=("agent", "patient"),
+                fallback=True,
+            ),
+            assertion(
+                predicate="During",
+                values=("collect", "experiment"),
+                roles=("event_or_state", "time_or_event"),
+            ),
+        )
+        parser, _ = make_teacher(output)
+
+        atoms = parser.parse("The researcher collected the data during the experiment.")
+
+        assert [str(atom) for atom in atoms] == [
+            "(Evaluation collect (List researcher data))",
+            "(During collect experiment)",
+        ]
+
+    def test_preserves_core_event_with_occurs_at_modifier(self) -> None:
+        output = structured_output(
+            assertion(
+                predicate="Evaluation",
+                relation="design",
+                values=("engineer", "bridge"),
+                roles=("agent", "patient"),
+                fallback=True,
+            ),
+            assertion(
+                predicate="OccursAt",
+                values=("design", "2025"),
+                roles=("event_or_state", "time"),
+            ),
+        )
+        parser, _ = make_teacher(output)
+
+        atoms = parser.parse("The engineer designed the bridge in 2025.")
+
+        assert [str(atom) for atom in atoms] == [
+            "(Evaluation design (List engineer bridge))",
+            "(OccursAt design time_2025)",
+        ]
+
+    def test_preserves_core_event_with_occurs_in_modifier(self) -> None:
+        output = structured_output(
+            assertion(
+                predicate="Evaluation",
+                relation="examine",
+                values=("doctor", "patient"),
+                roles=("agent", "patient"),
+                fallback=True,
+            ),
+            assertion(
+                predicate="OccursIn",
+                values=("examine", "hospital"),
+                roles=("event_or_state", "location"),
+            ),
+        )
+        parser, _ = make_teacher(output)
+
+        atoms = parser.parse("The doctor examined the patient at the hospital.")
+
+        assert [str(atom) for atom in atoms] == [
+            "(Evaluation examine (List doctor patient))",
+            "(OccursIn examine hospital)",
+        ]
+
+    def test_distinguishes_entity_location_from_event_location(self) -> None:
+        entity_output = structured_output(
+            assertion(
+                predicate="LocatedIn",
+                values=("doctor", "hospital"),
+                roles=("entity", "location"),
+            )
+        )
+        event_output = structured_output(
+            assertion(
+                predicate="Evaluation",
+                relation="examine",
+                values=("doctor", "patient"),
+                roles=("agent", "patient"),
+                fallback=True,
+            ),
+            assertion(
+                predicate="OccursIn",
+                values=("examine", "hospital"),
+                roles=("event_or_state", "location"),
+            ),
+        )
+
+        entity_parser, _ = make_teacher(entity_output)
+        event_parser, _ = make_teacher(event_output)
+
+        entity_atoms = entity_parser.parse("The doctor is in the hospital.")
+        event_atoms = event_parser.parse(
+            "The doctor examined the patient at the hospital."
+        )
+
+        assert [str(atom) for atom in entity_atoms] == ["(LocatedIn doctor hospital)"]
+        assert [str(atom) for atom in event_atoms] == [
+            "(Evaluation examine (List doctor patient))",
+            "(OccursIn examine hospital)",
+        ]
+
+    @pytest.mark.parametrize(
+        "predicate,values,roles",
+        [
+            (
+                "OccursAt",
+                ("design", "2025"),
+                ("time", "event_or_state"),
+            ),
+            (
+                "OccursIn",
+                ("examine", "hospital"),
+                ("location", "event_or_state"),
+            ),
+        ],
+    )
+    def test_rejects_wrong_modifier_role_order(
+        self,
+        predicate: str,
+        values: tuple[str, ...],
+        roles: tuple[str, ...],
+    ) -> None:
+        parser, _ = make_teacher(
+            structured_output(
+                assertion(
+                    predicate=predicate,
+                    values=values,
+                    roles=roles,
+                )
+            )
+        )
+
+        with pytest.raises(
+            SemanticParseError,
+            match="requires argument roles",
+        ):
+            parser.parse("Supporting sentence.")
 
 
 @pytest.fixture

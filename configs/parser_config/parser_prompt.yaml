@@ -234,11 +234,38 @@ parser:
         If no agent is stated, do not create one merely to occupy the
         first position.
 
-    17. Temporal and other secondary relations must not replace the core
-        event when both are explicitly stated.
+    17. Temporal and other secondary relations must not replace the core event.
 
-        Preserve the core event participants and represent additional
-        explicitly stated relations when the schema supports them.
+        Always preserve the core event as its own assertion when the sentence
+        explicitly states an event with semantic participants.
+
+        Then represent explicitly stated temporal information as an additional
+        assertion when the schema supports it.
+
+        A temporal assertion must never cause the core event, its agent,
+        its patient, or another explicitly stated core participant to be lost.
+
+        Use the canonical base-form relation of the core event when referring
+        to that event in a temporal assertion.
+
+        For example, if the core event is:
+
+        predicate: Evaluation
+        relation: collect
+
+        refer to that event as:
+        collect
+
+        Do not invent alternative event labels such as:
+        data_collection
+        collection_event
+        researcher_collection
+        the_researcher_collected_the_data
+
+        ### During
+
+        Use During when an event or state occurs within another explicitly
+        stated event or temporal interval.
 
         For During, the required role order is:
 
@@ -251,45 +278,192 @@ parser:
         Example:
         "The researcher collected the data during the experiment."
 
-        The collection event is the event being temporally located.
-        The experiment is the containing time/event.
+        Preserve the core event:
+
+        predicate: Evaluation
+        relation: collect
+        arguments:
+          agent: researcher
+          patient: data
+
+        Also represent:
+
+        predicate: During
+        arguments:
+          event_or_state: collect
+          time_or_event: experiment
 
         Never reverse these roles.
 
-    18. Never invent missing information.
+        ### OccursAt
+
+        Use OccursAt when an event or state is associated with an explicitly
+        stated date, year, clock time, or named time value.
+
+        For OccursAt, the required role order is:
+
+        first:
+        event_or_state
+
+        second:
+        time
+
+        Example:
+        "The engineer designed the bridge in 2025."
+
+        Preserve the core event:
+
+        predicate: Evaluation
+        relation: design
+        arguments:
+          agent: engineer
+          patient: bridge
+
+        Also represent:
+
+        predicate: OccursAt
+        arguments:
+          event_or_state: design
+          time: 2025
+
+        Distinguish temporal predicates by meaning:
+
+        "during the experiment"
+        -> During
+
+        "in 2025"
+        -> OccursAt
+
+        "at 10 AM"
+        -> OccursAt
+
+        "before the meeting"
+        -> Before
+
+        "after the meeting"
+        -> After
+
+        "started at 10 AM"
+        -> StartsAt
+
+        "ended at 11 AM"
+        -> EndsAt
+
+        Do not use During merely because temporal information is present.
+        Do not use OccursAt for another event or process when During is the
+        intended relation.
+
+    18. Spatial modifiers must not replace the core event.
+
+        Always preserve the core event as its own assertion when the sentence
+        explicitly states an event with semantic participants.
+
+        If an explicitly stated location modifies that event, represent the
+        location as an additional assertion.
+
+        Distinguish entity location from event location.
+
+        ### LocatedIn
+
+        Use LocatedIn when the sentence states where an entity itself is
+        located.
+
+        Example:
+        "The doctor is in the hospital."
+
+        Use:
+        predicate: LocatedIn
+        arguments:
+          entity: doctor
+          location: hospital
+
+        ### OccursIn
+
+        Use OccursIn when the sentence states where an event occurs.
+
+        Example:
+        "The doctor examined the patient at the hospital."
+
+        Preserve the core event:
+
+        predicate: Evaluation
+        relation: examine
+        arguments:
+          agent: doctor
+          patient: patient
+
+        Also represent:
+
+        predicate: OccursIn
+        arguments:
+          event_or_state: examine
+          location: hospital
+
+        Do not use LocatedIn with role:
+        event_or_state
+
+        Do not use OccursIn when the sentence merely states the persistent
+        or current location of an entity.
+
+        A spatial assertion must never cause the core event, its agent,
+        its patient, or another explicitly stated participant to be lost.
+
+        Use the canonical base-form relation of the core event when referring
+        to that event in OccursIn.
+
+        Example:
+        "The patient was examined by the doctor at the hospital."
+
+        Preserve exactly the same core semantics as the active form:
+
+        relation: examine
+        agent: doctor
+        patient: patient
+
+        Also represent:
+
+        predicate: OccursIn
+        arguments:
+          event_or_state: examine
+          location: hospital
+
+    19. Never invent missing information.
 
         If an agent, patient, location, time, or other participant is not
         explicitly stated and cannot be unambiguously resolved from context,
         do not invent it.
 
-    19. Resolve pronouns and referring expressions only when the antecedent
+    20. Resolve pronouns and referring expressions only when the antecedent
         is unambiguous from the provided context.
 
-    20. Preserve negation using:
+    21. Preserve negation using:
         "polarity": "negative"
 
         Otherwise use:
         "polarity": "positive"
 
-    21. If a known predicate is used:
+    22. If a known predicate is used:
         "fallback": false
         "relation": null
 
-    22. If Evaluation is used:
+    23. If Evaluation is used:
         "fallback": true
         "relation": the canonical base-form relation
 
-    23. A sentence may contain multiple independent facts.
+    24. A sentence may contain multiple independent facts.
 
         Return one object inside "assertions" for each independently expressed
         fact when multiple assertions are required to preserve the meaning.
 
-    24. confidence must be a number between 0.0 and 1.0.
+        A core event together with an explicitly stated temporal or spatial
+        modifier may therefore require multiple assertions.
 
-    25. source_span must contain the narrowest supporting text span from the
+    25. confidence must be a number between 0.0 and 1.0.
+
+    26. source_span must contain the narrowest supporting text span from the
         input sentence.
 
-    26. If an interpretation is genuinely ambiguous, place alternative
+    27. If an interpretation is genuinely ambiguous, place alternative
         interpretations in "alternatives".
 
         Otherwise use an empty list.
@@ -329,11 +503,46 @@ parser:
     8. For a transitive event containing an explicit patient/object, verify
        that Performs has NOT been used if it would discard that participant.
 
-    9. For During, verify that:
-       event_or_state is first;
-       time_or_event is second.
+    9. Verify temporal relations:
 
-    10. Verify that no unstated participant or fact was invented.
+       - If a temporal relation modifies an explicitly stated core event,
+         verify that the core event is also preserved as its own assertion.
+
+       - Verify that the canonical base-form event relation is used when
+         referring to the core event.
+
+       For During:
+       - event_or_state is first;
+       - time_or_event is second;
+       - use it for an event occurring during another event or interval.
+
+       For OccursAt:
+       - event_or_state is first;
+       - time is second;
+       - use it for an explicit date, year, clock time, or named time value.
+
+       A temporal assertion must not replace or discard the core event.
+
+    10. Verify spatial relations:
+
+        - If a location modifies an explicitly stated core event, verify that
+          the core event is preserved as its own assertion.
+
+        - Use LocatedIn only with roles:
+          entity, location
+
+        - Use OccursIn only with roles:
+          event_or_state, location
+
+        - Use the canonical base-form event relation in OccursIn.
+
+        - Do not use LocatedIn with event_or_state.
+
+        - Do not use OccursIn for a persistent entity-location relation.
+
+        A spatial assertion must not replace or discard the core event.
+
+    11. Verify that no unstated participant or fact was invented.
 
     ## OUTPUT FORMAT
 
@@ -490,7 +699,166 @@ parser:
       ]
     }
 
-    Example 5 - known predicate:
+    Example 5 - event during another event:
+
+    Sentence:
+    "The researcher collected the data during the experiment."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "collect",
+          "arguments": [
+            {
+              "value": "researcher",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "data",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The researcher collected the data",
+          "alternatives": []
+        },
+        {
+          "predicate": "During",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "collect",
+              "role": "event_or_state",
+              "type": null
+            },
+            {
+              "value": "experiment",
+              "role": "time_or_event",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "during the experiment",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 6 - event at an explicit time:
+
+    Sentence:
+    "The engineer designed the bridge in 2025."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "design",
+          "arguments": [
+            {
+              "value": "engineer",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "bridge",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The engineer designed the bridge",
+          "alternatives": []
+        },
+        {
+          "predicate": "OccursAt",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "design",
+              "role": "event_or_state",
+              "type": null
+            },
+            {
+              "value": "2025",
+              "role": "time",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "in 2025",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 7 - event with explicit location:
+
+    Sentence:
+    "The doctor examined the patient at the hospital."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "examine",
+          "arguments": [
+            {
+              "value": "doctor",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "patient",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The doctor examined the patient",
+          "alternatives": []
+        },
+        {
+          "predicate": "OccursIn",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "examine",
+              "role": "event_or_state",
+              "type": null
+            },
+            {
+              "value": "hospital",
+              "role": "location",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "at the hospital",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 8 - known predicate:
 
     Sentence:
     "A dog is an animal."
