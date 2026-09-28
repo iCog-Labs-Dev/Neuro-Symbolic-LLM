@@ -427,30 +427,155 @@ parser:
           event_or_state: examine
           location: hospital
 
-    19. Never invent missing information.
+    19. Preserve facts expressed in subordinate, relative, and embedded clauses.
+
+        A sentence may express multiple independent facts through:
+        - relative clauses such as "which..." or "that...";
+        - subordinate clauses such as "while...", "when...", or "because...";
+        - coordinated clauses joined by "and";
+        - passive embedded clauses.
+
+        When an embedded clause expresses its own proposition, preserve that
+        proposition as a separate assertion.
+
+        Do not collapse a specific embedded relation into a more generic
+        predicate merely because it appears inside another clause.
+
+        ### Relative clauses
+
+        Example:
+        "Paris, which is the capital of France, is a large city."
+
+        Preserve both facts:
+
+        predicate: Evaluation
+        relation: capital_of
+        arguments:
+          agent: Paris
+          patient: France
+
+        and:
+
+        predicate: PropertyOf
+        arguments:
+          entity: Paris
+          property: large_city
+
+        Do not replace "capital of France" with:
+
+        LocatedIn(Paris, France)
+
+        because being the capital of a country is not equivalent to merely
+        being located in that country.
+
+        ### Embedded passive events
+
+        Example:
+        "John bought a car that was manufactured in Germany."
+
+        Preserve the purchase event:
+
+        predicate: Evaluation
+        relation: buy
+        arguments:
+          agent: John
+          patient: car
+
+        Also preserve the manufacturing event.
+
+        Because the manufacturer is not explicitly stated, do not invent one.
+
+        Use:
+
+        predicate: Evaluation
+        relation: manufacture
+        arguments:
+          patient: car
+
+        Also preserve the event location:
+
+        predicate: OccursIn
+        arguments:
+          event_or_state: manufacture
+          location: Germany
+
+        Do not replace the manufacturing event with:
+
+        LocatedIn(car, Germany)
+
+        because the sentence states where the manufacturing event occurred,
+        not where the car is currently located.
+
+        ### Multiple events connected by subordinate conjunctions
+
+        Example:
+        "The doctor examined the patient while the nurse prepared the medicine."
+
+        Preserve both events:
+
+        predicate: Evaluation
+        relation: examine
+        arguments:
+          agent: doctor
+          patient: patient
+
+        and:
+
+        predicate: Evaluation
+        relation: prepare
+        arguments:
+          agent: nurse
+          patient: medicine
+
+        Also preserve the explicitly stated temporal relationship between
+        the events when the available predicate schema can represent it.
+
+        With the current schema, represent:
+
+        predicate: During
+        arguments:
+          event_or_state: examine
+          time_or_event: prepare
+
+        Do not discard either event merely because one occurs in a subordinate
+        clause.
+
+        ### General rule
+
+        For every complex sentence:
+
+        1. Identify each independently asserted proposition.
+        2. Preserve each proposition as its own assertion.
+        3. Preserve explicitly stated relations between those propositions
+           when the predicate schema supports them.
+        4. Do not invent missing participants.
+        5. Do not replace a specific event or relation with a broader relation
+           solely because it appears in a subordinate clause.
+
+    20. Never invent missing information.
 
         If an agent, patient, location, time, or other participant is not
         explicitly stated and cannot be unambiguously resolved from context,
         do not invent it.
 
-    20. Resolve pronouns and referring expressions only when the antecedent
+    21. Resolve pronouns and referring expressions only when the antecedent
         is unambiguous from the provided context.
 
-    21. Preserve negation using:
+    22. Preserve negation using:
         "polarity": "negative"
 
         Otherwise use:
         "polarity": "positive"
 
-    22. If a known predicate is used:
+    23. If a known predicate is used:
         "fallback": false
         "relation": null
 
-    23. If Evaluation is used:
+    24. If Evaluation is used:
         "fallback": true
         "relation": the canonical base-form relation
 
-    24. A sentence may contain multiple independent facts.
+    25. A sentence may contain multiple independent facts.
 
         Return one object inside "assertions" for each independently expressed
         fact when multiple assertions are required to preserve the meaning.
@@ -458,12 +583,12 @@ parser:
         A core event together with an explicitly stated temporal or spatial
         modifier may therefore require multiple assertions.
 
-    25. confidence must be a number between 0.0 and 1.0.
+    26. confidence must be a number between 0.0 and 1.0.
 
-    26. source_span must contain the narrowest supporting text span from the
+    27. source_span must contain the narrowest supporting text span from the
         input sentence.
 
-    27. If an interpretation is genuinely ambiguous, place alternative
+    28. If an interpretation is genuinely ambiguous, place alternative
         interpretations in "alternatives".
 
         Otherwise use an empty list.
@@ -542,7 +667,21 @@ parser:
 
         A spatial assertion must not replace or discard the core event.
 
-    11. Verify that no unstated participant or fact was invented.
+    11. Verify complex-sentence preservation:
+
+        - Every independently asserted proposition in a relative,
+          subordinate, or coordinated clause is preserved.
+
+        - Do not replace an embedded event with a generic entity relation
+          such as LocatedIn when the sentence describes the location of
+          the event itself.
+
+        - Do not invent an agent for an agentless embedded passive event.
+
+        - If multiple events are explicitly related temporally, preserve
+          both events and the supported temporal relation between them.
+
+    12. Verify that no unstated participant or fact was invented.
 
     ## OUTPUT FORMAT
 
@@ -858,7 +997,203 @@ parser:
       ]
     }
 
-    Example 8 - known predicate:
+    Example 8 - relative clause:
+
+    Sentence:
+    "Paris, which is the capital of France, is a large city."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "capital_of",
+          "arguments": [
+            {
+              "value": "Paris",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "France",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "Paris, which is the capital of France",
+          "alternatives": []
+        },
+        {
+          "predicate": "PropertyOf",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "Paris",
+              "role": "entity",
+              "type": null
+            },
+            {
+              "value": "large_city",
+              "role": "property",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "Paris ... is a large city",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 9 - embedded passive event:
+
+    Sentence:
+    "John bought a car that was manufactured in Germany."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "buy",
+          "arguments": [
+            {
+              "value": "John",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "car",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "John bought a car",
+          "alternatives": []
+        },
+        {
+          "predicate": "Evaluation",
+          "relation": "manufacture",
+          "arguments": [
+            {
+              "value": "car",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "car that was manufactured",
+          "alternatives": []
+        },
+        {
+          "predicate": "OccursIn",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "manufacture",
+              "role": "event_or_state",
+              "type": null
+            },
+            {
+              "value": "Germany",
+              "role": "location",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "manufactured in Germany",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 10 - temporally related events:
+
+    Sentence:
+    "The doctor examined the patient while the nurse prepared the medicine."
+
+    Output:
+    {
+      "assertions": [
+        {
+          "predicate": "Evaluation",
+          "relation": "examine",
+          "arguments": [
+            {
+              "value": "doctor",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "patient",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "The doctor examined the patient",
+          "alternatives": []
+        },
+        {
+          "predicate": "Evaluation",
+          "relation": "prepare",
+          "arguments": [
+            {
+              "value": "nurse",
+              "role": "agent",
+              "type": null
+            },
+            {
+              "value": "medicine",
+              "role": "patient",
+              "type": null
+            }
+          ],
+          "fallback": true,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "the nurse prepared the medicine",
+          "alternatives": []
+        },
+        {
+          "predicate": "During",
+          "relation": null,
+          "arguments": [
+            {
+              "value": "examine",
+              "role": "event_or_state",
+              "type": null
+            },
+            {
+              "value": "prepare",
+              "role": "time_or_event",
+              "type": null
+            }
+          ],
+          "fallback": false,
+          "polarity": "positive",
+          "confidence": 0.99,
+          "source_span": "while the nurse prepared the medicine",
+          "alternatives": []
+        }
+      ]
+    }
+
+    Example 11 - known predicate:
 
     Sentence:
     "A dog is an animal."
