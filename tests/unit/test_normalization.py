@@ -103,7 +103,7 @@ def test_prefixes_numeric_temporal_values(
     value: str,
     expected: str,
 ) -> None:
-    """Numeric temporal values become safe MeTTa symbols."""
+    """Numeric temporal values receive the time_ prefix."""
     normalized = normalize_semantic_result(
         make_result(
             value=value,
@@ -119,8 +119,8 @@ def test_prefixes_numeric_temporal_values(
     assert argument.role == role
 
 
-def test_does_not_prefix_non_temporal_numeric_values() -> None:
-    """Numbers are not changed merely because they begin with a digit."""
+def test_prefixes_non_temporal_numeric_values() -> None:
+    """Numeric-leading non-temporal values receive the num_ prefix."""
     normalized = normalize_semantic_result(
         make_result(
             value="2025",
@@ -130,7 +130,38 @@ def test_does_not_prefix_non_temporal_numeric_values() -> None:
         )
     )
 
-    assert normalized.assertions[0].arguments[0].value == "2025"
+    assert normalized.assertions[0].arguments[0].value == "num_2025"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("25 liters", "num_25_liters"),
+        ("1,000 employees", "num_1000_employees"),
+        ("37.5 degrees", "num_37_5_degrees"),
+        ("25%", "num_25_percent"),
+        ("90 minutes", "num_90_minutes"),
+        ("5 km", "num_5_km"),
+        ("1M people", "num_1M_people"),
+        ("10 kg", "num_10_kg"),
+        ("30 days", "num_30_days"),
+    ],
+)
+def test_normalizes_numeric_quantities(
+    value: str,
+    expected: str,
+) -> None:
+    """Quantities and measurements become MeTTa-safe symbols."""
+    normalized = normalize_semantic_result(
+        make_result(
+            value=value,
+            role="patient",
+            argument_type=None,
+            relation="measure",
+        )
+    )
+
+    assert normalized.assertions[0].arguments[0].value == expected
 
 
 def test_does_not_double_prefix_normalized_temporal_values() -> None:
@@ -144,3 +175,31 @@ def test_does_not_double_prefix_normalized_temporal_values() -> None:
     )
 
     assert normalized.assertions[0].arguments[0].value == "time_2025"
+
+
+def test_does_not_double_prefix_normalized_numeric_values() -> None:
+    """Already-normalized numeric values are not prefixed twice."""
+    normalized = normalize_semantic_result(
+        make_result(
+            value="num_25_liters",
+            role="patient",
+            argument_type=None,
+            relation="measure",
+        )
+    )
+
+    assert normalized.assertions[0].arguments[0].value == "num_25_liters"
+
+
+def test_preserves_non_numeric_non_temporal_values() -> None:
+    """Ordinary symbolic values do not receive numeric prefixes."""
+    normalized = normalize_semantic_result(
+        make_result(
+            value="research_report",
+            role="patient",
+            argument_type=None,
+            relation="read",
+        )
+    )
+
+    assert normalized.assertions[0].arguments[0].value == "research_report"
