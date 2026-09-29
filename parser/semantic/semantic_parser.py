@@ -11,7 +11,6 @@ Both share the same validation, normalization, and rendering pipeline.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +37,7 @@ from parser.semantic.normalization import (
     SemanticNormalizationError,
     normalize_semantic_result,
 )
+from parser.semantic.output_cleanup import clean_model_output
 from parser.semantic.schema import SemanticParseResult
 from parser.student.student_prompt import build_student_prompt
 
@@ -137,11 +137,6 @@ def _build_predicate_guide() -> str:
 
 PREDICATE_GUIDE = _build_predicate_guide()
 
-_CODE_FENCE_RE = re.compile(
-    r"^```(?:json)?\s*(.*?)\s*```$",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
 
 @dataclass(frozen=True, slots=True)
 class SemanticParserConfig:
@@ -219,11 +214,7 @@ class _BaseSemanticParser:
     @staticmethod
     def clean_model_output(output: str) -> str:
         """Remove whitespace and one optional JSON Markdown code fence."""
-        cleaned = output.strip()
-        match = _CODE_FENCE_RE.fullmatch(cleaned)
-        if match:
-            cleaned = match.group(1).strip()
-        return cleaned
+        return clean_model_output(output)
 
     @staticmethod
     def validate_predicates(result: SemanticParseResult) -> SemanticParseResult:
