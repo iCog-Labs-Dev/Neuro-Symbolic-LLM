@@ -33,6 +33,29 @@ def test_loads_versioned_catalog_with_explicit_types() -> None:
     assert "OpenObligation" not in catalog.types
 
 
+def test_exports_ordered_immutable_type_signatures() -> None:
+    catalog = load_ontology_catalog()
+
+    signatures = catalog.signatures()
+
+    assert signatures["Concession"] == (
+        frozenset({"Clause"}),
+        frozenset({"Clause"}),
+    )
+    assert signatures["Causes"] == (
+        frozenset({"Event", "Proposition"}),
+        frozenset({"Event", "Proposition"}),
+    )
+    assert signatures["Agent"] == (
+        frozenset({"Event"}),
+        frozenset({"Entity"}),
+    )
+    assert "AliasOf" not in signatures
+    assert "ProvisionalRelation" not in signatures
+    with pytest.raises(TypeError):
+        signatures["Concession"] = ()  # type: ignore[index]
+
+
 @pytest.mark.parametrize("name", ["AliasOf", "PipelineRole"])
 def test_provisional_program_relations_are_not_approved_predicates(name: str) -> None:
     catalog = load_ontology_catalog()

@@ -61,6 +61,23 @@ class OntologyCatalog:
         except KeyError as error:
             raise OntologyCatalogError(f"Unknown ontology relation {name!r}") from error
 
+    def signatures(self) -> Mapping[str, tuple[frozenset[str], ...]]:
+        """Return immutable, ordered type signatures for document validation.
+
+        Each argument position contains the exact set of types admitted by
+        the corresponding catalog relation. Unknown and provisional relations
+        are intentionally absent.
+        """
+
+        return MappingProxyType(
+            {
+                name: tuple(
+                    frozenset(argument.allowed_types) for argument in relation.arguments
+                )
+                for name, relation in self.relations.items()
+            }
+        )
+
 
 def default_catalog_directory() -> Path:
     """Return the shared ontology directory."""
