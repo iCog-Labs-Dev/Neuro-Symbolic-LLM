@@ -33,6 +33,16 @@ def test_loads_versioned_catalog_with_explicit_types() -> None:
     assert "OpenObligation" not in catalog.types
 
 
+@pytest.mark.parametrize("name", ["AliasOf", "PipelineRole"])
+def test_provisional_program_relations_are_not_approved_predicates(name: str) -> None:
+    catalog = load_ontology_catalog()
+
+    assert name not in catalog.relations
+    with pytest.raises(OntologyCatalogError, match="Unknown ontology relation"):
+        catalog.relation(name)
+    assert {"Application", "Lambda", "Map", "Fold"} <= catalog.relations.keys()
+
+
 def test_rejects_unary_relation_used_as_undeclared_type(tmp_path: Path) -> None:
     _write_module(
         tmp_path / "upper.yaml",

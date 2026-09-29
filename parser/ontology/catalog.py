@@ -251,11 +251,11 @@ def load_ontology_catalog(directory: Path | None = None) -> OntologyCatalog:
     allowed_types = declared_types | _PRIMITIVE_TYPES
     for relation in relations.values():
         for argument in relation.arguments:
-            unknown = set(argument.allowed_types) - allowed_types
-            if unknown:
+            unknown_types = set(argument.allowed_types) - allowed_types
+            if unknown_types:
                 raise OntologyCatalogError(
                     f"{relation.ontology}.{relation.name}.{argument.name} references "
-                    f"unknown types {sorted(unknown)}"
+                    f"unknown types {sorted(unknown_types)}"
                 )
 
     return OntologyCatalog(
