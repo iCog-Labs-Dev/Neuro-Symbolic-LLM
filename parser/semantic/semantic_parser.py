@@ -226,6 +226,23 @@ class _BaseSemanticParser:
         return cleaned
 
     @staticmethod
+    def repair_known_predicate_contract(
+        result: SemanticParseResult,
+    ) -> SemanticParseResult:
+        """Repair deterministic contract fields for known predicates."""
+        repaired = result.model_copy(deep=True)
+
+        for assertion in repaired.assertions:
+            if (
+                assertion.predicate in PREDICATE_SCHEMAS
+                and assertion.predicate != "Evaluation"
+            ):
+                assertion.relation = None
+                assertion.fallback = False
+
+        return repaired
+
+    @staticmethod
     def validate_predicates(result: SemanticParseResult) -> SemanticParseResult:
         """Validate predicate and fallback consistency."""
         for assertion in result.assertions:
@@ -381,6 +398,7 @@ class _BaseSemanticParser:
             raise SemanticParseError(f"Normalization failed: {error}") from error
 
         # 3. Validate predicates and arguments
+        result = self.repair_known_predicate_contract(result)
         result = self.validate_predicates(result)
         result = self.validate_arguments(result)
 
@@ -438,6 +456,7 @@ class _BaseSemanticParser:
         except SemanticNormalizationError as error:
             raise SemanticParseError(str(error)) from error
 
+        result = self.repair_known_predicate_contract(result)
         result = self.validate_predicates(result)
         result = self.validate_arguments(result)
         return result

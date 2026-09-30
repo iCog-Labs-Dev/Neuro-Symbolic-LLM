@@ -219,10 +219,55 @@ parser:
     13. Use UsedFor only when the sentence explicitly expresses purpose
         or function.
 
-        Do not use UsedFor as a generic representation for an ordinary event.
+        If UsedFor is selected:
+        - relation MUST be null;
+        - fallback MUST be false;
+        - use exactly the roles required by the predicate guide.
 
+        Never use UsedFor with fallback: true.
+                Example:
+
+        "The machine is used for cutting metal."
+
+        Use:
+        predicate: UsedFor
+        relation: null
+        fallback: false
+
+        Do not output:
+        relation: cut
+        relation: cutting
+        relation: use
+
+        The purpose content belongs in the predicate arguments according to
+        the predicate guide, not in the relation field.
+                For ordinary common-noun entities, do not include an English determiner
+        such as "the", "a", or "an" as part of the semantic entity value.
+
+        Example:
+
+        "The machine is used for cutting metal."
+
+        Use:
+          entity: machine
+          purpose: cutting_metal
+
+        Do not use:
+          entity: The_machine
+
+        Preserve determiners when they are genuinely part of a proper name.
     14. Apply the same requirements to every known predicate.
+        When a known predicate directly and completely matches the meaning,
+        prefer that known predicate over Evaluation.
 
+        Example:
+
+        "The tank contains water."
+
+        Use Contains when its required roles can be satisfied exactly.
+
+        Do not fall back to Evaluation(contain, ...) when Contains directly
+        represents the same meaning without losing information.
         Select a known predicate because its semantic meaning matches the
         sentence, not because of isolated keywords, grammatical constructions,
         or surface word order.
@@ -231,7 +276,31 @@ parser:
         - use exactly the required number of arguments;
         - use exactly the required role names;
         - preserve exactly the required role order.
+                ### Inheritance restriction
 
+        Use Inheritance only for class or type membership.
+
+        Example:
+
+        "A dog is an animal."
+        -> Inheritance(dog, animal)
+
+        Do not use Inheritance for relational roles expressed with another
+        entity.
+
+        Example:
+
+        "Paris is the capital of France."
+
+        This does not mean that Paris is a kind of capital_of_France.
+
+        Preserve the relation instead:
+
+        predicate: Evaluation
+        relation: capital_of
+        arguments:
+          agent: Paris
+          patient: France
     15. For Evaluation, use the canonical base-form relation.
 
         Examples:
@@ -1281,10 +1350,23 @@ parser:
 
     8. Verify quantitative representations.
 
-       - preserve explicitly stated numeric values and units;
-       - do not use a known predicate with a non-null relation;
-       - do not discard units or quantified nouns;
-       - do not invent or mathematically convert quantities.
+       - Preserve explicitly stated numeric values and units.
+
+       - Do not use a known predicate with a non-null relation.
+
+       - For PropertyOf, use exactly:
+         entity, property
+
+       - For Has, use exactly:
+         owner, possessed
+
+       - If a measurement verb such as "weigh" or "last" carries semantic
+         meaning that is not directly represented by a known predicate,
+         use Evaluation.
+
+       - Do not discard units or quantified nouns.
+
+       - Do not invent or mathematically convert quantities.
 
     9. Verify factuality.
 

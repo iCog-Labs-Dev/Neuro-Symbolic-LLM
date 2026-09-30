@@ -251,3 +251,46 @@ def test_rejects_evaluation_without_relation() -> None:
 
     with pytest.raises(SemanticParseError, match="requires a relation"):
         ReferenceSemanticParser.validate_predicates(result)
+
+
+def test_repairs_known_predicate_contract() -> None:
+    result = known_predicate_result(
+        predicate="UsedFor",
+        relation="cut",
+        roles=("entity", "purpose"),
+        fallback=True,
+    )
+
+    repaired = ReferenceSemanticParser.repair_known_predicate_contract(result)
+
+    assertion = repaired.assertions[0]
+
+    assert assertion.predicate == "UsedFor"
+    assert assertion.relation is None
+    assert assertion.fallback is False
+
+    # Original model output is not mutated.
+    assert result.assertions[0].relation == "cut"
+    assert result.assertions[0].fallback is True
+
+    assert ReferenceSemanticParser.validate_predicates(repaired) is repaired
+    assert ReferenceSemanticParser.validate_arguments(repaired) is repaired
+
+
+def test_repairs_contract_for_any_known_predicate() -> None:
+    result = known_predicate_result(
+        predicate="Contains",
+        relation="contain",
+        roles=("container", "contained"),
+        fallback=True,
+    )
+
+    repaired = ReferenceSemanticParser.repair_known_predicate_contract(result)
+
+    assertion = repaired.assertions[0]
+
+    assert assertion.relation is None
+    assert assertion.fallback is False
+
+    assert ReferenceSemanticParser.validate_predicates(repaired) is repaired
+    assert ReferenceSemanticParser.validate_arguments(repaired) is repaired
