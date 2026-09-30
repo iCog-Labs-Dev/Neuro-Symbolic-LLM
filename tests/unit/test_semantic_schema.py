@@ -294,3 +294,33 @@ def test_repairs_contract_for_any_known_predicate() -> None:
 
     assert ReferenceSemanticParser.validate_predicates(repaired) is repaired
     assert ReferenceSemanticParser.validate_arguments(repaired) is repaired
+
+
+def test_negative_speculative_assertion_preserves_both_dimensions() -> None:
+    data = valid_result_data()
+
+    assertion = data["assertions"][0]
+    assertion["polarity"] = "negative"
+    assertion["factuality"] = "speculative"
+
+    result = SemanticParseResult.model_validate(data)
+
+    assertion = result.assertions[0]
+
+    assert assertion.polarity == "negative"
+    assert assertion.factuality == "speculative"
+
+
+def test_negative_hypothetical_assertion_preserves_both_dimensions() -> None:
+    data = valid_result_data()
+
+    assertion = data["assertions"][0]
+    assertion["polarity"] = "negative"
+    assertion["factuality"] = "hypothetical"
+
+    result = SemanticParseResult.model_validate(data)
+
+    assertion = result.assertions[0]
+
+    assert assertion.polarity == "negative"
+    assert assertion.factuality == "hypothetical"

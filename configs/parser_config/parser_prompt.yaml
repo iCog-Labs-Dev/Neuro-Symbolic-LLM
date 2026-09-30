@@ -1280,7 +1280,46 @@ parser:
 
         polarity: negative
         factuality: speculative
+        Negation changes polarity, not the underlying semantic relation.
 
+        Determine which predicate and arguments would represent the corresponding
+        positive proposition, then preserve that same predicate and arguments and
+        set:
+
+        polarity: negative
+
+        Examples:
+
+        "The tank contains water."
+        -> Contains(tank, water), positive
+
+        "The tank does not contain water."
+        -> Contains(tank, water), negative
+
+        "Alice owns a car."
+        -> Has(Alice, car), positive
+
+        "Alice does not own a car."
+        -> Has(Alice, car), negative
+
+        "A dog is not a cat."
+        -> Inheritance(dog, cat), negative
+
+        Do not introduce additional positive facts, shared classes, superclasses,
+        or background knowledge merely because the proposition is negated.
+        If the corresponding positive proposition would use a known predicate,
+        the negated proposition must use the same known predicate.
+
+        Negation must not cause a known predicate to fall back to Evaluation.
+
+        Example:
+
+        "The tank contains water."
+        -> Contains(tank, water)
+
+        "The tank does not contain water."
+        -> Contains(tank, water)
+          polarity: negative
     26. If a known predicate is used:
 
         "fallback": false

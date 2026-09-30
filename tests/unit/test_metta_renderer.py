@@ -139,3 +139,38 @@ def test_validates_and_parses_rendered_expressions() -> None:
 def test_rejects_invalid_rendered_expression() -> None:
     with pytest.raises(MettaRenderError, match="Rendered invalid MeTTa"):
         validate_rendered_metta(["(Unknown dog fur)"])
+
+
+def test_renders_negative_known_predicate() -> None:
+    result = make_result(
+        predicate="Contains",
+        values=("tank", "water"),
+        roles=("container", "contained"),
+        polarity="negative",
+    )
+
+    assert render_metta(result) == ["(Not (Contains tank water))"]
+
+
+def test_renders_negative_evaluation() -> None:
+    result = make_result(
+        predicate="Evaluation",
+        relation="open",
+        values=("Alice", "door"),
+        roles=("agent", "patient"),
+        fallback=True,
+        polarity="negative",
+    )
+
+    assert render_metta(result) == ["(Not (Evaluation open (List Alice door)))"]
+
+
+def test_renders_negative_inheritance_without_invented_fact() -> None:
+    result = make_result(
+        predicate="Inheritance",
+        values=("dog", "cat"),
+        roles=("instance", "class"),
+        polarity="negative",
+    )
+
+    assert render_metta(result) == ["(Not (Inheritance dog cat))"]
