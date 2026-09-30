@@ -88,6 +88,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include derived MeTTa expressions for auditing",
     )
+    dataset_command.add_argument(
+        "--asserted-only",
+        action="store_true",
+        help=(
+            "keep only assertions whose factuality is 'asserted'; "
+            "reject sentences with no asserted assertions"
+        ),
+    )
 
     # ── convert-to-pairs command ──────────────────────────────────────────────
 
@@ -254,23 +262,30 @@ def _run_dataset(arguments: argparse.Namespace) -> None:
     """Build dataset using teacher."""
     input_path: Path = arguments.input
     output_path: Path = arguments.output
+
     rejected_path: Path = arguments.rejected_output or output_path.with_name(
         f"{output_path.stem}.rejected{output_path.suffix}"
     )
+
     resolved_paths = {
         input_path.resolve(),
         output_path.resolve(),
         rejected_path.resolve(),
     }
+
     if len(resolved_paths) != 3:
         raise ValueError(
             "Input, accepted-output, and rejected-output paths must differ"
         )
 
     sentences = input_path.read_text(encoding="utf-8").splitlines()
+
     builder = SemanticDatasetBuilder(
-        _build_semantic_parser(arguments), include_metta=arguments.include_metta
+        _build_semantic_parser(arguments),
+        include_metta=arguments.include_metta,
+        asserted_only=arguments.asserted_only,
     )
+
     accepted, rejected = builder.generate(sentences)
     builder.write_jsonl(accepted, output_path)
     builder.write_rejected_jsonl(rejected, rejected_path)
@@ -317,6 +332,7 @@ def _run_split_pairs(arguments: argparse.Namespace) -> None:
     train_path = output_dir / "train.jsonl"
     val_path = output_dir / "validation.jsonl"
     test_path = output_dir / "test.jsonl"
+
     if (
         len({path.resolve() for path in (input_path, train_path, val_path, test_path)})
         != 4
@@ -335,13 +351,15 @@ def _run_split_pairs(arguments: argparse.Namespace) -> None:
                 pair = json.loads(line)
             except json.JSONDecodeError as error:
                 raise ValueError(
-                    f"Invalid JSON at {input_path}:{line_number}: {error.msg}"
+                    f"Invalid JSON at " f"{input_path}:{line_number}: " f"{error.msg}"
                 ) from error
             if not isinstance(pair, dict) or not isinstance(pair.get("input", ""), str):
                 raise ValueError(
-                    f"Invalid pair at {input_path}:{line_number}: "
+                    f"Invalid pair at "
+                    f"{input_path}:{line_number}: "
                     "expected an object with a string input"
                 )
+
             pairs.append(pair)
 
     train_pairs, val_pairs, test_pairs = split_pairs(
@@ -389,16 +407,17 @@ def _checkpoint_error(model_dir: Path) -> str | None:
         from transformers import AutoConfig, AutoTokenizer
 
         config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+
         if not isinstance(config, dict) or not config:
             return "config.json must contain a model configuration object"
         AutoConfig.from_pretrained(
             str(model_dir), local_files_only=True, trust_remote_code=False
         )
+
         AutoTokenizer.from_pretrained(
             str(model_dir), local_files_only=True, trust_remote_code=False
         )
 
-        # Match the loader's preference for safetensors over PyTorch weights.
         for name in (
             "model.safetensors",
             "model.safetensors.index.json",
@@ -406,39 +425,52 @@ def _checkpoint_error(model_dir: Path) -> str | None:
             "pytorch_model.bin.index.json",
         ):
             candidate = model_dir / name
+
             if not candidate.exists():
                 continue
+
             if name.endswith(".index.json"):
                 index = json.loads(candidate.read_text(encoding="utf-8"))
+
                 weight_map = (
                     index.get("weight_map") if isinstance(index, dict) else None
                 )
+
                 if not isinstance(weight_map, dict) or not weight_map:
                     return f"{name} has no valid weight map"
+
                 shards = list(weight_map.values())
+
                 if any(not isinstance(shard, str) or not shard for shard in shards):
                     return f"{name} contains invalid shard names"
+
                 files = [model_dir / shard for shard in set(shards)]
+
             else:
                 files = [candidate]
+
             for path in files:
                 if not path.is_file():
-                    return f"missing weight file: {path.name}"
+                    return f"missing weight file: " f"{path.name}"
+
                 with path.open("rb") as file:
                     if not file.read(1):
-                        return f"empty weight file: {path.name}"
+                        return f"empty weight file: " f"{path.name}"
+
             return None
+
     except Exception as error:
-        # Configuration/tokenizer deserializers can raise library-specific errors.
         return f"unreadable checkpoint: {error}"
+
     return "no model weights or weight index found"
 
 
 def _require_checkpoint(model_dir: Path) -> None:
     error = _checkpoint_error(model_dir)
+
     if error is not None:
         raise ValueError(
-            f"A complete model checkpoint is required at {model_dir}: {error}"
+            "A complete model checkpoint is required " f"at {model_dir}: {error}"
         )
 
 
@@ -449,11 +481,11 @@ def _run_distill(arguments: argparse.Namespace) -> None:
 
     _require_checkpoint(model_dir)
 
-    # Use the new DistilledSemanticParser
     distilled_parser = DistilledSemanticParser.from_pretrained(str(model_dir))
 
     try:
         atoms = distilled_parser.parse(sentence)
+
         for atom in atoms:
             print(atom)
     except Exception as e:
@@ -464,15 +496,21 @@ def _run_distill(arguments: argparse.Namespace) -> None:
 def _get_sentences(arguments: argparse.Namespace) -> list[str]:
     """Get sentences from input file, command line, or defaults."""
     if arguments.input:
-        print(f"  Reading sentences from: {arguments.input}")
+        print(f"  Reading sentences from: " f"{arguments.input}")
+
         sentences = Path(arguments.input).read_text(encoding="utf-8").splitlines()
-        return [s.strip() for s in sentences if s.strip()]
+
+        return [sentence.strip() for sentence in sentences if sentence.strip()]
 
     if arguments.sentences:
-        print(f"  Using {len(arguments.sentences)} sentences from command line")
-        return [s.strip() for s in arguments.sentences if s.strip()]
+        print(f"  Using " f"{len(arguments.sentences)} " "sentences from command line")
+
+        return [
+            sentence.strip() for sentence in arguments.sentences if sentence.strip()
+        ]
 
     print("  No input provided. Using default sentences.")
+
     return [
         "Dogs are animals.",
         "Birds can fly.",
@@ -507,54 +545,66 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
     method: str = arguments.method
     force: bool = arguments.force
     skip_training: bool = arguments.skip_training
+
     if skip_training:
         _require_checkpoint(output_dir)
 
     # ── Get sentences ─────────────────────────────────────────────────────────
 
     sentences = _get_sentences(arguments)
+
     print(f"  Sentences: {len(sentences)}")
 
-    # ── Step 1: Generate structured JSON from teacher ──────────────────────
+    # ── Step 1: Generate structured JSON from teacher ─────────────────────────
 
     print("\nStep 1: Teacher generates structured JSON")
+
     structured_file = Path("data/teacher_structured.jsonl")
     structured_file.parent.mkdir(parents=True, exist_ok=True)
 
     structured_regenerated = not structured_file.exists() or force
+
     if not structured_regenerated:
-        print(f"  Using existing structured data: {structured_file}")
+        print(f"  Using existing structured data: " f"{structured_file}")
+
     else:
-        print(f"  Generating structured data for {len(sentences)} sentences...")
+        print(f"  Generating structured data for " f"{len(sentences)} sentences...")
+
         parser = _build_semantic_parser(arguments)
         builder = SemanticDatasetBuilder(parser, include_metta=True)
         accepted, rejected = builder.generate(sentences)
         builder.write_jsonl(accepted, structured_file)
         rejected_path = structured_file.with_name(
-            f"{structured_file.stem}.rejected{structured_file.suffix}"
+            f"{structured_file.stem}" f".rejected" f"{structured_file.suffix}"
         )
         builder.write_rejected_jsonl(rejected, rejected_path)
         print(f"  Accepted: {len(accepted)} -> {structured_file}")
         print(f"  Rejected: {len(rejected)} -> {rejected_path}")
 
-    # ── Step 2: Convert to training pairs ──────────────────────────────────
+    # ── Step 2: Convert to training pairs ─────────────────────────────────────
 
     print("\nStep 2: Convert to training pairs")
+
     pairs_file = Path("data/train_pairs.jsonl")
+
     pairs_regenerated = structured_regenerated or not pairs_file.exists() or force
+
     if not pairs_regenerated:
-        print(f"  Using existing pairs: {pairs_file}")
+        print(f"  Using existing pairs: " f"{pairs_file}")
+
     else:
         if not structured_file.exists():
-            raise FileNotFoundError(f"Structured file not found: {structured_file}")
+            raise FileNotFoundError(f"Structured file not found: " f"{structured_file}")
+
         pairs = structured_to_pairs(
             str(structured_file),
             str(pairs_file),
             include_confidence=True,
         )
-        print(f"  Generated {len(pairs)} pairs -> {pairs_file}")
 
-    # ── Step 3: Split train / validation / test ─────────────────────────────────
+        print(f"  Generated {len(pairs)} pairs " f"-> {pairs_file}")
+
+    # ── Step 3: Split train / validation / test ───────────────────────────────
 
     print("\nStep 3: Split train / validation / test")
 
@@ -571,27 +621,42 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
         and not pairs_regenerated
     ):
         cached_splits = []
-        for path in (train_file, val_file, test_file):
+
+        for path in (
+            train_file,
+            val_file,
+            test_file,
+        ):
             records = []
+
             with path.open(encoding="utf-8") as file:
-                for line_number, line in enumerate(file, start=1):
+                for line_number, line in enumerate(
+                    file,
+                    start=1,
+                ):
                     if not line.strip():
                         continue
+
                     try:
                         pair = json.loads(line)
                     except json.JSONDecodeError as error:
                         raise ValueError(
-                            f"Invalid JSON at {path}:{line_number}"
+                            f"Invalid JSON at " f"{path}:{line_number}"
                         ) from error
+
                     try:
                         validate_student_pair(pair)
                     except ValueError as error:
                         raise ValueError(
-                            f"Invalid pair at {path}:{line_number}: {error}"
+                            f"Invalid pair at " f"{path}:{line_number}: " f"{error}"
                         ) from error
+
                     records.append(pair)
+
             cached_splits.append(records)
+
         verify_split_overlap(*cached_splits)
+
         print("  Using existing dataset splits")
         print(f"  Train:      {train_file}")
         print(f"  Validation: {val_file}")
@@ -611,7 +676,9 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
                     pair = json.loads(line)
                 except json.JSONDecodeError as error:
                     raise ValueError(
-                        f"Invalid JSON at {pairs_file}:{line_number}: {error.msg}"
+                        f"Invalid JSON at "
+                        f"{pairs_file}:{line_number}: "
+                        f"{error.msg}"
                     ) from error
 
                 pairs.append(pair)
@@ -634,22 +701,28 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
         write_pairs_jsonl(val_pairs, val_file)
         write_pairs_jsonl(test_pairs, test_file)
 
-        print(f"  Train:      {len(train_pairs)} -> {train_file}")
-        print(f"  Validation: {len(val_pairs)} -> {val_file}")
-        print(f"  Test:       {len(test_pairs)} -> {test_file}")
+        print(f"  Train:      " f"{len(train_pairs)} " f"-> {train_file}")
+        print(f"  Validation: " f"{len(val_pairs)} " f"-> {val_file}")
+        print(f"  Test:       " f"{len(test_pairs)} " f"-> {test_file}")
 
-    # ── Step 4: Train student model ─────────────────────────────────────────
+    # ── Step 4: Train student model ───────────────────────────────────────────
 
     print("\nStep 4: Train student model")
+
     model_dir = output_dir
+
     checkpoint_error = _checkpoint_error(model_dir)
+
     if skip_training:
         print("  Skipping training (--skip-training)")
+
     elif checkpoint_error is None and not force:
-        print(f"  Using existing model: {model_dir}")
+        print(f"  Using existing model: " f"{model_dir}")
+
     else:
         if checkpoint_error is not None:
-            print(f"  Training required: {checkpoint_error}")
+            print(f"  Training required: " f"{checkpoint_error}")
+
         from parser.student.train import train
 
         train(
@@ -659,34 +732,52 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
             method=method,
         )
 
-    # ── Step 5: Run inference ──────────────────────────────────────────────
+    # ── Step 5: Run inference ─────────────────────────────────────────────────
 
     print("\nStep 5: Inference with distilled parser")
+
     expected = None
+
     if arguments.test_sentence:
         test_sentences = [arguments.test_sentence]
-        print("  Syntax check only: no expected label supplied")
+
+        print("  Syntax check only: " "no expected label supplied")
+
     else:
-        test_sentences, expected = [], []
+        test_sentences = []
+        expected = []
+
         with test_file.open(encoding="utf-8") as file:
             for line_number, line in enumerate(file, start=1):
                 if not line.strip():
                     continue
+
                 try:
                     pair = json.loads(line)
+
                     validate_student_pair(pair)
+
                     target = normalize_semantic_result(
                         SemanticParseResult.model_validate_json(pair["label"])
                     )
+
                     target = ReferenceSemanticParser.validate_predicates(target)
+
                     target = ReferenceSemanticParser.validate_arguments(target)
+
                     atoms = validate_rendered_metta(render_metta(target))
+
                 except ValueError as error:
                     raise ValueError(
-                        f"Invalid test label at {test_file}:{line_number}: {error}"
+                        f"Invalid test label at "
+                        f"{test_file}:{line_number}: "
+                        f"{error}"
                     ) from error
+
                 test_sentences.append(pair["input"])
+
                 expected.append(sorted(str(atom) for atom in atoms))
+
     if not test_sentences:
         raise ValueError("No test examples available for evaluation")
 
@@ -696,71 +787,99 @@ def _run_e2e(arguments: argparse.Namespace) -> None:
     distilled_parser = DistilledSemanticParser.from_pretrained(str(model_dir))
 
     print(f"\n  Model: {model_dir}")
-    print(f"  Test sentences: {len(test_sentences)}")
+    print(f"  Test sentences: " f"{len(test_sentences)}")
     print()
 
     valid_count = 0
     correct_count = 0
+
     for index, sentence in enumerate(test_sentences):
         try:
             atoms = distilled_parser.parse(sentence)
+
             metta = " ".join(str(atom) for atom in atoms)
+
             status = "OK"
             valid_count += 1
+
             if expected is not None:
                 matches = sorted(str(atom) for atom in atoms) == expected[index]
+
                 correct_count += int(matches)
+
                 status = "MATCH" if matches else "MISMATCH"
-        except Exception as e:
-            metta = f"Error: {e}"
+
+        except Exception as error:
+            metta = f"Error: {error}"
             status = "FAIL"
 
-        print(f"  [{status}] '{sentence[:40]:40s}' -> {metta}")
+        print(f"  [{status}] " f"'{sentence[:40]:40s}' " f"-> {metta}")
 
-    print(f"\nResults: {valid_count}/{len(test_sentences)} valid")
+    print(f"\nResults: " f"{valid_count}/" f"{len(test_sentences)} valid")
+
     if expected is not None:
         print(
-            f"Exact relation match: {correct_count}/{len(test_sentences)} "
-            f"({correct_count / len(test_sentences):.1%})"
+            f"Exact relation match: "
+            f"{correct_count}/"
+            f"{len(test_sentences)} "
+            f"("
+            f"{correct_count / len(test_sentences):.1%}"
+            f")"
         )
+
     if valid_count < len(test_sentences):
-        raise ValueError("Evaluation had prediction failures; see results above")
+        raise ValueError("Evaluation had prediction failures; " "see results above")
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETE!")
     print("=" * 70)
-    print(f"  Model saved to: {model_dir}")
+    print(f"  Model saved to: " f"{model_dir}")
     print(
-        f"    distilled_parser = DistilledSemanticParser.from_pretrained('{model_dir}')"
+        "    distilled_parser = "
+        "DistilledSemanticParser"
+        f".from_pretrained('{model_dir}')"
     )
-    print("    result = distilled_parser.parse('Dogs are animals.')")
+    print("    result = distilled_parser.parse" "('Dogs are animals.')")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+) -> int:
     """Run the selected command and return its process exit status."""
     arguments = build_argument_parser().parse_args(argv)
 
     try:
         if arguments.command == "parse":
             _run_parse(arguments)
+
         elif arguments.command == "build-dataset":
             _run_dataset(arguments)
+
         elif arguments.command == "convert-to-pairs":
             _run_convert_to_pairs(arguments)
+
         elif arguments.command == "split-pairs":
             _run_split_pairs(arguments)
+
         elif arguments.command == "train-student":
             _run_train_student(arguments)
+
         elif arguments.command == "distill":
             _run_distill(arguments)
+
         elif arguments.command == "e2e":
             _run_e2e(arguments)
+
         else:
-            print(f"Unknown command: {arguments.command}", file=sys.stderr)
+            print(
+                f"Unknown command: " f"{arguments.command}",
+                file=sys.stderr,
+            )
             return 1
     except (ModelGenerationError, OSError, SemanticParseError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+
     return 0
 
 

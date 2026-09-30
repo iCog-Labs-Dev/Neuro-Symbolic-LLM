@@ -28,10 +28,31 @@ class SemanticAssertion(SemanticSchemaModel):
     relation: str | None = None
     arguments: list[SemanticArgument] = Field(min_length=1)
     fallback: bool = False
-    polarity: Literal["positive", "negative"] = "positive"
-    confidence: float = Field(ge=0.0, le=1.0)
-    source_span: str = Field(min_length=1)
-    alternatives: list[str] = Field(default_factory=list)
+
+    polarity: Literal[
+        "positive",
+        "negative",
+    ] = "positive"
+
+    factuality: Literal[
+        "asserted",
+        "opinion",
+        "speculative",
+        "hypothetical",
+    ] = "asserted"
+
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+    )
+
+    source_span: str = Field(
+        min_length=1,
+    )
+
+    alternatives: list[str] = Field(
+        default_factory=list,
+    )
 
 
 class SemanticParseResult(SemanticSchemaModel):

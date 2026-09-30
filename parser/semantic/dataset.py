@@ -65,10 +65,12 @@ class SemanticDatasetBuilder:
         parser: ReferenceSemanticParser,
         *,
         include_metta: bool = False,
+        asserted_only: bool = False,
     ) -> None:
-        """Store the parser used to label source sentences."""
+        """Store the parser and dataset-generation policy."""
         self._parser = parser
         self._include_metta = include_metta
+        self._asserted_only = asserted_only
 
     def generate(
         self,
@@ -91,10 +93,41 @@ class SemanticDatasetBuilder:
 
             try:
                 result = self._parser.generate_structured(text)
+
+                if self._asserted_only:
+                    asserted = [
+                        assertion
+                        for assertion in result.assertions
+                        if assertion.factuality == "asserted"
+                    ]
+
+                    if not asserted:
+                        rejected.append(
+                            RejectedRecord(
+                                text=text,
+                                error="No asserted factual assertions",
+                            )
+                        )
+                        continue
+
+                    result = SemanticParseResult(
+                        assertions=asserted,
+                    )
+
                 expressions = self._parser.render_metta(result)
                 self._parser.validate_rendered_metta(expressions)
-            except (ModelGenerationError, SemanticParseError, ValueError) as error:
-                rejected.append(RejectedRecord(text=text, error=str(error)))
+
+            except (
+                ModelGenerationError,
+                SemanticParseError,
+                ValueError,
+            ) as error:
+                rejected.append(
+                    RejectedRecord(
+                        text=text,
+                        error=str(error),
+                    )
+                )
                 continue
 
             accepted.append(
