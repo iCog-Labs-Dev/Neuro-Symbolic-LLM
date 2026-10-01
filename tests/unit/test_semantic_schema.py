@@ -124,7 +124,6 @@ def test_rejects_unknown_polarity() -> None:
     ("field", "value"),
     [
         ("predicate", ""),
-        ("arguments", []),
         ("source_span", ""),
     ],
 )
@@ -134,6 +133,33 @@ def test_rejects_empty_required_assertion_values(
 ) -> None:
     data = valid_result_data()
     data["assertions"][0][field] = value
+
+    with pytest.raises(ValidationError):
+        SemanticParseResult.model_validate(data)
+
+
+def test_allows_empty_arguments_for_evaluation() -> None:
+    data = valid_result_data()
+    assertion = data["assertions"][0]
+
+    assertion["predicate"] = "Evaluation"
+    assertion["relation"] = "rain"
+    assertion["arguments"] = []
+    assertion["fallback"] = True
+
+    result = SemanticParseResult.model_validate(data)
+
+    assert result.assertions[0].arguments == []
+
+
+def test_rejects_empty_arguments_for_non_evaluation() -> None:
+    data = valid_result_data()
+    assertion = data["assertions"][0]
+
+    assertion["predicate"] = "Has"
+    assertion["relation"] = None
+    assertion["arguments"] = []
+    assertion["fallback"] = False
 
     with pytest.raises(ValidationError):
         SemanticParseResult.model_validate(data)

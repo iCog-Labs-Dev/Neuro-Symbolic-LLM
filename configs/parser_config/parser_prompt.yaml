@@ -317,6 +317,7 @@ parser:
         expanded -> expand
         succeeded -> succeed
         became -> become
+
         ### Single-participant Evaluation roles
 
         For one-argument Evaluation assertions, choose the role from the
@@ -324,6 +325,7 @@ parser:
         subject position.
 
         Use:
+
         - agent when the participant is an active or intentional doer;
         - patient when the participant undergoes a change, failure, recovery,
           cessation, success/failure outcome, or other affected-state event;
@@ -334,39 +336,65 @@ parser:
 
         "The machine works."
         -> Evaluation(work, machine)
-          role: agent
+           role: agent
 
         "The machine failed."
         -> Evaluation(fail, machine)
-          role: patient
+           role: patient
 
         "The process stopped."
         -> Evaluation(stop, process)
-          role: patient
+           role: patient
 
         "The company expanded."
         -> Evaluation(expand, company)
-          role: patient
+           role: patient
 
         "The product succeeded."
         -> Evaluation(succeed, product)
-          role: patient
+           role: patient
 
         "The patient recovered."
         -> Evaluation(recover, patient)
-          role: patient
+           role: patient
 
         "The child slept."
         -> Evaluation(sleep, child)
-          role: agent
+           role: agent
 
         "The door opened."
         -> Evaluation(open, door)
-          role: patient
+           role: patient
 
         "The temperature increased."
         -> Evaluation(increase, temperature)
-          role: entity
+           role: entity
+
+        ### Participantless events
+
+        Some events have no semantic participant even when English uses
+        a grammatical dummy subject such as "it".
+
+        Example:
+
+        "It rains."
+
+        Use:
+
+        predicate: Evaluation
+        relation: rain
+        arguments: []
+
+        Do not represent non-referential "it" as an entity or semantic
+        participant.
+
+        This rule applies only when "it" is genuinely non-referential.
+
+        Example:
+
+        "The machine stopped. It was damaged."
+
+        Here "it" refers to the machine and must be resolved normally.
 
     16. For Evaluation, assign roles according to semantic meaning.
 
@@ -998,7 +1026,7 @@ parser:
         Do not use OccursAt for another event or process when During is the
         intended relation.
 
-    19. Spatial modifiers must not replace the core event.
+    20. Spatial modifiers must not replace the core event.
 
         Always preserve the core event as its own assertion when the sentence
         explicitly states an event with semantic participants.
@@ -1074,7 +1102,7 @@ parser:
           event_or_state: examine
           location: hospital
 
-    20. Preserve facts expressed in subordinate, relative, and embedded clauses.
+    21. Preserve facts expressed in subordinate, relative, and embedded clauses.
 
         A sentence may express multiple propositions through:
         - relative clauses such as "which..." or "that...";
@@ -1202,7 +1230,7 @@ parser:
         5. Do not replace a specific event or relation with a broader relation
            solely because it appears in a subordinate clause.
 
-    21. Never invent missing information.
+    22. Never invent missing information.
 
         If an agent, patient, location, time, quantity, unit, or other
         participant is not explicitly stated and cannot be unambiguously
@@ -1311,8 +1339,24 @@ parser:
 
     24. Resolve pronouns and referring expressions conservatively.
 
-        Pronouns such as he, she, it, they, him, her, and them are
-        references to entities, not additional semantic participants.
+        Pronouns such as he, she, it, they, him, her, and them may
+        refer to entities and must be resolved conservatively.
+
+        Some uses of "it" are non-referential dummy subjects rather than
+        references to entities.
+
+        Example:
+
+        "It rains."
+
+        Here "it" does not refer to any entity and must not be treated as
+        coreference or preserved as a semantic participant.
+
+        In contrast:
+
+        "The machine stopped. It was damaged."
+
+        Here "it" refers to the machine and should be resolved normally.
 
         Resolve a pronoun only when the sentence or provided context
         clearly supports one antecedent after considering grammatical

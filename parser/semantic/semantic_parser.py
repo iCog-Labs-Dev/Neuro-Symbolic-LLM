@@ -89,7 +89,7 @@ def _load_predicate_schemas() -> dict[str, dict[str, object]]:
         if schema.get("variable_arity") is True:
             minimum = schema.get("min_arity")
             maximum = schema.get("max_arity")
-            if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
+            if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
                 raise ValueError(f"Invalid min_arity for {name!r}")
             if maximum is not None and (
                 not isinstance(maximum, int)
@@ -366,7 +366,7 @@ class _BaseSemanticParser:
             actual_arity = len(assertion.arguments)
             if schema.get("variable_arity") is True:
                 minimum, maximum = schema.get("min_arity"), schema.get("max_arity")
-                if not isinstance(minimum, int) or minimum < 1:
+                if not isinstance(minimum, int) or minimum < 0:
                     raise ValueError(f"Invalid min_arity for {assertion.predicate!r}")
                 if maximum is not None and (
                     not isinstance(maximum, int) or maximum < minimum

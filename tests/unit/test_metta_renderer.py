@@ -174,3 +174,15 @@ def test_renders_negative_inheritance_without_invented_fact() -> None:
     )
 
     assert render_metta(result) == ["(Not (Inheritance dog cat))"]
+
+
+def test_renders_zero_argument_evaluation() -> None:
+    result = make_result(
+        predicate="Evaluation",
+        relation="rain",
+        values=(),
+        roles=(),
+        fallback=True,
+    )
+
+    assert render_metta(result) == ["(Evaluation rain (List))"]

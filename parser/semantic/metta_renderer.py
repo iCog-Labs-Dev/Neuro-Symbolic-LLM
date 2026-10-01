@@ -39,8 +39,11 @@ def render_metta(result: SemanticParseResult) -> list[str]:
         if assertion.predicate == "Evaluation":
             if assertion.relation is None:
                 raise MettaRenderError("Evaluation requires a relation")
+
             relation = _require_bare_symbol(assertion.relation, "relation")
-            expression = f"(Evaluation {relation} (List {arguments}))"
+
+            argument_list = f"(List {arguments})" if arguments else "(List)"
+            expression = f"(Evaluation {relation} {argument_list})"
         else:
             predicate = _require_bare_symbol(assertion.predicate, "predicate")
             expression = f"({predicate} {arguments})"

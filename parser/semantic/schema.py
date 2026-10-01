@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SemanticSchemaModel(BaseModel):
@@ -26,7 +26,12 @@ class SemanticAssertion(SemanticSchemaModel):
 
     predicate: str = Field(min_length=1)
     relation: str | None = None
-    arguments: list[SemanticArgument] = Field(min_length=1)
+
+    # Evaluation may represent a participantless event.
+    # Other predicates must still contain at least one argument here,
+    # and their exact arity is validated against predicate_schema.yaml.
+    arguments: list[SemanticArgument] = Field(default_factory=list)
+
     fallback: bool = False
 
     polarity: Literal[
@@ -53,6 +58,16 @@ class SemanticAssertion(SemanticSchemaModel):
     alternatives: list[str] = Field(
         default_factory=list,
     )
+
+    @model_validator(mode="after")
+    def validate_argument_presence(self) -> SemanticAssertion:
+        """Allow zero arguments only for Evaluation."""
+        if self.predicate != "Evaluation" and not self.arguments:
+            raise ValueError(
+                f"{self.predicate} must contain at least one semantic argument"
+            )
+
+        return self
 
 
 class SemanticParseResult(SemanticSchemaModel):

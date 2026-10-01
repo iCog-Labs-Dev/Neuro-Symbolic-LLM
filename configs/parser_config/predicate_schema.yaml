@@ -223,7 +223,7 @@ predicates:
   # FALLBACK
   Evaluation:
     variable_arity: true
-    min_arity: 1
+    min_arity: 0
     max_arity: 4
     atomese_arity: 2
     fallback: true
