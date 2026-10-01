@@ -317,6 +317,56 @@ parser:
         expanded -> expand
         succeeded -> succeed
         became -> become
+        ### Single-participant Evaluation roles
+
+        For one-argument Evaluation assertions, choose the role from the
+        semantic behavior of the participant, not merely from grammatical
+        subject position.
+
+        Use:
+        - agent when the participant is an active or intentional doer;
+        - patient when the participant undergoes a change, failure, recovery,
+          cessation, success/failure outcome, or other affected-state event;
+        - entity when neither agent nor patient accurately describes the
+          participant and the proposition is primarily descriptive or state-like.
+
+        Examples:
+
+        "The machine works."
+        -> Evaluation(work, machine)
+          role: agent
+
+        "The machine failed."
+        -> Evaluation(fail, machine)
+          role: patient
+
+        "The process stopped."
+        -> Evaluation(stop, process)
+          role: patient
+
+        "The company expanded."
+        -> Evaluation(expand, company)
+          role: patient
+
+        "The product succeeded."
+        -> Evaluation(succeed, product)
+          role: patient
+
+        "The patient recovered."
+        -> Evaluation(recover, patient)
+          role: patient
+
+        "The child slept."
+        -> Evaluation(sleep, child)
+          role: agent
+
+        "The door opened."
+        -> Evaluation(open, door)
+          role: patient
+
+        "The temperature increased."
+        -> Evaluation(increase, temperature)
+          role: entity
 
     16. For Evaluation, assign roles according to semantic meaning.
 
@@ -1259,11 +1309,115 @@ parser:
         6. Never move another explicitly stated participant into the missing
            role merely to make the assertion structurally complete.
 
-    23. Resolve pronouns and other referring expressions only when the
-        antecedent is unambiguous from the provided context.
+    24. Resolve pronouns and referring expressions conservatively.
 
-        If multiple antecedents are plausible, do not choose one arbitrarily.
+        Pronouns such as he, she, it, they, him, her, and them are
+        references to entities, not additional semantic participants.
 
+        Resolve a pronoun only when the sentence or provided context
+        clearly supports one antecedent after considering grammatical
+        and semantic compatibility.
+
+        Multiple previously mentioned entities do not automatically make
+        a pronoun ambiguous.
+
+        Eliminate antecedent candidates that are incompatible with:
+        - the pronoun;
+        - the semantic role;
+        - the proposition being expressed;
+        - the available context.
+
+        If exactly one plausible antecedent remains, resolve the pronoun
+        to that antecedent.
+
+        If two or more plausible antecedents remain:
+        - do not guess;
+        - do not emit the raw pronoun as an argument value;
+        - omit only the unresolved participant;
+        - preserve all other grounded participants;
+        - preserve all other fully supported propositions;
+        - record plausible antecedents in alternatives when useful.
+
+        Do not resolve a pronoun merely because one candidate:
+        - is the nearest noun phrase;
+        - is the most recent entity;
+        - is the grammatical subject;
+        - is the grammatical object or patient.
+
+        A pronoun must never be added as an extra argument after its
+        antecedent has already been resolved.
+
+        Example of clear resolution:
+
+        "Alice opened the door. She entered the room."
+
+        Resolve:
+        She -> Alice
+
+        Preserve:
+        Evaluation(open, Alice, door)
+        Evaluation(enter, Alice, room)
+
+        Example with multiple references that can still be resolved:
+
+        "The scientist collected the sample. Then she analyzed it."
+
+        Resolve:
+        she -> scientist
+        it -> sample
+
+        Preserve:
+        Evaluation(collect, scientist, sample)
+        Evaluation(analyze, scientist, sample)
+
+        Example of ambiguity:
+
+        "Alice met Mary. She entered the room."
+
+        Both Alice and Mary remain plausible antecedents.
+
+        Preserve:
+        Evaluation(meet, Alice, Mary)
+
+        Preserve the enter event only if it can be represented without
+        inventing the unresolved agent.
+
+        Do not emit:
+        agent: She
+
+        Do not choose Alice or Mary without sufficient evidence.
+
+        Example of a fixed-arity predicate with an ambiguous participant:
+
+        "The doctor examined the patient. She was tired."
+
+        If both doctor and patient remain plausible antecedents, do not
+        choose either one.
+
+        Preserve:
+        Evaluation(examine, doctor, patient)
+
+        If the state assertion cannot be represented without guessing the
+        required entity, omit that incomplete assertion.
+
+        Example of an ambiguous embedded proposition:
+
+        "John told Peter that he should leave."
+
+        If both John and Peter remain plausible antecedents for "he",
+        preserve:
+        Evaluation(tell, John, Peter)
+
+        Do not emit:
+        agent: he
+
+        If the leave proposition cannot be represented without guessing its
+        required participant, omit that incomplete assertion.
+
+        Do not invent entities or copy arguments from unrelated examples
+        merely to complete an assertion.
+
+        Ambiguity should reduce specificity, never create unsupported facts.
     25. Preserve negation using:
 
         "polarity": "negative"

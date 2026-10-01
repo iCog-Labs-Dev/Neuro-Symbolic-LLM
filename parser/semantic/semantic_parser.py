@@ -243,6 +243,97 @@ class _BaseSemanticParser:
         return repaired
 
     @staticmethod
+    def repair_ambiguous_pronouns(
+        result: SemanticParseResult,
+    ) -> SemanticParseResult:
+        """Remove unresolved referential pronouns while preserving expletive 'it'."""
+        repaired = result.model_copy(deep=True)
+
+        pronouns = {
+            "he",
+            "she",
+            "it",
+            "they",
+            "him",
+            "her",
+            "them",
+        }
+
+        expletive_it_relations = {
+            "rain",
+            "snow",
+            "hail",
+            "drizzle",
+            "thunder",
+        }
+
+        repaired_assertions = []
+
+        for assertion in repaired.assertions:
+            filtered_arguments = []
+
+            for argument in assertion.arguments:
+                value = argument.value.casefold()
+
+                # Preserve non-pronouns normally.
+                if value not in pronouns:
+                    filtered_arguments.append(argument)
+                    continue
+
+                # "It" can be a non-referential dummy subject in weather events.
+                #
+                # Example:
+                #   "It rains."
+                #
+                # Here "it" is not ambiguous coreference, so do not remove it.
+                if (
+                    value == "it"
+                    and assertion.predicate == "Evaluation"
+                    and assertion.relation is not None
+                    and assertion.relation.casefold() in expletive_it_relations
+                ):
+                    filtered_arguments.append(argument)
+                    continue
+
+                # Otherwise the raw pronoun is unresolved and is removed.
+
+            # No unresolved referential pronoun was removed.
+            if len(filtered_arguments) == len(assertion.arguments):
+                repaired_assertions.append(assertion)
+                continue
+
+            # If every semantic argument was removed, this assertion cannot
+            # currently be represented safely.
+            if not filtered_arguments:
+                continue
+
+            assertion.arguments = filtered_arguments
+
+            # A fixed-arity known predicate that loses a required participant
+            # becomes incomplete, so drop that assertion rather than guessing.
+            if assertion.predicate != "Evaluation":
+                schema = PREDICATE_SCHEMAS.get(assertion.predicate)
+
+                if isinstance(schema, dict):
+                    expected_arity = schema.get("arity")
+
+                    if (
+                        isinstance(expected_arity, int)
+                        and len(assertion.arguments) != expected_arity
+                    ):
+                        continue
+
+            repaired_assertions.append(assertion)
+
+        if not repaired_assertions:
+            raise SemanticParseError(
+                "No grounded assertions remain after unresolved pronoun repair"
+            )
+
+        repaired.assertions = repaired_assertions
+        return repaired
+
+    @staticmethod
     def validate_predicates(result: SemanticParseResult) -> SemanticParseResult:
         """Validate predicate and fallback consistency."""
         for assertion in result.assertions:
@@ -398,6 +489,7 @@ class _BaseSemanticParser:
             raise SemanticParseError(f"Normalization failed: {error}") from error
 
         # 3. Validate predicates and arguments
+        result = self.repair_ambiguous_pronouns(result)
         result = self.repair_known_predicate_contract(result)
         result = self.validate_predicates(result)
         result = self.validate_arguments(result)
@@ -455,7 +547,7 @@ class _BaseSemanticParser:
             )
         except SemanticNormalizationError as error:
             raise SemanticParseError(str(error)) from error
-
+        result = self.repair_ambiguous_pronouns(result)
         result = self.repair_known_predicate_contract(result)
         result = self.validate_predicates(result)
         result = self.validate_arguments(result)
