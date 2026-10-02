@@ -17,6 +17,7 @@ from parser.semantic import (
     SemanticParseError,
     SemanticParserConfig,
 )
+from parser.semantic.schema import SemanticParseResult
 from parser.semantic.semantic_parser import DistilledSemanticParser
 
 
@@ -29,6 +30,7 @@ def assertion(
     fallback: bool = False,
     polarity: str = "positive",
     confidence: float = 0.99,
+    source_span: str = "A dog has fur.",
 ) -> dict[str, Any]:
     """Return one structured assertion dictionary."""
     return {
@@ -41,7 +43,7 @@ def assertion(
         "fallback": fallback,
         "polarity": polarity,
         "confidence": confidence,
-        "source_span": "supporting text",
+        "source_span": source_span,
         "alternatives": [],
     }
 
@@ -130,6 +132,7 @@ class TestReferenceSemanticParser:
             assertion(
                 values=(" Apple Computer ", "retail stores"),
                 roles=(" OWNER ", " possessed "),
+                source_span="Apple Computer has retail stores.",
             )
         )
         parser, backend = make_teacher(output)
@@ -158,11 +161,13 @@ class TestReferenceSemanticParser:
                 predicate="StateOf",
                 values=("cat", "sleeping"),
                 roles=("entity", "state"),
+                source_span="The cat is sleeping on the chair.",
             ),
             assertion(
                 predicate="On",
                 values=("cat", "chair"),
                 roles=("entity", "surface"),
+                source_span="The cat is sleeping on the chair.",
             ),
         )
         parser, _ = make_teacher(output)
@@ -183,6 +188,7 @@ class TestReferenceSemanticParser:
                 roles=("agent", "patient"),
                 fallback=True,
                 polarity="negative",
+                source_span="Apple did not acquire Tesla.",
             )
         )
         parser, _ = make_teacher(output)
@@ -260,11 +266,13 @@ class TestReferenceSemanticParser:
                 values=("researcher", "data"),
                 roles=("agent", "patient"),
                 fallback=True,
+                source_span="The researcher collected the data during the experiment.",
             ),
             assertion(
                 predicate="During",
                 values=("collect", "experiment"),
                 roles=("event_or_state", "time_or_event"),
+                source_span="The researcher collected the data during the experiment.",
             ),
         )
         parser, _ = make_teacher(output)
@@ -284,11 +292,13 @@ class TestReferenceSemanticParser:
                 values=("engineer", "bridge"),
                 roles=("agent", "patient"),
                 fallback=True,
+                source_span="The engineer designed the bridge in 2025.",
             ),
             assertion(
                 predicate="OccursAt",
                 values=("design", "2025"),
                 roles=("event_or_state", "time"),
+                source_span="The engineer designed the bridge in 2025.",
             ),
         )
         parser, _ = make_teacher(output)
@@ -308,11 +318,13 @@ class TestReferenceSemanticParser:
                 values=("doctor", "patient"),
                 roles=("agent", "patient"),
                 fallback=True,
+                source_span="The doctor examined the patient at the hospital.",
             ),
             assertion(
                 predicate="OccursIn",
                 values=("examine", "hospital"),
                 roles=("event_or_state", "location"),
+                source_span="The doctor examined the patient at the hospital.",
             ),
         )
         parser, _ = make_teacher(output)
@@ -330,6 +342,7 @@ class TestReferenceSemanticParser:
                 predicate="LocatedIn",
                 values=("doctor", "hospital"),
                 roles=("entity", "location"),
+                source_span="The doctor is in the hospital.",
             )
         )
         event_output = structured_output(
@@ -339,11 +352,13 @@ class TestReferenceSemanticParser:
                 values=("doctor", "patient"),
                 roles=("agent", "patient"),
                 fallback=True,
+                source_span="The doctor examined the patient at the hospital.",
             ),
             assertion(
                 predicate="OccursIn",
                 values=("examine", "hospital"),
                 roles=("event_or_state", "location"),
+                source_span="The doctor examined the patient at the hospital.",
             ),
         )
 
@@ -397,6 +412,124 @@ class TestReferenceSemanticParser:
             match="requires argument roles",
         ):
             parser.parse("Supporting sentence.")
+
+    def test_accepts_exact_source_span(self) -> None:
+        result = SemanticParseResult.model_validate(
+            {
+                "assertions": [
+                    {
+                        "predicate": "Evaluation",
+                        "relation": "open",
+                        "arguments": [
+                            {"value": "Alice", "role": "agent"},
+                            {"value": "door", "role": "patient"},
+                        ],
+                        "fallback": True,
+                        "polarity": "positive",
+                        "factuality": "asserted",
+                        "confidence": 0.99,
+                        "source_span": "Alice opened the door.",
+                        "alternatives": [],
+                    }
+                ]
+            }
+        )
+
+        validated = ReferenceSemanticParser.validate_source_spans(
+            result,
+            sentence="Alice opened the door.",
+        )
+
+        assert validated == result
+
+    def test_accepts_source_span_with_case_and_whitespace_differences(self) -> None:
+        result = SemanticParseResult.model_validate(
+            {
+                "assertions": [
+                    {
+                        "predicate": "Evaluation",
+                        "relation": "open",
+                        "arguments": [
+                            {"value": "Alice", "role": "agent"},
+                            {"value": "door", "role": "patient"},
+                        ],
+                        "fallback": True,
+                        "polarity": "positive",
+                        "factuality": "asserted",
+                        "confidence": 0.99,
+                        "source_span": "alice   opened   the   door.",
+                        "alternatives": [],
+                    }
+                ]
+            }
+        )
+
+        validated = ReferenceSemanticParser.validate_source_spans(
+            result,
+            sentence="Alice opened the door.",
+        )
+
+        assert validated == result
+
+    def test_accepts_source_span_from_context(self) -> None:
+        result = SemanticParseResult.model_validate(
+            {
+                "assertions": [
+                    {
+                        "predicate": "Evaluation",
+                        "relation": "arrive",
+                        "arguments": [
+                            {"value": "Bob", "role": "agent"},
+                        ],
+                        "fallback": True,
+                        "polarity": "positive",
+                        "factuality": "asserted",
+                        "confidence": 0.99,
+                        "source_span": "Bob arrived yesterday.",
+                        "alternatives": [],
+                    }
+                ]
+            }
+        )
+
+        validated = ReferenceSemanticParser.validate_source_spans(
+            result,
+            sentence="He entered the building.",
+            context="Bob arrived yesterday.",
+        )
+
+        assert validated == result
+
+    def test_rejects_unsupported_source_span(self) -> None:
+        result = SemanticParseResult.model_validate(
+            {
+                "assertions": [
+                    {
+                        "predicate": "Evaluation",
+                        "relation": "open",
+                        "arguments": [
+                            {"value": "Alice", "role": "agent"},
+                            {"value": "door", "role": "patient"},
+                        ],
+                        "fallback": True,
+                        "polarity": "positive",
+                        "factuality": "asserted",
+                        "confidence": 0.99,
+                        "source_span": "Bob closed the window.",
+                        "alternatives": [],
+                    }
+                ]
+            }
+        )
+
+        with pytest.raises(
+            SemanticParseError,
+            match="source_span is not supported by the input text",
+        ):
+            ReferenceSemanticParser.validate_source_spans(
+                result,
+                sentence="Alice opened the door.",
+            )
 
 
 @pytest.fixture

@@ -402,6 +402,35 @@ class _BaseSemanticParser:
         return result
 
     @staticmethod
+    def validate_source_spans(
+        result: SemanticParseResult,
+        sentence: str,
+        context: str = "",
+    ) -> SemanticParseResult:
+        """Ensure every source span is grounded in the supplied text."""
+        source_text = " ".join(
+            part.strip() for part in (context, sentence) if part.strip()
+        )
+
+        if not source_text:
+            raise SemanticParseError("Source text cannot be empty")
+
+        source_text_normalized = " ".join(source_text.split()).casefold()
+
+        for assertion in result.assertions:
+            span = " ".join(assertion.source_span.split()).strip()
+
+            if not span:
+                raise SemanticParseError("source_span cannot be empty")
+
+            if span.casefold() not in source_text_normalized:
+                raise SemanticParseError(
+                    f"source_span is not supported by the input text: {span!r}"
+                )
+
+        return result
+
+    @staticmethod
     def render_metta(result: SemanticParseResult) -> list[str]:
         """Convert structured semantics into deterministic MeTTa expressions."""
         try:
@@ -551,6 +580,11 @@ class _BaseSemanticParser:
         result = self.repair_known_predicate_contract(result)
         result = self.validate_predicates(result)
         result = self.validate_arguments(result)
+        result = self.validate_source_spans(
+            result,
+            sentence=normalized_sentence,
+            context=context,
+        )
         return result
 
     def parse(

@@ -240,6 +240,10 @@ def make_parser() -> ReferenceSemanticParser:
         },
     }
 
+    for sentence, payload in outputs.items():
+        for item in payload["assertions"]:
+            item["source_span"] = sentence
+
     def generate(
         *,
         prompt: str,
@@ -749,7 +753,11 @@ def test_split_deduplicates_without_mutating_and_is_reproducible():
 
 @pytest.mark.parametrize(
     "ratios, expected",
-    [((0.8, 0.2, 0), [2, 1, 0]), ((0, 0.5, 0.5), [0, 2, 1]), ((1, 0, 0), [3, 0, 0])],
+    [
+        ((0.8, 0.2, 0), [2, 1, 0]),
+        ((0, 0.5, 0.5), [0, 2, 1]),
+        ((1, 0, 0), [3, 0, 0]),
+    ],
 )
 def test_split_rounding_keeps_zero_ratio_splits_empty(ratios, expected):
     pairs = [{"input": str(i)} for i in range(3)]

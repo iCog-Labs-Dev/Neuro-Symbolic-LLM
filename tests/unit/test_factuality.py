@@ -26,7 +26,7 @@ def assertion(
     polarity: str = "positive",
     factuality: str = "asserted",
     confidence: float = 0.99,
-    source_span: str = "supporting text",
+    source_span: str = "Supporting sentence.",
 ) -> dict[str, Any]:
     """Build one structured assertion."""
     return {
