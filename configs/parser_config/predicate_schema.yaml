@@ -292,7 +292,7 @@ structural_predicates:
 
   List:
     variable_arity: true
-    min_arity: 1
+    min_arity: 0
     max_arity: 4
     description: "Ordered argument container used by Evaluation"
 

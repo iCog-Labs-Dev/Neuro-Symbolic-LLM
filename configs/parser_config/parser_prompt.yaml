@@ -373,29 +373,72 @@ parser:
         ### Participantless events
 
         Some events have no semantic participant even when English uses
-        a grammatical dummy subject such as "it".
+        a grammatical dummy or expletive subject such as "it".
 
-        Example:
+        A dummy "it" does not refer to an entity and must not be preserved
+        as a semantic argument.
+
+        This commonly occurs with impersonal weather or environmental events.
+
+        Examples include:
 
         "It rains."
+        -> Evaluation(rain, [])
+
+        "It snowed."
+        -> Evaluation(snow, [])
+
+        "It thundered."
+        -> Evaluation(thunder, [])
+
+        "It hailed."
+        -> Evaluation(hail, [])
+
+        "It is drizzling."
+        -> Evaluation(drizzle, [])
 
         Use:
 
         predicate: Evaluation
-        relation: rain
+        relation: the canonical base-form event
         arguments: []
 
-        Do not represent non-referential "it" as an entity or semantic
-        participant.
+        Do not output:
+
+        agent: it
+        patient: it
+        entity: it
 
         This rule applies only when "it" is genuinely non-referential.
 
-        Example:
+        In contrast:
 
         "The machine stopped. It was damaged."
 
         Here "it" refers to the machine and must be resolved normally.
+        When "it" is a dummy subject of a participantless event, apply the
+        participantless-event rule rather than ordinary coreference resolution.
+        Participantless-event handling also applies inside conditional
+        or hypothetical clauses.
 
+        Example:
+
+        "If it thunders, the animals may hide."
+
+        "it" is a dummy subject and must not be preserved as an argument.
+
+        Use:
+
+        predicate: Evaluation
+        relation: thunder
+        arguments: []
+
+        Do not emit:
+        agent: it
+        patient: it
+        entity: it
+        Participantless-event handling applies regardless of whether the event
+        appears in a main clause, subordinate clause, or conditional clause.
     16. For Evaluation, assign roles according to semantic meaning.
 
         Order explicitly stated roles as:
@@ -810,6 +853,24 @@ parser:
         conditional relation, preserve the condition and result as separate
         hypothetical assertions rather than inventing a temporal relation.
 
+        Explicit conditional or hypothetical scope takes precedence over
+        modal words such as may, might, could, or probably.
+
+        Example:
+
+        "If it thunders, the animals may hide."
+
+        Both propositions are hypothetical:
+
+        Evaluation(thunder, [])
+        factuality: hypothetical
+
+        Evaluation(hide, animals)
+        factuality: hypothetical
+
+        Do not classify "hide" as speculative merely because "may" occurs
+        inside the conditional construction.
+
         ### Factuality propagation
 
         Secondary assertions derived from an event must inherit the
@@ -1101,7 +1162,36 @@ parser:
         arguments:
           event_or_state: examine
           location: hospital
+        A location attached to an event remains an event location even when
+        the event is expressed in passive voice and no agent is stated.
 
+        Example:
+
+        "The bridge was built in Canada."
+
+        Preserve the building event:
+
+        predicate: Evaluation
+        relation: build
+        arguments:
+          patient: bridge
+
+        Also represent:
+
+        predicate: OccursIn
+        arguments:
+          event_or_state: build
+          location: Canada
+
+        Do not use:
+
+        LocatedIn(bridge, Canada)
+
+        because the sentence states where the building event occurred,
+        not necessarily where the bridge is currently located.
+
+        Passive voice must not convert an event location into an entity
+        location.
     21. Preserve facts expressed in subordinate, relative, and embedded clauses.
 
         A sentence may express multiple propositions through:

@@ -89,7 +89,7 @@ def _load_atomese_predicates() -> (
         if (
             not isinstance(minimum, int)
             or isinstance(minimum, bool)
-            or minimum < 1
+            or minimum < 0
             or (
                 maximum is not None
                 and (
