@@ -23,7 +23,10 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from parser.semantic.normalization import normalize_semantic_result
-from parser.semantic.schema import SemanticParseResult
+from parser.semantic.schema import (
+    SEMANTIC_CONTRACT_VERSION,
+    SemanticParseResult,
+)
 from parser.semantic.semantic_parser import (
     ModelGenerationError,
     ReferenceSemanticParser,
@@ -43,6 +46,7 @@ class DistillationRecord:
     teacher_provider: str
     teacher_model: str
     prompt_version: str
+    semantic_contract_version: str
     metta: tuple[str, ...] | None = None
 
 
@@ -137,6 +141,7 @@ class SemanticDatasetBuilder:
                     teacher_provider=self._parser.provider_name,
                     teacher_model=self._parser.model_name,
                     prompt_version=self._parser.prompt_version,
+                    semantic_contract_version=SEMANTIC_CONTRACT_VERSION,
                     metta=tuple(expressions) if self._include_metta else None,
                 )
             )

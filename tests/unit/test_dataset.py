@@ -305,7 +305,7 @@ class TestSemanticDatasetBuilder:
         assert accepted[0].metta is None
         assert accepted[0].teacher_provider == "fake-teacher"
         assert accepted[0].prompt_version == "2.0.0"
-
+        assert accepted[0].semantic_contract_version == "1.0.0"
         assert len(rejected) == 2
 
         assert rejected[0].text == "Unknown statement."
@@ -391,6 +391,7 @@ class TestSemanticDatasetBuilder:
         assert "metta" not in record
 
         assert record["teacher_model"] == "teacher-model"
+        assert record["semantic_contract_version"] == "1.0.0"
 
     def test_writes_an_empty_file_and_creates_parent_directories(
         self,

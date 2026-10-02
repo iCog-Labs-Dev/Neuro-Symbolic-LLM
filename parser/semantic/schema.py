@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+SEMANTIC_CONTRACT_VERSION = "1.0.0"
+
 
 class SemanticSchemaModel(BaseModel):
     """Base model shared by every structured semantic value."""
