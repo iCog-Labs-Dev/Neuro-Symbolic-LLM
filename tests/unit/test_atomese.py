@@ -212,7 +212,13 @@ class TestValidate:
         ok, err = validate_metta_string("(List one two three four five)")
 
         assert not ok
-        assert "between 1 and 4" in err
+        assert "between 0 and 4" in err
+
+    def test_list_accepts_zero_children(self):
+        ok, err = validate_metta_string("(List)")
+
+        assert ok
+        assert err == ""
 
     @pytest.mark.parametrize(
         "expression",
