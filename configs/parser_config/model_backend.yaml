@@ -1,6 +1,6 @@
 # ── Active model ───────────────────────────────────────────────────────────────────────────────
 # Choose one model you want to use below. Credentials always stay in .env.
-active: ollama
+active: ollama_qwen3_8b
 
 # ── Provider profiles ───────────────────────────────────────────────────────────────────────────
 profiles:
@@ -34,12 +34,36 @@ profiles:
     max_output_tokens: 512
 
   # Local or self-hosted models ────────────────────────────────────────────────────────
-  ollama:
-    # Start Ollama with `ollama serve`; it does not require an API key by default.
+
+  ollama_qwen05:
     provider: ollama
-    model: qwen3:8b  # Use qwen3:14b for higher-quality
+    model: qwen2.5:0.5b
     host_env: OLLAMA_HOST
-    max_output_tokens: 512
+    max_output_tokens: 1024
+
+  ollama_qwen25_3b:
+    provider: ollama
+    model: qwen2.5:3b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 1024
+
+  ollama_qwen3_8b:
+    provider: ollama
+    model: qwen3:8b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 1024
+
+  ollama_gemma3_4b:
+    provider: ollama
+    model: gemma3:4b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 1024
+
+  ollama_llama31_8b:
+    provider: ollama
+    model: llama3.1:8b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 1024
 
   transformers_local:
     # A locally downloaded Hugging Face model; no provider API key is required.
