@@ -202,20 +202,378 @@ parser:
         Active and passive forms of the same production relation must preserve
         the same predicate and role ordering.
 
-    12. Use Cause only when the sentence explicitly asserts causation as the
-        semantic relation itself.
+    12. CONDITIONAL AND RULE-LIKE STATEMENTS
 
-        Do not use Cause merely because an action has an effect on another
-        entity.
+        Preserve explicit conditional or rule-like meaning instead of flattening
+        the clauses into independent assertions.
 
-        A conditional construction such as:
+        Use the top-level "rules" field for statements that express an implication,
+        including explicit "if ... then ..." constructions and clear universal
+        rule-like statements.
 
-        "If X happens, Y may happen."
+        A rule contains:
 
-        does not by itself assert:
+        - "antecedents": one or more SemanticAssertion objects representing the
+          conditions
+        - "consequents": one or more SemanticAssertion objects representing the
+          results
+        - "source_span": the complete literal span supporting the rule
 
-        Cause(X, Y)
+        For a pure conditional sentence, the top-level "assertions" list must be
+        empty.
 
+        Do not duplicate an antecedent or consequent in both the top-level
+        "assertions" list and inside "rules".
+
+        All assertions inside a conditional rule must use:
+
+        "factuality": "hypothetical"
+
+        Do not mark the antecedent or consequent as independently asserted merely
+        because it appears in the sentence.
+
+        Example:
+
+        "If someone is red then they are nice."
+
+        Use:
+
+        {
+          "assertions": [],
+          "rules": [
+            {
+              "antecedents": [
+                {
+                  "predicate": "PropertyOf",
+                  "relation": null,
+                  "arguments": [
+                    {
+                      "value": "someone",
+                      "role": "entity",
+                      "type": null
+                    },
+                    {
+                      "value": "red",
+                      "role": "property",
+                      "type": null
+                    }
+                  ],
+                  "fallback": false,
+                  "polarity": "positive",
+                  "factuality": "hypothetical",
+                  "confidence": 0.99,
+                  "source_span": "someone is red",
+                  "alternatives": []
+                }
+              ],
+              "consequents": [
+                {
+                  "predicate": "PropertyOf",
+                  "relation": null,
+                  "arguments": [
+                    {
+                      "value": "someone",
+                      "role": "entity",
+                      "type": null
+                    },
+                    {
+                      "value": "nice",
+                      "role": "property",
+                      "type": null
+                    }
+                  ],
+                  "fallback": false,
+                  "polarity": "positive",
+                  "factuality": "hypothetical",
+                  "confidence": 0.99,
+                  "source_span": "they are nice",
+                  "alternatives": []
+                }
+              ],
+              "source_span": "If someone is red then they are nice."
+            }
+          ]
+        }
+
+        Resolve shared participants semantically across the rule.
+
+        For example:
+
+        "If someone needs the tiger then they are red."
+
+        The consequent must preserve "someone" as the entity even though the
+        surface text uses "they".
+
+        The consequent may therefore contain:
+
+        PropertyOf(someone, red)
+
+        while its literal source_span remains:
+
+        "they are red"
+
+        Do not leave an unresolved referential pronoun such as "they" as the
+        semantic participant when its antecedent is clear.
+
+        MULTIPLE CONDITIONS
+
+        When a conditional has multiple conditions, preserve them as separate
+        antecedent assertions.
+
+        Example:
+
+        "If Harry is big and Harry is rough then Harry is nice."
+
+        Use two antecedents:
+
+        PropertyOf(Harry, big)
+
+        PropertyOf(Harry, rough)
+
+        and one consequent:
+
+        PropertyOf(Harry, nice)
+
+        Do not flatten these into standalone top-level assertions.
+
+        Do not replace logical implication with Cause merely because one clause
+        depends on another.
+
+        Cause represents an actual causal relation.
+
+        A conditional rule represents logical implication.
+
+        Do not use OccursAt or another temporal predicate to connect a logical
+        condition to its result.
+
+        NEGATION INSIDE RULES
+
+        Preserve negation on the individual assertion where it occurs.
+
+        Example:
+
+        "If the tiger visits the cow then the tiger does not like the squirrel."
+
+        Represent the antecedent as a positive assertion and the consequent as:
+
+        Evaluation(like, tiger, squirrel)
+
+        with:
+
+        "polarity": "negative"
+
+        and:
+
+        "factuality": "hypothetical"
+
+        The rule itself represents the implication. Do not convert the negative
+        consequent into a positive assertion.
+
+        SOURCE SPANS INSIDE RULES
+
+        Every source_span must be supported literally by the supplied input text.
+
+        The rule-level source_span should cover the complete conditional or
+        rule-like expression.
+
+        Nested antecedent and consequent assertions should use the narrowest
+        literal text span that supports that assertion.
+
+        Semantic arguments may resolve shared or omitted participants, but
+        source_span must remain faithful to the surface text.
+
+        When multiple antecedents share an omitted repeated subject, copula,
+        auxiliary, or other material, do not reconstruct the omitted words inside
+        source_span.
+
+        Example:
+
+        "If someone is young and rough then they are kind."
+
+        Use:
+
+        PropertyOf(someone, young)
+        source_span: "someone is young"
+
+        PropertyOf(someone, rough)
+        source_span: "rough"
+
+        Do NOT use:
+
+        source_span: "someone is rough"
+
+        because "someone is rough" does not occur contiguously in the input.
+
+        The same rule applies generally to coordinated properties and events.
+
+        Example:
+
+        "If something is young and red then it is blue."
+
+        Use:
+
+        PropertyOf(something, young)
+        source_span: "something is young"
+
+        PropertyOf(something, red)
+        source_span: "red"
+
+        Do NOT use:
+
+        source_span: "something is red"
+
+        Example:
+
+        "If someone is green and kind then they are smart."
+
+        Use:
+
+        PropertyOf(someone, green)
+        source_span: "someone is green"
+
+        PropertyOf(someone, kind)
+        source_span: "kind"
+
+        Do NOT use:
+
+        source_span: "someone is kind"
+
+        SOURCE SPANS MUST PRESERVE NEGATION.
+
+        If an assertion is negative, its source_span must include the literal
+        negation when that negation appears in the text.
+
+        Example:
+
+        "If Anne is not white then Anne is not young."
+
+        Use:
+
+        PropertyOf(Anne, white)
+        polarity: negative
+        source_span: "Anne is not white"
+
+        and:
+
+        PropertyOf(Anne, young)
+        polarity: negative
+        source_span: "Anne is not young"
+
+        Do NOT use:
+
+        source_span: "Anne is white"
+
+        or:
+
+        source_span: "Anne is young"
+
+        because those spans remove the explicit negation from the source text.
+
+        UNIVERSAL RULE-LIKE STATEMENTS
+
+        Universal statements that express a general implication must also be
+        represented as rules rather than as standalone facts.
+
+        A sentence of the form:
+
+        "All X people are Y."
+
+        expresses the rule:
+
+        if a person has property X, then that person has property Y.
+
+        Example:
+
+        "All green people are nice."
+
+        Use:
+
+        {
+          "assertions": [],
+          "rules": [
+            {
+              "antecedents": [
+                {
+                  "predicate": "PropertyOf",
+                  "relation": null,
+                  "arguments": [
+                    {
+                      "value": "people",
+                      "role": "entity",
+                      "type": null
+                    },
+                    {
+                      "value": "green",
+                      "role": "property",
+                      "type": null
+                    }
+                  ],
+                  "fallback": false,
+                  "polarity": "positive",
+                  "factuality": "hypothetical",
+                  "confidence": 0.99,
+                  "source_span": "green people",
+                  "alternatives": []
+                }
+              ],
+              "consequents": [
+                {
+                  "predicate": "PropertyOf",
+                  "relation": null,
+                  "arguments": [
+                    {
+                      "value": "people",
+                      "role": "entity",
+                      "type": null
+                    },
+                    {
+                      "value": "nice",
+                      "role": "property",
+                      "type": null
+                    }
+                  ],
+                  "fallback": false,
+                  "polarity": "positive",
+                  "factuality": "hypothetical",
+                  "confidence": 0.99,
+                  "source_span": "nice",
+                  "alternatives": []
+                }
+              ],
+              "source_span": "All green people are nice."
+            }
+          ]
+        }
+
+        The adjective is the property, not the entity.
+
+        For:
+
+        "All big people are red."
+
+        "people" is the shared generic entity,
+        "big" is the antecedent property,
+        and "red" is the consequent property.
+
+        Do not assign both arguments the role "property".
+
+        Preserve the same generic participant across the antecedent and
+        consequent.
+
+        GENERAL RULE REQUIREMENTS
+
+        - Keep each logically distinct condition as a separate antecedent.
+        - Keep each logically distinct result as a separate consequent.
+        - Preserve shared participants across antecedents and consequents.
+        - Resolve clear pronouns to their antecedent in semantic argument values.
+        - Preserve literal wording in source_span even when semantic argument
+          values resolve pronouns or omitted participants.
+        - Preserve polarity independently for every nested assertion.
+        - Use factuality "hypothetical" for assertions contained in rules.
+        - Do not emit the same conditional clauses as standalone assertions.
+        - Do not invent causal, temporal, or spatial relations merely to encode
+          implication.
+        - Do not invent unsupported source-span text.
     13. Use UsedFor only when the sentence explicitly expresses purpose
         or function.
 
@@ -764,32 +1122,44 @@ parser:
 
         "If it rains, the road may become slippery."
 
-        Assertions representing:
+        Represent this as one conditional rule.
+
+        The antecedent represents:
 
         rain
 
-        and
+        The consequent represents:
 
         become(road, slippery)
 
-        are both part of the conditional scenario.
-
-        Use:
+        Both assertions inside the rule use:
 
         factuality: hypothetical
 
-        Do not treat them as unconditional asserted facts.
+        Do not place them in the top-level "assertions" list.
 
         Example:
 
         "Suppose the machine fails, the process will stop."
 
-        The failure event, stopping event, and any relation connecting them
-        belong to the hypothetical scenario.
+        The failure event and stopping event belong to the same
+        hypothetical conditional scenario.
 
-        Use:
+        Preserve them inside one conditional rule.
+
+        The antecedent represents:
+
+        fail(machine)
+
+        The consequent represents:
+
+        stop(process)
+
+        Both assertions inside the rule use:
 
         factuality: hypothetical
+
+        Do not place them in the top-level "assertions" list.
 
         ### Conditional scope precedence
 
@@ -811,7 +1181,10 @@ parser:
 
         "If the company expands, it may hire more workers."
 
-        Preserve both explicitly stated propositions:
+        Preserve both explicitly stated propositions inside one conditional
+        rule.
+
+        The antecedent contains:
 
         predicate: Evaluation
         relation: expand
@@ -819,7 +1192,7 @@ parser:
           patient: company
         factuality: hypothetical
 
-        and:
+        The consequent contains:
 
         predicate: Evaluation
         relation: hire
@@ -828,9 +1201,7 @@ parser:
           patient: more_workers
         factuality: hypothetical
 
-        Both the expansion proposition and the hiring proposition are:
-
-        factuality: hypothetical
+        Do not place either proposition in the top-level "assertions" list.
 
         Do not classify the hiring proposition as speculative merely because
         it contains "may".
@@ -849,9 +1220,14 @@ parser:
 
         because "expand" denotes the conditional event, not a time value.
 
-        If the available predicate schema does not contain an explicit
-        conditional relation, preserve the condition and result as separate
-        hypothetical assertions rather than inventing a temporal relation.
+        Explicit conditional constructions must preserve their implication
+        structure using the top-level "rules" field.
+
+        Do not represent the antecedent and consequent as separate standalone
+        assertions.
+
+        Do not invent a temporal relation such as OccursAt to connect the
+        condition and result.
 
         Explicit conditional or hypothetical scope takes precedence over
         modal words such as may, might, could, or probably.
@@ -860,13 +1236,19 @@ parser:
 
         "If it thunders, the animals may hide."
 
-        Both propositions are hypothetical:
+        Preserve one conditional rule.
+
+        The antecedent contains:
 
         Evaluation(thunder, [])
         factuality: hypothetical
 
+        The consequent contains:
+
         Evaluation(hide, animals)
         factuality: hypothetical
+
+        Do not place either proposition in the top-level "assertions" list.
 
         Do not classify "hide" as speculative merely because "may" occurs
         inside the conditional construction.
@@ -1631,14 +2013,417 @@ parser:
 
     29. confidence must be a number between 0.0 and 1.0.
 
-    30. source_span must contain the narrowest supporting text span from the
-        input sentence.
+    30. source_span must be a verbatim, contiguous substring copied directly
+    from the input sentence.
+
+        A source_span is evidence text, not a paraphrase or reconstructed
+        version of the assertion.
+
+        Use the narrowest literal span that supports the assertion.
+
+        Do not:
+        - reconstruct omitted subjects, verbs, copulas, auxiliaries, or objects;
+        - remove intervening words;
+        - remove parenthetical material;
+        - correct spelling or grammar;
+        - normalize punctuation;
+        - change capitalization;
+        - change numbers;
+        - insert ellipses such as "...";
+        - combine non-contiguous parts of the input;
+        - paraphrase the source text.
+
+        Semantic arguments may resolve omitted or shared meaning, but
+        source_span must remain literal.
+
+        Example:
+
+        Input:
+        "The ears are large and darkly pigmented."
+
+        For PropertyOf(ears, large), use:
+
+        source_span: "The ears are large"
+
+        For PropertyOf(ears, darkly_pigmented), use:
+
+        source_span: "darkly pigmented"
+
+        Do not use:
+
+        source_span: "The ears are darkly pigmented"
+
+        because that exact contiguous string does not occur in the input.
+
+        Example:
+
+        Input:
+        "After they were done eating the waitress gave a $30 bill to Bob and a $25 bill to Kate."
+
+        For the second giving relation, use a literal span such as:
+
+        source_span: "a $25 bill to Kate"
+
+        Do not reconstruct:
+
+        source_span: "the waitress gave a $25 bill to Kate"
+
+        unless that exact string appears in the input.
+
+        Example:
+
+        Input:
+        "Fri. Sept. 22 - Stay in same hotel, visit Monaco, Nice?"
+
+        If separate assertions are emitted, use literal spans such as:
+
+        source_span: "visit Monaco"
+
+        and:
+
+        source_span: "Nice"
+
+        Do not reconstruct:
+
+        source_span: "visit Nice"
+
+        If no exact contiguous source span can be identified, do not invent one.
 
     31. If an interpretation is genuinely ambiguous, place alternative
         interpretations in "alternatives".
 
         Otherwise use an empty list.
+    32. UNIVERSAL RULES AND SHARED VARIABLES
 
+      Universal class-wide statements must be represented as rules with a shared
+      MeTTa variable.
+
+      Do not represent a universal statement as a standalone assertion.
+
+      For a pure universal statement:
+
+      "assertions" MUST be [].
+
+      The universal participant MUST be represented by a shared variable such as:
+
+      $x
+
+      Do not use literal generic entities such as:
+
+      people
+      things
+      all_big_people
+      big_people
+      all_round_smart_things
+
+      when they stand for an arbitrary member of a class.
+
+      Example:
+
+      "All big people are red."
+
+      MUST be represented as:
+
+      {
+        "assertions": [],
+        "rules": [
+          {
+            "antecedents": [
+              {
+                "predicate": "PropertyOf",
+                "relation": null,
+                "arguments": [
+                  {
+                    "value": "$x",
+                    "role": "entity",
+                    "type": null
+                  },
+                  {
+                    "value": "big",
+                    "role": "property",
+                    "type": null
+                  }
+                ],
+                "fallback": false,
+                "polarity": "positive",
+                "factuality": "hypothetical",
+                "confidence": 0.99,
+                "source_span": "big people",
+                "alternatives": []
+              }
+            ],
+            "consequents": [
+              {
+                "predicate": "PropertyOf",
+                "relation": null,
+                "arguments": [
+                  {
+                    "value": "$x",
+                    "role": "entity",
+                    "type": null
+                  },
+                  {
+                    "value": "red",
+                    "role": "property",
+                    "type": null
+                  }
+                ],
+                "fallback": false,
+                "polarity": "positive",
+                "factuality": "hypothetical",
+                "confidence": 0.99,
+                "source_span": "red",
+                "alternatives": []
+              }
+            ],
+            "source_span": "All big people are red."
+          }
+        ]
+      }
+
+      The intended MeTTa form is:
+
+      (Implies (PropertyOf $x big) (PropertyOf $x red))
+
+      Do NOT output:
+
+      Evaluation(red, big_people, red)
+
+      Do NOT output:
+
+      PropertyOf(people, big)
+
+      Do NOT output:
+
+      PropertyOf(people, red)
+
+      Do NOT place any part of the universal rule in top-level "assertions".
+
+      For multiple universal properties:
+
+      "All round, smart things are furry."
+
+      MUST use:
+
+      PropertyOf($x, round)
+      PropertyOf($x, smart)
+
+      as separate antecedents and:
+
+      PropertyOf($x, furry)
+
+      as the consequent.
+
+      The intended MeTTa form is:
+
+      (Implies
+        (And
+          (PropertyOf $x round)
+          (PropertyOf $x smart))
+        (PropertyOf $x furry))
+
+      Adjectival properties such as:
+
+      big
+      red
+      round
+      smart
+      furry
+      young
+      cold
+      quiet
+      nice
+      rough
+      green
+      white
+      blue
+
+      must normally use PropertyOf when they describe a participant.
+
+      Do NOT encode those adjectival properties as zero- or one-participant
+      Evaluation relations merely because they occur inside a universal rule.
+
+      The same variable must denote the same arbitrary participant throughout
+      all antecedents and consequents of the rule.
+
+      Statements such as:
+
+      "Big people are red."
+      "Kind people are nice."
+      "Young, cold people are quiet."
+      "All furry people are young."
+
+      must be treated as generalized rules when they express a class-wide
+      implication.
+
+      Assertions inside universal rules use:
+
+      "factuality": "hypothetical"
+
+      Source spans remain literal substrings of the original input even though
+      the semantic participant is represented by $x.
+    33. PREDICATE SELECTION INSIDE RULES
+
+      The ordinary predicate-selection rules apply unchanged inside antecedents
+      and consequents.
+
+      Being inside a rule does NOT turn an action verb into a property.
+
+      Adjectival states such as:
+
+      "something is cold"
+      "someone is red"
+      "the dog is rough"
+
+      normally use PropertyOf.
+
+      Ordinary transitive verbs with an agent and patient such as:
+
+      likes
+      needs
+      sees
+      visits
+      chases
+      eats
+
+      must preserve both participants and normally use Evaluation unless a known
+      predicate directly represents the same event.
+
+      Example:
+
+      "If something is cold and it likes the bald eagle then the bald eagle
+      needs the cat."
+
+      MUST use:
+
+      PropertyOf(
+        entity=something,
+        property=cold
+      )
+
+      Evaluation(
+        relation=like,
+        agent=something,
+        patient=bald_eagle
+      )
+
+      Evaluation(
+        relation=need,
+        agent=bald_eagle,
+        patient=cat
+      )
+
+      Do NOT use:
+
+      PropertyOf(something, like)
+
+      Do NOT use:
+
+      PropertyOf(something, likes)
+
+      Do NOT use:
+
+      PropertyOf(bald_eagle, need)
+
+      Do NOT use:
+
+      PropertyOf(bald_eagle, needs)
+
+      A transitive verb must not lose its explicitly stated object merely to fit
+      PropertyOf.
+
+      For example:
+
+      "it likes the bald eagle"
+
+      must preserve both:
+
+      something
+      bald_eagle
+
+      and:
+
+      "the bald eagle needs the cat"
+
+      must preserve both:
+
+      bald_eagle
+      cat
+      Copular adjective constructions of the form:
+
+      "X is cold"
+      "X is red"
+      "X is big"
+      "X is rough"
+      "X is smart"
+      "X is furry"
+      "X is nice"
+      "X is young"
+      "X is quiet"
+      "X is green"
+      "X is white"
+      "X is blue"
+
+      MUST use PropertyOf when the adjective describes a property of X.
+
+      Use:
+
+      PropertyOf(X, adjective)
+
+      Do NOT use:
+
+      Evaluation(adjective, X)
+
+      This requirement applies equally inside and outside rules.
+      IMPORTANT FOR MIXED ANTECEDENTS
+
+      When a rule antecedent contains both an adjectival property and an action,
+      classify each clause independently.
+
+      Example:
+
+      "If something is cold and it likes the bald eagle then the bald eagle
+      needs the cat."
+
+      The first antecedent:
+
+      "something is cold"
+
+      MUST be:
+
+      PropertyOf($x, cold)
+
+      The second antecedent:
+
+      "it likes the bald eagle"
+
+      MUST be:
+
+      Evaluation(
+        relation=like,
+        agent=$x,
+        patient=bald_eagle
+      )
+
+      The consequent:
+
+      "the bald eagle needs the cat"
+
+      MUST be:
+
+      Evaluation(
+        relation=need,
+        agent=bald_eagle,
+        patient=cat
+      )
+
+      Do not make all coordinated antecedents use the same predicate type.
+
+      In particular, do NOT use:
+
+      Evaluation(cold, $x)
+
+      for "something is cold".
     ## VALIDATION RULES
 
     Before returning the JSON, validate every assertion.
@@ -1723,21 +2508,25 @@ parser:
        If an assertion belongs to an explicit conditional scenario, classify
        it as hypothetical even when it contains may, might, or could.
 
-       Example:
+       Example :
 
        "If the company expands, it may hire more workers."
 
-       Both:
+       Preserve this as one conditional rule.
+
+       The antecedent:
 
        Evaluation(expand, company)
 
-       and:
+       and the consequent:
 
        Evaluation(hire, company, more_workers)
 
-       must use:
+       must both use:
 
        factuality: hypothetical
+
+       Do not place either proposition in the top-level "assertions" list.
 
        Do not classify the hiring proposition as speculative merely because
        it contains "may".
@@ -1751,7 +2540,6 @@ parser:
        OccursAt(hire, expand)
 
        is incorrect because "expand" is an event/condition, not a time value.
-
        Temporal and spatial assertions derived from an event must inherit
        that event's factuality unless the source explicitly distinguishes
        them.
@@ -1826,516 +2614,9 @@ parser:
           "source_span": "Ben bought a car.",
           "alternatives": []
         }
-      ]
+      ],
+      "rules": []
     }
-
-    ## EXAMPLES
-
-    Example 1 - ordinary event:
-
-    Sentence:
-    "Alice opened the door."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "open",
-          "arguments": [
-            {
-              "value": "Alice",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "door",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "Alice opened the door.",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 2 - equivalent passive event:
-
-    Sentence:
-    "The door was opened by Alice."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "open",
-          "arguments": [
-            {
-              "value": "Alice",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "door",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "The door was opened by Alice.",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 3 - quantitative property:
-
-    Sentence:
-    "The temperature is 37.5 degrees."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "PropertyOf",
-          "relation": null,
-          "arguments": [
-            {
-              "value": "temperature",
-              "role": "entity",
-              "type": null
-            },
-            {
-              "value": "37.5 degrees",
-              "role": "property",
-              "type": null
-            }
-          ],
-          "fallback": false,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "The temperature is 37.5 degrees.",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 4 - temporal modifier:
-
-    Sentence:
-    "The engineer designed the bridge in 2025."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "design",
-          "arguments": [
-            {
-              "value": "engineer",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "bridge",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "The engineer designed the bridge",
-          "alternatives": []
-        },
-        {
-          "predicate": "OccursAt",
-          "relation": null,
-          "arguments": [
-            {
-              "value": "design",
-              "role": "event_or_state",
-              "type": null
-            },
-            {
-              "value": "2025",
-              "role": "time",
-              "type": null
-            }
-          ],
-          "fallback": false,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "in 2025",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 5 - spatial modifier:
-
-    Sentence:
-    "The doctor examined the patient at the hospital."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "examine",
-          "arguments": [
-            {
-              "value": "doctor",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "patient",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "The doctor examined the patient",
-          "alternatives": []
-        },
-        {
-          "predicate": "OccursIn",
-          "relation": null,
-          "arguments": [
-            {
-              "value": "examine",
-              "role": "event_or_state",
-              "type": null
-            },
-            {
-              "value": "hospital",
-              "role": "location",
-              "type": null
-            }
-          ],
-          "fallback": false,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "at the hospital",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 6 - opinion:
-
-    Sentence:
-    "I think Paris is beautiful."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "think",
-          "arguments": [
-            {
-              "value": "I",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "Paris_is_beautiful",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "opinion",
-          "confidence": 0.99,
-          "source_span": "I think Paris is beautiful.",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 7 - speculative event:
-
-    Sentence:
-    "Paris might become larger next year."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "become",
-          "arguments": [
-            {
-              "value": "Paris",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "larger",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "speculative",
-          "confidence": 0.99,
-          "source_span": "Paris might become larger",
-          "alternatives": []
-        },
-        {
-          "predicate": "OccursAt",
-          "relation": null,
-          "arguments": [
-            {
-              "value": "become",
-              "role": "event_or_state",
-              "type": null
-            },
-            {
-              "value": "next_year",
-              "role": "time",
-              "type": null
-            }
-          ],
-          "fallback": false,
-          "polarity": "positive",
-          "factuality": "speculative",
-          "confidence": 0.99,
-          "source_span": "next year",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 8 - hypothetical conditional:
-
-    Sentence:
-    "If the company expands, it may hire more workers."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "expand",
-          "arguments": [
-            {
-              "value": "company",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "hypothetical",
-          "confidence": 0.99,
-          "source_span": "If the company expands",
-          "alternatives": []
-        },
-        {
-          "predicate": "Evaluation",
-          "relation": "hire",
-          "arguments": [
-            {
-              "value": "company",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "more_workers",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "hypothetical",
-          "confidence": 0.99,
-          "source_span": "it may hire more workers",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 9 - complex relative clause:
-
-    Sentence:
-    "Paris, which is the capital of France, is a large city."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "capital_of",
-          "arguments": [
-            {
-              "value": "Paris",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "France",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "Paris, which is the capital of France",
-          "alternatives": []
-        },
-        {
-          "predicate": "PropertyOf",
-          "relation": null,
-          "arguments": [
-            {
-              "value": "Paris",
-              "role": "entity",
-              "type": null
-            },
-            {
-              "value": "large_city",
-              "role": "property",
-              "type": null
-            }
-          ],
-          "fallback": false,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "Paris ... is a large city",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 10 - unambiguous ellipsis:
-
-    Context:
-    "Alice opened the door."
-
-    Sentence:
-    "Then entered the room."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "enter",
-          "arguments": [
-            {
-              "value": "Alice",
-              "role": "agent",
-              "type": null
-            },
-            {
-              "value": "room",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "entered the room",
-          "alternatives": []
-        }
-      ]
-    }
-
-    Example 11 - ambiguous ellipsis:
-
-    Context:
-    "Alice met Mary."
-
-    Sentence:
-    "Then entered the room."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Evaluation",
-          "relation": "enter",
-          "arguments": [
-            {
-              "value": "room",
-              "role": "patient",
-              "type": null
-            }
-          ],
-          "fallback": true,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.70,
-          "source_span": "entered the room",
-          "alternatives": [
-            "agent could be Alice",
-            "agent could be Mary"
-          ]
-        }
-      ]
-    }
-
-    Example 12 - known predicate:
-
-    Sentence:
-    "A dog is an animal."
-
-    Output:
-    {
-      "assertions": [
-        {
-          "predicate": "Inheritance",
-          "relation": null,
-          "arguments": [
-            {
-              "value": "dog",
-              "role": "instance",
-              "type": null
-            },
-            {
-              "value": "animal",
-              "role": "class",
-              "type": null
-            }
-          ],
-          "fallback": false,
-          "polarity": "positive",
-          "factuality": "asserted",
-          "confidence": 0.99,
-          "source_span": "A dog is an animal.",
-          "alternatives": []
-        }
-      ]
-    }
-
     Do not output MeTTa.
     Do not output explanations.
     Do not output Markdown or code fences.

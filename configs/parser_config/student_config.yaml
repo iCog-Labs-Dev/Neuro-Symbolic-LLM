@@ -1,12 +1,10 @@
-# configs/student_config.yaml
-
 student:
   base_model: Qwen/Qwen2.5-1.5B-Instruct
   output_dir: models/distil_parser
 
 data:
   val_split: 0.1
-  max_length: 128
+  max_length: 768
 
 training:
   epochs: 3

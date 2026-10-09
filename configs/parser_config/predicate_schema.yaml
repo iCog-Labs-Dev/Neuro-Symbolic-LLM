@@ -287,7 +287,13 @@ operators:
     arity: 2
     roles: [collection, attribute]
     description: "Select the entity with the minimum value of an attribute"
-
+  Implies:
+    arity: 2
+    roles: [antecedent, consequent]
+    description: >
+      Logical implication from an antecedent expression to a consequent
+      expression. Use for explicit conditional or rule-like statements
+      such as "if X then Y".
 structural_predicates:
 
   List:
