@@ -145,6 +145,9 @@ def test_prefixes_non_temporal_numeric_values() -> None:
         ("1M people", "num_1M_people"),
         ("10 kg", "num_10_kg"),
         ("30 days", "num_30_days"),
+        ("3/4 of a mile", "num_3_4_of_a_mile"),
+        ("$50", "num_50"),
+        ("4-6 pups", "num_4_6_pups"),
     ],
 )
 def test_normalizes_numeric_quantities(
@@ -203,3 +206,99 @@ def test_preserves_non_numeric_non_temporal_values() -> None:
     )
 
     assert normalized.assertions[0].arguments[0].value == "research_report"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("Des's face", "Des_s_face"),
+        ("God’s grace and help", "God_s_grace_and_help"),
+        ("peek-and-seek", "peek_and_seek"),
+        ("city-wide level", "city_wide_level"),
+        ("La América Mexicana", "La_America_Mexicana"),
+        ("BABA NAM: KEVALAM", "BABA_NAM_KEVALAM"),
+        ("research/design", "research_design"),
+        ("cats & dogs", "cats_and_dogs"),
+        ("around $50", "around_50"),
+        ("time 4:30pm", "time_4_30pm"),
+    ],
+)
+def test_normalizes_punctuation_to_metta_safe_symbols(
+    value: str,
+    expected: str,
+) -> None:
+    assert normalize_symbol(value) == expected
+
+
+def test_normalizes_assertions_inside_rules() -> None:
+    result = SemanticParseResult.model_validate(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [
+                        {
+                            "predicate": "Evaluation",
+                            "relation": " Is Red ",
+                            "arguments": [
+                                {
+                                    "value": " Some Person ",
+                                    "role": " Entity ",
+                                    "type": None,
+                                }
+                            ],
+                            "fallback": True,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": " some person is red ",
+                            "alternatives": [],
+                        }
+                    ],
+                    "consequents": [
+                        {
+                            "predicate": "Evaluation",
+                            "relation": " Is Nice ",
+                            "arguments": [
+                                {
+                                    "value": " Some Person ",
+                                    "role": " Entity ",
+                                    "type": None,
+                                }
+                            ],
+                            "fallback": True,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": " they are nice ",
+                            "alternatives": [],
+                        }
+                    ],
+                    "source_span": (" If some person is red then they are nice. "),
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_semantic_result(result)
+
+    rule = normalized.rules[0]
+
+    assert rule.antecedents[0].relation == "is_red"
+
+    assert rule.antecedents[0].arguments[0].value == "Some_Person"
+
+    assert rule.antecedents[0].arguments[0].role == "entity"
+
+    assert rule.consequents[0].relation == "is_nice"
+
+    assert rule.source_span == "If some person is red then they are nice."
+
+
+def test_preserves_metta_variables() -> None:
+    assert normalize_symbol("$x") == "$x"
+    assert normalize_symbol("$person") == "$person"
+
+
+def test_normalizes_variable_name_safely() -> None:
+    assert normalize_symbol("$Some Person") == "$Some_Person"

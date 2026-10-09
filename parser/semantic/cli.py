@@ -70,7 +70,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--input",
         type=Path,
         required=True,
-        help="UTF-8 text file containing one sentence per line",
+        help=(
+            "UTF-8 text file containing one sentence per line, or a JSONL "
+            "manifest containing text/source_dataset/source_domain"
+        ),
     )
     dataset_command.add_argument(
         "--output",
@@ -278,17 +281,85 @@ def _run_dataset(arguments: argparse.Namespace) -> None:
             "Input, accepted-output, and rejected-output paths must differ"
         )
 
-    sentences = input_path.read_text(encoding="utf-8").splitlines()
-
     builder = SemanticDatasetBuilder(
         _build_semantic_parser(arguments),
         include_metta=arguments.include_metta,
         asserted_only=arguments.asserted_only,
     )
 
-    accepted, rejected = builder.generate(sentences)
+    accepted = []
+    rejected = []
+
+    if input_path.suffix.lower() == ".jsonl":
+        with input_path.open("r", encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Invalid JSON at {input_path}:{line_number}: {error.msg}"
+                    ) from error
+
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"Invalid record at {input_path}:{line_number}: "
+                        "expected a JSON object"
+                    )
+
+                text = record.get("text")
+                if not isinstance(text, str):
+                    raise ValueError(
+                        f"Invalid record at {input_path}:{line_number}: "
+                        "'text' must be a string"
+                    )
+
+                source_dataset = record.get("source_dataset")
+                source_domain = record.get("source_domain")
+
+                if source_dataset is not None and not isinstance(source_dataset, str):
+                    raise ValueError(
+                        f"Invalid record at {input_path}:{line_number}: "
+                        "'source_dataset' must be a string or null"
+                    )
+
+                if source_domain is not None and not isinstance(source_domain, str):
+                    raise ValueError(
+                        f"Invalid record at {input_path}:{line_number}: "
+                        "'source_domain' must be a string or null"
+                    )
+
+                batch_accepted, batch_rejected = builder.generate(
+                    [text],
+                    source_dataset=source_dataset,
+                    source_domain=source_domain,
+                )
+
+                accepted.extend(batch_accepted)
+                rejected.extend(batch_rejected)
+
+                # Progress + checkpoint every 100 processed input records
+                if line_number % 100 == 0:
+                    builder.write_jsonl(accepted, output_path)
+                    builder.write_rejected_jsonl(rejected, rejected_path)
+
+                    print(
+                        f"Processed {line_number} records | "
+                        f"accepted={len(accepted)} "
+                        f"rejected={len(rejected)}"
+                    )
+
+    else:
+        sentences = input_path.read_text(encoding="utf-8").splitlines()
+        accepted, rejected = builder.generate(sentences)
+
     builder.write_jsonl(accepted, output_path)
     builder.write_rejected_jsonl(rejected, rejected_path)
+
     print(f"Accepted: {len(accepted)} -> {output_path}")
     print(f"Rejected: {len(rejected)} -> {rejected_path}")
 

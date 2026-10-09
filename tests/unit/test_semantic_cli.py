@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -519,3 +520,227 @@ def test_e2e_rejects_empty_test_set(cached_e2e, capsys):
     paths[2].write_text("", encoding="utf-8")
     assert cli.main(["e2e"]) == 1
     assert "No test examples" in capsys.readouterr().err
+
+
+def test_dataset_command_accepts_jsonl_manifest_with_provenance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "build_reference_semantic_parser",
+        lambda *args, **kwargs: FakeParser(),
+    )
+
+    input_path = tmp_path / "pilot.jsonl"
+    output_path = tmp_path / "dataset.jsonl"
+
+    input_path.write_text(
+        json.dumps(
+            {
+                "text": "A dog has fur.",
+                "source_dataset": "proofwriter",
+                "source_domain": "logical_reasoning",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "build-dataset",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+
+    record = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert record["text"] == "A dog has fur."
+    assert record["source_dataset"] == "proofwriter"
+    assert record["source_domain"] == "logical_reasoning"
+
+
+def test_dataset_command_plain_text_input_still_works(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "build_reference_semantic_parser",
+        lambda *args, **kwargs: FakeParser(),
+    )
+
+    input_path = tmp_path / "sentences.txt"
+    output_path = tmp_path / "dataset.jsonl"
+
+    input_path.write_text(
+        "A dog has fur.\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "build-dataset",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+
+    record = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert record["text"] == "A dog has fur."
+    assert record["source_dataset"] is None
+    assert record["source_domain"] is None
+
+
+def test_dataset_command_rejects_invalid_jsonl(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "build_reference_semantic_parser",
+        lambda *args, **kwargs: FakeParser(),
+    )
+
+    input_path = tmp_path / "pilot.jsonl"
+    output_path = tmp_path / "dataset.jsonl"
+
+    input_path.write_text(
+        "{broken\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "build-dataset",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert f"{input_path}:1" in capsys.readouterr().err
+
+
+def test_dataset_command_rejects_non_string_jsonl_text(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "build_reference_semantic_parser",
+        lambda *args, **kwargs: FakeParser(),
+    )
+
+    input_path = tmp_path / "pilot.jsonl"
+    output_path = tmp_path / "dataset.jsonl"
+
+    input_path.write_text(
+        json.dumps(
+            {
+                "text": 123,
+                "source_dataset": "proofwriter",
+                "source_domain": "logical_reasoning",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "build-dataset",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "'text' must be a string" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_dataset", 123),
+        ("source_domain", []),
+    ],
+)
+def test_dataset_command_rejects_invalid_provenance_types(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    field,
+    value,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "build_reference_semantic_parser",
+        lambda *args, **kwargs: FakeParser(),
+    )
+
+    input_path = tmp_path / "pilot.jsonl"
+    output_path = tmp_path / "dataset.jsonl"
+
+    record = {
+        "text": "A dog has fur.",
+        "source_dataset": "proofwriter",
+        "source_domain": "logical_reasoning",
+    }
+    record[field] = value
+
+    input_path.write_text(
+        json.dumps(record) + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "build-dataset",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 1
+    assert f"'{field}' must be a string or null" in capsys.readouterr().err
+
+
+def structured_rule_output(
+    *,
+    antecedents: list[dict[str, Any]],
+    consequents: list[dict[str, Any]],
+    source_span: str,
+) -> str:
+    """Serialize fake teacher output containing one conditional rule."""
+    return json.dumps(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": antecedents,
+                    "consequents": consequents,
+                    "source_span": source_span,
+                }
+            ],
+        }
+    )

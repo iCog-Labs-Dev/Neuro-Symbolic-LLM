@@ -186,3 +186,163 @@ def test_renders_zero_argument_evaluation() -> None:
     )
 
     assert render_metta(result) == ["(Evaluation rain (List))"]
+
+
+def test_renders_single_antecedent_rule() -> None:
+    result = SemanticParseResult.model_validate(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "someone",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "red",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "someone is red",
+                            "alternatives": [],
+                        }
+                    ],
+                    "consequents": [
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "someone",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "nice",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "they are nice",
+                            "alternatives": [],
+                        }
+                    ],
+                    "source_span": ("If someone is red then they are nice."),
+                }
+            ],
+        }
+    )
+
+    assert render_metta(result) == [
+        ("(Implies " "(PropertyOf someone red) " "(PropertyOf someone nice))")
+    ]
+
+
+def test_renders_multiple_antecedents_with_and() -> None:
+    result = SemanticParseResult.model_validate(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "Harry",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "big",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "Harry is big",
+                            "alternatives": [],
+                        },
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "Harry",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "rough",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "Harry is rough",
+                            "alternatives": [],
+                        },
+                    ],
+                    "consequents": [
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "Harry",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "nice",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "Harry is nice",
+                            "alternatives": [],
+                        }
+                    ],
+                    "source_span": (
+                        "If Harry is big and Harry is rough " "then Harry is nice."
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert render_metta(result) == [
+        (
+            "(Implies "
+            "(And "
+            "(PropertyOf Harry big) "
+            "(PropertyOf Harry rough)) "
+            "(PropertyOf Harry nice))"
+        )
+    ]

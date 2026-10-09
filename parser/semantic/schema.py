@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SEMANTIC_CONTRACT_VERSION = "1.0.0"
+SEMANTIC_CONTRACT_VERSION = "1.1.0"
 
 
 class SemanticSchemaModel(BaseModel):
@@ -72,7 +72,27 @@ class SemanticAssertion(SemanticSchemaModel):
         return self
 
 
+class SemanticRule(SemanticSchemaModel):
+    """One conditional semantic rule."""
+
+    antecedents: list[SemanticAssertion] = Field(min_length=1)
+    consequents: list[SemanticAssertion] = Field(min_length=1)
+
+    source_span: str = Field(min_length=1)
+
+
 class SemanticParseResult(SemanticSchemaModel):
     """Complete structured output for one parser request."""
 
-    assertions: list[SemanticAssertion] = Field(min_length=1)
+    assertions: list[SemanticAssertion] = Field(default_factory=list)
+    rules: list[SemanticRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_semantic_content(self) -> SemanticParseResult:
+        """Require at least one assertion or rule."""
+        if not self.assertions and not self.rules:
+            raise ValueError(
+                "Semantic parse result must contain at least one assertion or rule"
+            )
+
+        return self

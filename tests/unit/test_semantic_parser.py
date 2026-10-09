@@ -29,6 +29,7 @@ def assertion(
     roles: tuple[str, ...] = ("owner", "possessed"),
     fallback: bool = False,
     polarity: str = "positive",
+    factuality: str = "asserted",
     confidence: float = 0.99,
     source_span: str = "A dog has fur.",
 ) -> dict[str, Any]:
@@ -42,6 +43,7 @@ def assertion(
         ],
         "fallback": fallback,
         "polarity": polarity,
+        "factuality": factuality,
         "confidence": confidence,
         "source_span": source_span,
         "alternatives": [],
@@ -51,6 +53,27 @@ def assertion(
 def structured_output(*assertions: dict[str, Any]) -> str:
     """Serialize assertions as the model's JSON response."""
     return json.dumps({"assertions": list(assertions)})
+
+
+def structured_rule_output(
+    *,
+    antecedents: list[dict[str, Any]],
+    consequents: list[dict[str, Any]],
+    source_span: str,
+) -> str:
+    """Serialize fake teacher output containing one conditional rule."""
+    return json.dumps(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": antecedents,
+                    "consequents": consequents,
+                    "source_span": source_span,
+                }
+            ],
+        }
+    )
 
 
 class FakeBackend:
@@ -640,3 +663,576 @@ def test_distilled_precision_respects_requested_device(
     DistilledSemanticParser.from_pretrained(str(tmp_path), device=device)
     assert loader.call_args.kwargs["torch_dtype"] == expected
     assert loader.call_args.kwargs["device_map"] == device
+
+
+def test_preserves_single_conditional_rule() -> None:
+    output = structured_rule_output(
+        antecedents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("someone", "red"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="someone is red",
+            )
+        ],
+        consequents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("someone", "nice"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="they are nice",
+            )
+        ],
+        source_span="If someone is red then they are nice.",
+    )
+
+    parser, _ = make_teacher(output)
+
+    result = parser.generate_structured("If someone is red then they are nice.")
+
+    assert result.assertions == []
+    assert len(result.rules) == 1
+    assert len(result.rules[0].antecedents) == 1
+    assert len(result.rules[0].consequents) == 1
+
+    atoms = parser.parse("If someone is red then they are nice.")
+
+    assert [str(atom) for atom in atoms] == [
+        ("(Implies " "(PropertyOf someone red) " "(PropertyOf someone nice))")
+    ]
+
+
+def test_preserves_multiple_rule_antecedents() -> None:
+    output = structured_rule_output(
+        antecedents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "big"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry is big",
+            ),
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "rough"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry is rough",
+            ),
+        ],
+        consequents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "nice"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry is nice",
+            )
+        ],
+        source_span=("If Harry is big and Harry is rough then Harry is nice."),
+    )
+
+    parser, _ = make_teacher(output)
+
+    result = parser.generate_structured(
+        "If Harry is big and Harry is rough then Harry is nice."
+    )
+
+    rule = result.rules[0]
+
+    assert len(rule.antecedents) == 2
+    assert len(rule.consequents) == 1
+
+
+def test_repairs_conditional_rule_duplicated_as_assertions() -> None:
+    antecedent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("Harry", "big"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="Harry is big",
+    )
+
+    consequent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("Harry", "nice"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="Harry is nice",
+    )
+
+    output = json.dumps(
+        {
+            "assertions": [
+                antecedent,
+                consequent,
+            ],
+            "rules": [
+                {
+                    "antecedents": [
+                        antecedent,
+                    ],
+                    "consequents": [
+                        consequent,
+                    ],
+                    "source_span": ("If Harry is big then Harry is nice."),
+                }
+            ],
+        }
+    )
+
+    parser, _ = make_teacher(output)
+
+    result = parser.generate_structured("If Harry is big then Harry is nice.")
+
+    assert result.assertions == []
+
+    assert len(result.rules) == 1
+    assert len(result.rules[0].antecedents) == 1
+    assert len(result.rules[0].consequents) == 1
+
+    atoms = parser.parse("If Harry is big then Harry is nice.")
+
+    assert [str(atom) for atom in atoms] == [
+        ("(Implies " "(PropertyOf Harry big) " "(PropertyOf Harry nice))")
+    ]
+
+
+def test_rejects_unsupported_source_span_inside_rule() -> None:
+    output = structured_rule_output(
+        antecedents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "big"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry isbig",
+            )
+        ],
+        consequents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "nice"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry is nice",
+            )
+        ],
+        source_span=("If Harry is big then Harry is nice."),
+    )
+
+    parser, _ = make_teacher(output)
+
+    with pytest.raises(
+        SemanticParseError,
+        match="source_span is not supported by the input text",
+    ):
+        parser.generate_structured("If Harry is big then Harry is nice.")
+
+
+def test_rejects_unsupported_rule_source_span() -> None:
+    output = structured_rule_output(
+        antecedents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "big"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry is big",
+            )
+        ],
+        consequents=[
+            assertion(
+                predicate="PropertyOf",
+                relation=None,
+                values=("Harry", "nice"),
+                roles=("entity", "property"),
+                fallback=False,
+                factuality="hypothetical",
+                source_span="Harry is nice",
+            )
+        ],
+        source_span=("If Harryis big then Harry is nice."),
+    )
+
+    parser, _ = make_teacher(output)
+
+    with pytest.raises(
+        SemanticParseError,
+        match="rule source_span is not supported by the input text",
+    ):
+        parser.generate_structured("If Harry is big then Harry is nice.")
+
+
+def test_preserves_universal_property_rule() -> None:
+    antecedent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "big"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="big people",
+    )
+
+    consequent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "red"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="red",
+    )
+
+    output = json.dumps(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [antecedent],
+                    "consequents": [consequent],
+                    "source_span": "All big people are red.",
+                }
+            ],
+        }
+    )
+
+    parser, _ = make_teacher(output)
+
+    result = parser.generate_structured("All big people are red.")
+
+    assert result.assertions == []
+    assert len(result.rules) == 1
+
+    atoms = parser.parse("All big people are red.")
+
+    assert [str(atom) for atom in atoms] == [
+        "(Implies (PropertyOf $x big) (PropertyOf $x red))"
+    ]
+
+
+def test_preserves_multi_property_universal_rule() -> None:
+    first = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "round"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="round",
+    )
+
+    second = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "smart"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="smart things",
+    )
+
+    consequent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "furry"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="furry",
+    )
+
+    output = json.dumps(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [first, second],
+                    "consequents": [consequent],
+                    "source_span": ("All round, smart things are furry."),
+                }
+            ],
+        }
+    )
+
+    parser, _ = make_teacher(output)
+
+    atoms = parser.parse("All round, smart things are furry.")
+
+    assert [str(atom) for atom in atoms] == [
+        (
+            "(Implies "
+            "(And "
+            "(PropertyOf $x round) "
+            "(PropertyOf $x smart)) "
+            "(PropertyOf $x furry))"
+        )
+    ]
+
+
+def repair_rule_duplication(
+    result: SemanticParseResult,
+) -> SemanticParseResult:
+    """Remove standalone assertions redundantly emitted with rules.
+
+    Exact duplicates are always removed.
+
+    Also remove a hypothetical standalone assertion when:
+    - it contains a MeTTa variable;
+    - that variable also occurs inside a rule; and
+    - its source span is contained within that rule's source span.
+
+    This handles redundant universal-rule output such as emitting both
+    PropertyOf($x, rough) and the rule
+    PropertyOf($x, smart) -> PropertyOf($x, rough),
+    without attempting broader semantic rewriting.
+    """
+    if not result.rules or not result.assertions:
+        return result
+
+    repaired = result.model_copy(deep=True)
+
+    rule_assertions = {
+        assertion.model_dump_json()
+        for rule in repaired.rules
+        for assertion in [
+            *rule.antecedents,
+            *rule.consequents,
+        ]
+    }
+
+    def assertion_variables(assertion) -> set[str]:
+        return {
+            argument.value
+            for argument in assertion.arguments
+            if argument.value.startswith("$")
+        }
+
+    rule_metadata = []
+
+    for rule in repaired.rules:
+        variables = {
+            variable
+            for assertion in [
+                *rule.antecedents,
+                *rule.consequents,
+            ]
+            for variable in assertion_variables(assertion)
+        }
+
+        rule_span = " ".join(rule.source_span.split()).casefold()
+
+        rule_metadata.append((variables, rule_span))
+
+    kept_assertions = []
+
+    for assertion in repaired.assertions:
+        if assertion.model_dump_json() in rule_assertions:
+            continue
+
+        assertion_vars = assertion_variables(assertion)
+
+        assertion_span = " ".join(assertion.source_span.split()).casefold()
+
+        redundant_rule_assertion = False
+
+        if assertion.factuality == "hypothetical" and assertion_vars:
+            for rule_vars, rule_span in rule_metadata:
+                if (
+                    assertion_vars & rule_vars
+                    and assertion_span
+                    and assertion_span in rule_span
+                ):
+                    redundant_rule_assertion = True
+                    break
+
+        if not redundant_rule_assertion:
+            kept_assertions.append(assertion)
+
+    repaired.assertions = kept_assertions
+
+    return repaired
+
+
+def test_rule_repair_preserves_independent_asserted_fact() -> None:
+    standalone = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("Harry", "blue"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="asserted",
+        source_span="Harry is blue",
+    )
+
+    antecedent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "smart"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="Smart people",
+    )
+
+    consequent = assertion(
+        predicate="PropertyOf",
+        relation=None,
+        values=("$x", "rough"),
+        roles=("entity", "property"),
+        fallback=False,
+        factuality="hypothetical",
+        source_span="rough",
+    )
+
+    output = json.dumps(
+        {
+            "assertions": [standalone],
+            "rules": [
+                {
+                    "antecedents": [antecedent],
+                    "consequents": [consequent],
+                    "source_span": "Smart people are rough.",
+                }
+            ],
+        }
+    )
+
+    parser, _ = make_teacher(output)
+
+    result = parser.generate_structured("Harry is blue. Smart people are rough.")
+
+    assert len(result.assertions) == 1
+    assert result.assertions[0].arguments[0].value == "Harry"
+
+
+def test_resolves_rule_pronoun_to_unique_generic_participant() -> None:
+    first = assertion(
+        predicate="Evaluation",
+        relation="see",
+        values=("someone", "rabbit"),
+        roles=("agent", "patient"),
+        fallback=True,
+        factuality="hypothetical",
+        source_span="someone sees the rabbit",
+    )
+
+    second = assertion(
+        predicate="Evaluation",
+        relation="need",
+        values=("rabbit", "bear"),
+        roles=("agent", "patient"),
+        fallback=True,
+        factuality="hypothetical",
+        source_span="the rabbit needs the bear",
+    )
+
+    consequent = assertion(
+        predicate="Evaluation",
+        relation="need",
+        values=("they", "bear"),
+        roles=("agent", "patient"),
+        fallback=True,
+        factuality="hypothetical",
+        polarity="negative",
+        source_span="they do not need the bear",
+    )
+
+    output = json.dumps(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [first, second],
+                    "consequents": [consequent],
+                    "source_span": (
+                        "If someone sees the rabbit and the rabbit needs "
+                        "the bear then they do not need the bear."
+                    ),
+                }
+            ],
+        }
+    )
+
+    parser, _ = make_teacher(output)
+
+    atoms = parser.parse(
+        "If someone sees the rabbit and the rabbit needs "
+        "the bear then they do not need the bear."
+    )
+
+    assert [str(atom) for atom in atoms] == [
+        (
+            "(Implies "
+            "(And "
+            "(Evaluation see (List someone rabbit)) "
+            "(Evaluation need (List rabbit bear))) "
+            "(Not (Evaluation need (List someone bear))))"
+        )
+    ]
+
+
+def test_rejects_ambiguous_pronoun_inside_rule() -> None:
+    first = assertion(
+        predicate="Evaluation",
+        relation="see",
+        values=("someone", "something"),
+        roles=("agent", "patient"),
+        fallback=True,
+        factuality="hypothetical",
+        source_span="someone sees something",
+    )
+
+    consequent = assertion(
+        predicate="Evaluation",
+        relation="leave",
+        values=("they",),
+        roles=("agent",),
+        fallback=True,
+        factuality="hypothetical",
+        source_span="they leave",
+    )
+
+    output = json.dumps(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [first],
+                    "consequents": [consequent],
+                    "source_span": ("If someone sees something then they leave."),
+                }
+            ],
+        }
+    )
+
+    parser, _ = make_teacher(output)
+
+    with pytest.raises(
+        SemanticParseError,
+        match="Unresolved pronoun inside conditional rule",
+    ):
+        parser.generate_structured("If someone sees something then they leave.")

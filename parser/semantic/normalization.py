@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 
-from parser.semantic.schema import SemanticParseResult
+from parser.semantic.schema import SemanticAssertion, SemanticParseResult
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _NUMERIC_PREFIX_RE = re.compile(r"^[0-9]")
@@ -37,18 +37,59 @@ def _normalize_phrase(value: str, field: str) -> str:
 def normalize_symbol(value: str, field: str = "symbol") -> str:
     """Convert a phrase into one MeTTa-safe symbol.
 
-    This performs only deterministic representation cleanup:
-    - whitespace -> underscore
+    This performs deterministic representation cleanup:
+    - Unicode is normalized
+    - whitespace becomes underscores
     - commas in numeric values are removed
-    - decimal points are converted to underscores
-    - percent signs are expanded to 'percent'
+    - decimal points become underscores
+    - percent signs become ``percent``
+    - apostrophes and other punctuation become separators
+    - unsupported Unicode characters are transliterated where possible
+    - repeated underscores are collapsed
     """
     normalized = _normalize_phrase(value, field)
+    if (
+        normalized.startswith("$")
+        and len(normalized) > 1
+        and (normalized[1].isalpha() or normalized[1] == "_")
+    ):
+        variable_name = normalized[1:]
+
+        variable_name = unicodedata.normalize("NFKD", variable_name)
+        variable_name = variable_name.encode("ascii", "ignore").decode("ascii")
+
+        variable_name = re.sub(
+            r"[^A-Za-z0-9_]+",
+            "_",
+            variable_name,
+        )
+
+        variable_name = re.sub(
+            r"_+",
+            "_",
+            variable_name,
+        ).strip("_")
+
+        if not variable_name:
+            raise SemanticNormalizationError(f"{field} variable cannot be empty")
+
+        return f"${variable_name}"
+    normalized = normalized.replace("’", "'")
+    normalized = normalized.replace("‘", "'")
+
+    normalized = unicodedata.normalize("NFKD", normalized)
+    normalized = normalized.encode("ascii", "ignore").decode("ascii")
 
     normalized = normalized.replace(",", "")
     normalized = normalized.replace("%", "_percent")
     normalized = normalized.replace(".", "_")
-    normalized = normalized.replace(" ", "_")
+    normalized = normalized.replace("&", "_and_")
+
+    normalized = re.sub(
+        r"[^A-Za-z0-9_]+",
+        "_",
+        normalized,
+    )
 
     normalized = re.sub(r"_+", "_", normalized).strip("_")
 
@@ -87,6 +128,73 @@ def normalize_argument_value(value: str, role: str) -> str:
     return normalized
 
 
+def _normalize_assertion(
+    assertion: SemanticAssertion,
+    *,
+    normalized_aliases: Mapping[str, str],
+    normalized_types: Mapping[str, str],
+) -> None:
+    """Normalize one semantic assertion in place."""
+    if assertion.relation is not None:
+        assertion.relation = normalize_symbol(
+            assertion.relation.casefold(),
+            "relation",
+        )
+
+    for argument in assertion.arguments:
+        entity = _normalize_phrase(
+            argument.value,
+            "argument value",
+        )
+
+        entity = normalized_aliases.get(entity, entity)
+
+        expected_type = normalized_types.get(entity)
+
+        if (
+            expected_type is not None
+            and argument.type is not None
+            and _normalize_phrase(
+                argument.type,
+                "argument type",
+            ).casefold()
+            != expected_type.casefold()
+        ):
+            raise SemanticNormalizationError(
+                f"Alias/type conflict for {entity!r}: expected "
+                f"{expected_type!r}, got {argument.type!r}"
+            )
+
+        argument.role = _normalize_phrase(
+            argument.role,
+            "argument role",
+        ).casefold()
+
+        argument.value = normalize_argument_value(
+            entity,
+            argument.role,
+        )
+
+        if argument.type is not None:
+            argument.type = _normalize_phrase(
+                argument.type,
+                "argument type",
+            )
+
+    assertion.source_span = _normalize_phrase(
+        assertion.source_span,
+        "source span",
+    )
+
+    assertion.alternatives = [
+        _normalize_phrase(
+            alternative,
+            "alternative",
+        )
+        for alternative in assertion.alternatives
+    ]
+
+
 def normalize_semantic_result(
     result: SemanticParseResult,
     *,
@@ -117,63 +225,30 @@ def normalize_semantic_result(
     }
 
     for assertion in normalized_result.assertions:
-        if assertion.relation is not None:
-            assertion.relation = normalize_symbol(
-                assertion.relation.casefold(),
-                "relation",
-            )
-
-        for argument in assertion.arguments:
-            entity = _normalize_phrase(
-                argument.value,
-                "argument value",
-            )
-
-            entity = normalized_aliases.get(entity, entity)
-
-            expected_type = normalized_types.get(entity)
-
-            if (
-                expected_type is not None
-                and argument.type is not None
-                and _normalize_phrase(
-                    argument.type,
-                    "argument type",
-                ).casefold()
-                != expected_type.casefold()
-            ):
-                raise SemanticNormalizationError(
-                    f"Alias/type conflict for {entity!r}: expected "
-                    f"{expected_type!r}, got {argument.type!r}"
-                )
-
-            argument.role = _normalize_phrase(
-                argument.role,
-                "argument role",
-            ).casefold()
-
-            argument.value = normalize_argument_value(
-                entity,
-                argument.role,
-            )
-
-            if argument.type is not None:
-                argument.type = _normalize_phrase(
-                    argument.type,
-                    "argument type",
-                )
-
-        assertion.source_span = _normalize_phrase(
-            assertion.source_span,
-            "source span",
+        _normalize_assertion(
+            assertion,
+            normalized_aliases=normalized_aliases,
+            normalized_types=normalized_types,
         )
 
-        assertion.alternatives = [
-            _normalize_phrase(
-                alternative,
-                "alternative",
+    for rule in normalized_result.rules:
+        rule.source_span = _normalize_phrase(
+            rule.source_span,
+            "rule source span",
+        )
+
+        for assertion in rule.antecedents:
+            _normalize_assertion(
+                assertion,
+                normalized_aliases=normalized_aliases,
+                normalized_types=normalized_types,
             )
-            for alternative in assertion.alternatives
-        ]
+
+        for assertion in rule.consequents:
+            _normalize_assertion(
+                assertion,
+                normalized_aliases=normalized_aliases,
+                normalized_types=normalized_types,
+            )
 
     return normalized_result

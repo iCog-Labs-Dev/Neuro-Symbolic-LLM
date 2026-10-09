@@ -15,8 +15,8 @@ def test_loads_active_profile_from_project_config() -> None:
 
 
 def test_can_select_named_profile() -> None:
-    profile = load_model_profile(profile_name="ollama")
+    profile = load_model_profile(profile_name="ollama_qwen3_8b")
 
-    assert profile.name == "ollama"
+    assert profile.name == "ollama_qwen3_8b"
     assert profile.provider == "ollama"
     assert profile.model

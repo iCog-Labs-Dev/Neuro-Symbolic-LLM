@@ -224,8 +224,8 @@ class TestValidate:
         "expression",
         [
             "(Has dog invalid-symbol!)",
-            "(Has dog $lowercase)",
             "(Has dog $)",
+            "(Has dog $1)",
         ],
     )
     def test_rejects_invalid_symbols(self, expression):
@@ -233,6 +233,21 @@ class TestValidate:
 
         assert not ok
         assert "Invalid symbol" in err
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "(Has dog $x)",
+            "(Has dog $lowercase)",
+            "(Has dog $person)",
+            "(Has dog $something_1)",
+            "(Has dog $X)",
+        ],
+    )
+    def test_accepts_valid_variables(self, expression):
+        ok, err = validate_metta_string(expression)
+
+        assert ok, err
 
     def test_accepts_case_preserved_entity_symbols(self):
         ok, err = validate_metta_string("(Has Ben Car)")

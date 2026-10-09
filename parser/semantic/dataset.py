@@ -47,6 +47,8 @@ class DistillationRecord:
     teacher_model: str
     prompt_version: str
     semantic_contract_version: str
+    source_dataset: str | None = None
+    source_domain: str | None = None
     metta: tuple[str, ...] | None = None
 
 
@@ -79,6 +81,9 @@ class SemanticDatasetBuilder:
     def generate(
         self,
         sentences: Iterable[str],
+        *,
+        source_dataset: str | None = None,
+        source_domain: str | None = None,
     ) -> tuple[list[DistillationRecord], list[RejectedRecord]]:
         """Parse sentences and separate accepted from rejected examples."""
         accepted = []
@@ -142,6 +147,8 @@ class SemanticDatasetBuilder:
                     teacher_model=self._parser.model_name,
                     prompt_version=self._parser.prompt_version,
                     semantic_contract_version=SEMANTIC_CONTRACT_VERSION,
+                    source_dataset=source_dataset,
+                    source_domain=source_domain,
                     metta=tuple(expressions) if self._include_metta else None,
                 )
             )

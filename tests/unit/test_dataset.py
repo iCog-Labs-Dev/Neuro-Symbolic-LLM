@@ -305,7 +305,8 @@ class TestSemanticDatasetBuilder:
         assert accepted[0].metta is None
         assert accepted[0].teacher_provider == "fake-teacher"
         assert accepted[0].prompt_version == "2.0.0"
-        assert accepted[0].semantic_contract_version == "1.0.0"
+        assert accepted[0].semantic_contract_version == "1.1.0"
+
         assert len(rejected) == 2
 
         assert rejected[0].text == "Unknown statement."
@@ -313,6 +314,20 @@ class TestSemanticDatasetBuilder:
 
         assert rejected[1].text == "   "
         assert rejected[1].error == "The sentence cannot be empty"
+
+    def test_preserves_source_dataset_and_domain(self) -> None:
+        builder = SemanticDatasetBuilder(make_parser())
+
+        accepted, rejected = builder.generate(
+            ["A dog is an animal."],
+            source_dataset="proofwriter",
+            source_domain="logical_reasoning",
+        )
+
+        assert rejected == []
+        assert len(accepted) == 1
+        assert accepted[0].source_dataset == "proofwriter"
+        assert accepted[0].source_domain == "logical_reasoning"
 
     def test_normalizes_text_and_keeps_all_structured_assertions(
         self,
@@ -370,7 +385,9 @@ class TestSemanticDatasetBuilder:
         accepted, _ = builder.generate(
             [
                 "A dog is an animal.",
-            ]
+            ],
+            source_dataset="proofwriter",
+            source_domain="logical_reasoning",
         )
 
         output_path = tmp_path / "dataset.jsonl"
@@ -391,7 +408,9 @@ class TestSemanticDatasetBuilder:
         assert "metta" not in record
 
         assert record["teacher_model"] == "teacher-model"
-        assert record["semantic_contract_version"] == "1.0.0"
+        assert record["semantic_contract_version"] == "1.1.0"
+        assert record["source_dataset"] == "proofwriter"
+        assert record["source_domain"] == "logical_reasoning"
 
     def test_writes_an_empty_file_and_creates_parent_directories(
         self,
@@ -805,7 +824,9 @@ def test_conversion_skips_malformed_shapes_and_keeps_valid_record(tmp_path):
     target = {
         "assertions": [
             assertion(
-                predicate="Has", values=("dog", "fur"), roles=("owner", "possessed")
+                predicate="Has",
+                values=("dog", "fur"),
+                roles=("owner", "possessed"),
             )
         ]
     }
@@ -820,9 +841,10 @@ def test_conversion_skips_malformed_shapes_and_keeps_valid_record(tmp_path):
     ]
 
     source.write_text(
-        "\n".join(json.dumps(record) for record in records), encoding="utf-8"
+        "\n".join(json.dumps(record) for record in records),
+        encoding="utf-8",
     )
     pairs = structured_to_pairs(str(source), str(output))
-    assert len(pairs) == 1
 
+    assert len(pairs) == 1
     assert pairs[0]["input"] == "Dog"

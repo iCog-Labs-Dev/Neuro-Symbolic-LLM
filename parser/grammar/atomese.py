@@ -108,7 +108,7 @@ def _load_atomese_predicates() -> (
 ARITY, VARIABLE_ARITY = _load_atomese_predicates()
 PREDICATES = frozenset(ARITY | VARIABLE_ARITY)
 
-VARIABLE_RE = re.compile(r"^\$[A-Z][A-Z0-9_]*$")
+VARIABLE_RE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 CONCEPT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 VAR_NAMES = ["$X", "$Y", "$Z", "$W", "$V", "$U"]
 

@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable
 
 from parser.grammar.atomese import LinkAtom, parse_atom, validate_metta_string
-from parser.semantic.schema import SemanticParseResult
+from parser.semantic.schema import SemanticAssertion, SemanticParseResult
 
 _BARE_SYMBOL_RE = re.compile(r"^[^\s()]+$")
 
@@ -25,33 +25,70 @@ def _require_bare_symbol(value: str, field: str) -> str:
     return value
 
 
-def render_metta(result: SemanticParseResult) -> list[str]:
-    """Render validated structured assertions as MeTTa expressions."""
+def _render_assertion(assertion: SemanticAssertion) -> str:
+    """Render one semantic assertion as MeTTa."""
+    argument_values = [
+        _require_bare_symbol(
+            argument.value,
+            "argument value",
+        )
+        for argument in assertion.arguments
+    ]
+
+    arguments = " ".join(argument_values)
+
+    if assertion.predicate == "Evaluation":
+        if assertion.relation is None:
+            raise MettaRenderError("Evaluation requires a relation")
+
+        relation = _require_bare_symbol(
+            assertion.relation,
+            "relation",
+        )
+
+        argument_list = f"(List {arguments})" if arguments else "(List)"
+
+        expression = f"(Evaluation {relation} {argument_list})"
+
+    else:
+        predicate = _require_bare_symbol(
+            assertion.predicate,
+            "predicate",
+        )
+
+        expression = f"({predicate} {arguments})"
+
+    if assertion.polarity == "negative":
+        expression = f"(Not {expression})"
+
+    return expression
+
+
+def render_metta(
+    result: SemanticParseResult,
+) -> list[str]:
+    """Render validated structured semantics as MeTTa expressions."""
     expressions: list[str] = []
 
     for assertion in result.assertions:
-        argument_values = [
-            _require_bare_symbol(argument.value, "argument value")
-            for argument in assertion.arguments
-        ]
-        arguments = " ".join(argument_values)
+        expressions.append(_render_assertion(assertion))
 
-        if assertion.predicate == "Evaluation":
-            if assertion.relation is None:
-                raise MettaRenderError("Evaluation requires a relation")
+    for rule in result.rules:
+        antecedents = [_render_assertion(assertion) for assertion in rule.antecedents]
 
-            relation = _require_bare_symbol(assertion.relation, "relation")
+        consequents = [_render_assertion(assertion) for assertion in rule.consequents]
 
-            argument_list = f"(List {arguments})" if arguments else "(List)"
-            expression = f"(Evaluation {relation} {argument_list})"
+        if len(antecedents) == 1:
+            antecedent = antecedents[0]
         else:
-            predicate = _require_bare_symbol(assertion.predicate, "predicate")
-            expression = f"({predicate} {arguments})"
+            antecedent = "(And " + " ".join(antecedents) + ")"
 
-        if assertion.polarity == "negative":
-            expression = f"(Not {expression})"
+        if len(consequents) == 1:
+            consequent = consequents[0]
+        else:
+            consequent = "(And " + " ".join(consequents) + ")"
 
-        expressions.append(expression)
+        expressions.append(f"(Implies {antecedent} {consequent})")
 
     return expressions
 
@@ -62,6 +99,7 @@ def validate_rendered_metta(expressions: Iterable[str]) -> list[LinkAtom]:
 
     for expression in expressions:
         is_valid, error = validate_metta_string(expression)
+
         if not is_valid:
             raise MettaRenderError(f"Rendered invalid MeTTa: {error}")
 
@@ -71,8 +109,10 @@ def validate_rendered_metta(expressions: Iterable[str]) -> list[LinkAtom]:
             raise MettaRenderError(
                 f"Rendered malformed MeTTa: {expression!r}"
             ) from error
+
         if not isinstance(atom, LinkAtom):
             raise MettaRenderError("Rendered MeTTa must be a top-level LinkAtom")
+
         atoms.append(atom)
 
     return atoms

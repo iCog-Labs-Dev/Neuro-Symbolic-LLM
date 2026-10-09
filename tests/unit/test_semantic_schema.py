@@ -350,3 +350,198 @@ def test_negative_hypothetical_assertion_preserves_both_dimensions() -> None:
 
     assert assertion.polarity == "negative"
     assert assertion.factuality == "hypothetical"
+
+
+def test_accepts_rule_only_semantic_result() -> None:
+    result = SemanticParseResult.model_validate(
+        {
+            "assertions": [],
+            "rules": [
+                {
+                    "antecedents": [
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "someone",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "red",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "someone is red",
+                            "alternatives": [],
+                        }
+                    ],
+                    "consequents": [
+                        {
+                            "predicate": "PropertyOf",
+                            "relation": None,
+                            "arguments": [
+                                {
+                                    "value": "someone",
+                                    "role": "entity",
+                                    "type": None,
+                                },
+                                {
+                                    "value": "nice",
+                                    "role": "property",
+                                    "type": None,
+                                },
+                            ],
+                            "fallback": False,
+                            "polarity": "positive",
+                            "factuality": "hypothetical",
+                            "confidence": 0.99,
+                            "source_span": "they are nice",
+                            "alternatives": [],
+                        }
+                    ],
+                    "source_span": ("If someone is red then they are nice."),
+                }
+            ],
+        }
+    )
+
+    assert result.assertions == []
+    assert len(result.rules) == 1
+    assert len(result.rules[0].antecedents) == 1
+    assert len(result.rules[0].consequents) == 1
+
+
+def test_accepts_assertions_and_rules_together() -> None:
+    data = valid_result_data()
+
+    data["rules"] = [
+        {
+            "antecedents": [
+                {
+                    "predicate": "PropertyOf",
+                    "relation": None,
+                    "arguments": [
+                        {
+                            "value": "someone",
+                            "role": "entity",
+                            "type": None,
+                        },
+                        {
+                            "value": "red",
+                            "role": "property",
+                            "type": None,
+                        },
+                    ],
+                    "fallback": False,
+                    "polarity": "positive",
+                    "factuality": "hypothetical",
+                    "confidence": 0.99,
+                    "source_span": "someone is red",
+                    "alternatives": [],
+                }
+            ],
+            "consequents": [
+                {
+                    "predicate": "PropertyOf",
+                    "relation": None,
+                    "arguments": [
+                        {
+                            "value": "someone",
+                            "role": "entity",
+                            "type": None,
+                        },
+                        {
+                            "value": "nice",
+                            "role": "property",
+                            "type": None,
+                        },
+                    ],
+                    "fallback": False,
+                    "polarity": "positive",
+                    "factuality": "hypothetical",
+                    "confidence": 0.99,
+                    "source_span": "they are nice",
+                    "alternatives": [],
+                }
+            ],
+            "source_span": ("If someone is red then they are nice."),
+        }
+    ]
+
+    result = SemanticParseResult.model_validate(data)
+
+    assert len(result.assertions) == 1
+    assert len(result.rules) == 1
+
+
+def test_rejects_empty_semantic_result() -> None:
+    with pytest.raises(ValidationError):
+        SemanticParseResult.model_validate(
+            {
+                "assertions": [],
+                "rules": [],
+            }
+        )
+
+
+def test_rejects_rule_without_antecedents() -> None:
+    with pytest.raises(ValidationError):
+        SemanticParseResult.model_validate(
+            {
+                "assertions": [],
+                "rules": [
+                    {
+                        "antecedents": [],
+                        "consequents": [
+                            {
+                                "predicate": "Evaluation",
+                                "relation": "work",
+                                "arguments": [],
+                                "fallback": True,
+                                "polarity": "positive",
+                                "factuality": "hypothetical",
+                                "confidence": 0.99,
+                                "source_span": "it works",
+                                "alternatives": [],
+                            }
+                        ],
+                        "source_span": ("If tested then it works."),
+                    }
+                ],
+            }
+        )
+
+
+def test_rejects_rule_without_consequents() -> None:
+    with pytest.raises(ValidationError):
+        SemanticParseResult.model_validate(
+            {
+                "assertions": [],
+                "rules": [
+                    {
+                        "antecedents": [
+                            {
+                                "predicate": "Evaluation",
+                                "relation": "test",
+                                "arguments": [],
+                                "fallback": True,
+                                "polarity": "positive",
+                                "factuality": "hypothetical",
+                                "confidence": 0.99,
+                                "source_span": "If tested",
+                                "alternatives": [],
+                            }
+                        ],
+                        "consequents": [],
+                        "source_span": ("If tested then it works."),
+                    }
+                ],
+            }
+        )
