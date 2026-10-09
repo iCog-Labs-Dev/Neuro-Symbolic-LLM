@@ -20,7 +20,7 @@ def test_variable_length_batch_preserves_targets():
         {"input": "Dog.", "label": '{"assertions": []}'},
         {"input": "A longer sentence.", "label": '{"assertions": [1, 2]}'},
     ]
-    dataset = StudentDataset(pairs, tokenizer, max_length=512)
+    dataset = StudentDataset(pairs, tokenizer, max_length=4096)
     batch = next(
         iter(DataLoader(dataset, batch_size=2, collate_fn=StudentBatchCollator(0)))
     )
@@ -57,6 +57,6 @@ def test_malformed_record_shapes_are_skipped(capsys):
         {"input": "Dog", "label": "null"},
         {"input": "Dog", "label": "{}"},
     ]
-    dataset = StudentDataset(pairs, CharacterTokenizer(), max_length=512)
+    dataset = StudentDataset(pairs, CharacterTokenizer(), max_length=4096)
     assert len(dataset) == 1
     assert "Skipped 6 invalid examples" in capsys.readouterr().out
