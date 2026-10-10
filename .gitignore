@@ -52,3 +52,6 @@ Thumbs.db
 *.tmp
 *.bak
 *.orig
+
+# Experiment run artifacts (stages/results.py)
+runs/

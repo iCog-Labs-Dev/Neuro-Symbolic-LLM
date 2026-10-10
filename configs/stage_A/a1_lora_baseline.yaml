@@ -1,0 +1,50 @@
+# Hidden-state residual adapter (not weight-level LoRA). See stages/stage_A/README.md.
+# Keys mirror ResidualConfig / A1Config / TrainingConfig / DomainConfig; unknown keys are rejected.
+adapter:
+  rank: 16
+  activation: identity  # identity | gelu | relu | tanh
+  alpha: null
+  init_std: null
+  late_start: null
+  late_end: null
+  layers: null
+  seed: 0
+objective:
+  lambda_kl: 0.0
+  lambda_wd: 0.0
+training:
+  model: gpt2
+  seq_len: 128
+  batch_size: 8
+  steps: 200            # per domain, unless the domain sets its own
+  learning_rate: 1.0e-3
+  eval_batches: 8
+  log_every: 10
+  seed: 0
+  reset_optimizer: true
+  output_dir: runs
+# Three related legal domains (LexGLUE) trained in order: shared legal language,
+domains:
+  - name: eurlex
+    dataset: coastalcph/lex_glue
+    dataset_config: eurlex
+    train_split: "train[:5000]"
+    eval_split: "validation[:500]"
+    test_split: "test[:500]"
+    separator: "\n\n"
+
+  - name: ledgar
+    dataset: coastalcph/lex_glue
+    dataset_config: ledgar
+    train_split: "train[:20000]"
+    eval_split: "validation[:2000]"
+    test_split: "test[:2000]"
+    separator: "\n\n"
+
+  - name: scotus
+    dataset: coastalcph/lex_glue
+    dataset_config: scotus
+    train_split: "train[:500]"
+    eval_split: "validation[:200]"
+    test_split: "test[:200]"
+    separator: "\n\n"
