@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, overload
 
 import jax
-import jax.numpy as jnp
 import torch
 
 from frozenllm.substrate.architecture import (
@@ -28,6 +27,7 @@ from frozenllm.substrate.memory import (
     get_memory_status,
     maybe_reduce_batch_size,
 )
+from metrics.performance import cross_entropy_loss, kl_to_base, perplexity
 
 from .loader import load_tokenizer, load_torchax_model
 from .torchax_backend import (
@@ -249,22 +249,125 @@ class FrozenSubstrate:
         return ForwardResult(logits=logits_jax, intermediates=intermediates)
 
     # ── loss computation ────────────────────────────────────────────────────
+    @overload
+    @staticmethod
+    def compute_loss(
+        logits: jax.Array | None = ...,
+        labels: jax.Array | None = ...,
+        *args: Any,
+        losses: str | Sequence[str] = ...,
+        base_logits: jax.Array | None = ...,
+        weights: Mapping[str, float | jax.Array] | None = ...,
+        return_components: Literal[False] = ...,
+        **kwargs: Any,
+    ) -> jax.Array: ...
+
+    @overload
+    @staticmethod
+    def compute_loss(
+        logits: jax.Array | None = ...,
+        labels: jax.Array | None = ...,
+        *args: Any,
+        losses: str | Sequence[str] = ...,
+        base_logits: jax.Array | None = ...,
+        weights: Mapping[str, float | jax.Array] | None = ...,
+        return_components: Literal[True] = ...,
+        **kwargs: Any,
+    ) -> tuple[jax.Array, dict[str, jax.Array]]: ...
 
     @staticmethod
-    def compute_loss(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        shift_logits = logits[:, :-1, :]
-        shift_labels = labels[:, 1:]
+    def compute_loss(
+        logits: jax.Array | None = None,
+        labels: jax.Array | None = None,
+        *args: Any,
+        losses: str | Sequence[str] = ("CE",),
+        base_logits: jax.Array | None = None,
+        weights: Mapping[str, float | jax.Array] | None = None,
+        return_components: bool = False,
+        **kwargs: Any,
+    ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
+        # Handle case where first argument(s) might be loss name strings
+        actual_logits = logits
+        actual_labels = labels
+        raw_losses: list[str] = []
 
-        log_probs = jax.nn.log_softmax(shift_logits, axis=-1)
-        mask = shift_labels != -100
-        safe_labels = jnp.where(mask, shift_labels, 0)
+        if isinstance(actual_logits, str):
+            raw_losses.append(actual_logits)
+            actual_logits = kwargs.get("logits", kwargs.get("adapted_logits"))
+        if isinstance(actual_labels, str):
+            raw_losses.append(actual_labels)
+            actual_labels = kwargs.get("labels")
 
-        gathered_log_probs = jnp.take_along_axis(
-            log_probs, safe_labels[..., None], axis=-1
-        ).squeeze(-1)
+        if isinstance(losses, str):
+            raw_losses.append(losses)
+        elif isinstance(losses, tuple | list | set):
+            raw_losses.extend(losses)
 
-        loss = -jnp.sum(gathered_log_probs * mask) / jnp.maximum(1.0, jnp.sum(mask))
-        return loss
+        for a in args:
+            if isinstance(a, str):
+                raw_losses.append(a)
+            elif isinstance(a, tuple | list | set):
+                raw_losses.extend(a)
+
+        norm_losses = [name.strip().upper() for name in raw_losses]
+        if not norm_losses:
+            norm_losses = ["CE"]
+
+        # Handle evaluation metric: Perplexity
+        if len(norm_losses) == 1 and norm_losses[0] in ("PPL", "PERPLEXITY"):
+            if actual_logits is None or actual_labels is None:
+                raise ValueError(
+                    "Metric 'PPL' requires 'logits' and 'labels' to be provided."
+                )
+            return perplexity(cross_entropy_loss(actual_logits, actual_labels))
+        if "PPL" in norm_losses or "PERPLEXITY" in norm_losses:
+            raise ValueError(
+                "Perplexity ('PPL') is an evaluation metric and cannot be combined into total training loss."
+            )
+
+        components: list[jax.Array] = []
+        components_dict: dict[str, jax.Array] = {}
+        eff_adapted = (
+            actual_logits if actual_logits is not None else kwargs.get("adapted_logits")
+        )
+
+        for name in norm_losses:
+            w = 1.0
+            if weights is not None:
+                w = weights.get(name, weights.get(name.lower(), 1.0))
+
+            if name in ("CE", "CROSS_ENTROPY"):
+                if actual_logits is None:
+                    raise ValueError("Loss 'CE' requires 'logits' to be provided.")
+                if actual_labels is None:
+                    raise ValueError("Loss 'CE' requires 'labels' to be provided.")
+                raw_ce = cross_entropy_loss(actual_logits, actual_labels)
+                components_dict["ce"] = raw_ce
+                components.append(raw_ce * w if w != 1.0 else raw_ce)
+            elif name in ("KL", "KL_TO_BASE", "KL_DIV"):
+                if base_logits is None:
+                    raise ValueError("Loss 'KL' requires 'base_logits' to be provided.")
+                if eff_adapted is None:
+                    raise ValueError(
+                        "Loss 'KL' requires adapted 'logits' (or 'adapted_logits') to be provided."
+                    )
+                raw_kl = kl_to_base(base_logits, eff_adapted)
+                components_dict["kl"] = raw_kl
+                components.append(raw_kl * w if w != 1.0 else raw_kl)
+            else:
+                raise ValueError(
+                    f"Unknown or unsupported loss: {name!r}. Supported losses are: 'CE', 'KL'."
+                )
+
+        total_loss = (
+            components[0]
+            if len(components) == 1
+            else sum(components[1:], start=components[0])
+        )
+
+        if return_components:
+            return total_loss, components_dict
+        return total_loss
 
     # ── freezing guarantees ─────────────────────────────────────────────────
 

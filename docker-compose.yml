@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    image: neuro-symbolic-llm:latest
+    container_name: neuro-symbolic-llm-runner
+    working_dir: /app
+    volumes:
+      - .:/app
+      - nsllm-hf-cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
+    command: bash
+
+  test:
+    build: .
+    image: neuro-symbolic-llm:latest
+    working_dir: /app
+    volumes:
+      - .:/app
+      - nsllm-hf-cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
+    command: pytest
+
+volumes:
+  nsllm-hf-cache:
+    name: nsllm-hf-cache
