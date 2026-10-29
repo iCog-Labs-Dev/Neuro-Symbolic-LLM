@@ -1,4 +1,4 @@
-"""Producer metadata accompanying canonical semantic-document JSONL."""
+"""Producer metadata accompanying semantic parse-result JSONL."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from hybrid_miner.contracts import SemanticDocument
+    from parser.semantic.schema import SemanticParseResult
 
 
 def metadata_path(documents_path: str | Path) -> Path:
@@ -16,8 +16,9 @@ def metadata_path(documents_path: str | Path) -> Path:
     return path.with_name(f"{path.stem}.metadata.jsonl")
 
 
-def document_metadata(document: SemanticDocument, **fields: Any) -> dict[str, Any]:
+def document_metadata(result: SemanticParseResult, **fields: Any) -> dict[str, Any]:
     """Bind producer annotations to a document's identity and exact source."""
+    document = result.document
     return {
         "document_id": document.document_id,
         "corpus_id": document.corpus_id,
@@ -53,16 +54,16 @@ def load_document_metadata(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
 
 
 def source_metadata(
-    document: SemanticDocument, record: dict[str, Any]
+    result: SemanticParseResult, record: dict[str, Any]
 ) -> dict[str, str]:
-    expected = document_metadata(document)
+    expected = document_metadata(result)
     if any(record.get(field) != value for field, value in expected.items()):
         raise ValueError("Source metadata does not match the document")
-    result = {}
-    for field in ("source_dataset", "source_domain", "reference_context"):
+    output: dict[str, str] = {}
+    for field in ("source_dataset", "source_domain"):
         if field in record:
             value = record[field]
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} must be nonempty text")
-            result[field] = value
-    return result
+            output[field] = value
+    return output

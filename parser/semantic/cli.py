@@ -1,4 +1,4 @@
-"""One semantic-document CLI for teacher extraction, distillation and inference."""
+"""One semantic-parser CLI for teacher extraction, distillation and inference."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from parser.semantic.dataset import (
     write_pairs_jsonl,
 )
 from parser.semantic.model_config import build_reference_semantic_parser
+from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION, SemanticParseResult
 from parser.semantic.semantic_parser import (
     DistilledSemanticParser,
     ModelGenerationError,
@@ -48,7 +49,7 @@ def add_document_export_arguments(arguments: argparse.ArgumentParser) -> None:
         help="UTF-8 text with one sentence per line, or a JSONL source/pilot manifest",
     )
     arguments.add_argument(
-        "--output", required=True, type=Path, help="accepted canonical document JSONL"
+        "--output", required=True, type=Path, help="accepted parse-result JSONL"
     )
     arguments.add_argument(
         "--rejected-output",
@@ -73,7 +74,7 @@ def add_document_export_arguments(arguments: argparse.ArgumentParser) -> None:
     arguments.add_argument(
         "--asserted-only",
         action="store_true",
-        help="render asserted-only MeTTa in the sidecar; canonical documents remain complete",
+        help="render asserted-only MeTTa in the sidecar; parse results remain complete",
     )
     arguments.add_argument(
         "--resume", action="store_true", help="resume a matching interrupted export"
@@ -92,11 +93,6 @@ def add_document_export_arguments(arguments: argparse.ArgumentParser) -> None:
 
 def add_document_target_arguments(arguments: argparse.ArgumentParser) -> None:
     arguments.add_argument(
-        "--bundle-output",
-        type=Path,
-        help="export the exact ontology bundle used for validation",
-    )
-    arguments.add_argument(
         "--model-revision", help="model revision recorded in document provenance"
     )
     arguments.add_argument(
@@ -108,16 +104,15 @@ def add_document_target_arguments(arguments: argparse.ArgumentParser) -> None:
 
 
 def command_catalog(arguments: argparse.Namespace):
-    from parser.ontology.catalog import load_ontology_catalog
-    from parser.ontology.miner_bundle import load_catalog_bundle
+    from parser.ontology.catalog import load_manifest_catalog, load_ontology_catalog
 
     if getattr(arguments, "ontology_modules", None):
         return load_ontology_catalog(modules=arguments.ontology_modules)
     manifest = getattr(arguments, "ontology_bundle", None)
     return (
-        load_catalog_bundle(manifest)[0]
+        load_manifest_catalog(manifest)[0]
         if manifest is not None
-        else load_catalog_bundle()[0]
+        else load_manifest_catalog()[0]
     )
 
 
@@ -125,7 +120,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     """Create the semantic-parser command-line interface."""
     parser = argparse.ArgumentParser(
         prog="semantic-parser",
-        description="Convert source text into validated semantic documents.",
+        description="Convert source text into validated semantic parse results.",
         epilog="Use 'semantic-parser <command> --help' for command options.",
     )
     parser.add_argument(
@@ -139,14 +134,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("build-dataset", "export-documents"):
         command = commands.add_parser(
-            name, help="generate validated documents and optional student pairs"
+            name, help="generate validated parse results and optional student pairs"
         )
         add_document_export_arguments(command)
         command.add_argument(
             "--target",
-            choices=("semantic-document-v1",),
-            default="semantic-document-v1",
-            help="canonical extraction target",
+            choices=(SEMANTIC_CONTRACT_VERSION,),
+            default=SEMANTIC_CONTRACT_VERSION,
+            help="semantic contract version of the exported results",
         )
     parse = commands.add_parser(
         "parse", help="parse one sentence using the configured model"
@@ -161,18 +156,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--format",
         choices=("json", "metta"),
         default="json",
-        help="document JSON or a supported derived MeTTa view",
+        help="parse-result JSON or its derived MeTTa view",
     )
     add_catalog_arguments(parse)
     convert = commands.add_parser(
         "convert-to-pairs",
-        help="convert canonical JSONL documents to student training pairs",
+        help="convert parse-result JSONL to student training pairs",
     )
     convert.add_argument(
         "--input",
         required=True,
         type=Path,
-        help="canonical document JSONL; adjacent metadata is retained",
+        help="parse-result JSONL; adjacent metadata is retained",
     )
     convert.add_argument(
         "--output", required=True, type=Path, help="output input/label JSONL"
@@ -297,14 +292,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_document(document, output_format: str) -> None:
+def _print_document(result: SemanticParseResult, output_format: str) -> None:
+    """Print a parse result as JSON or as validated MeTTa expressions."""
     if output_format == "json":
-        print(document.canonical_json())
-    elif document.assertions or document.rules:
-        from parser.semantic.compatibility import render_document_view
+        print(result.model_dump_json())
+        return
+    from parser.semantic.metta_renderer import render_metta, validate_rendered_metta
 
-        for atom in render_document_view(document):
-            print(atom)
+    expressions = render_metta(result)
+    validate_rendered_metta(expressions)
+    for expression in expressions:
+        print(expression)
 
 
 def _run_parse(arguments: argparse.Namespace) -> None:
@@ -507,6 +505,16 @@ def _run_distill(arguments: argparse.Namespace) -> None:
     )
 
 
+def _metta_preview(result: SemanticParseResult) -> str:
+    """Return the MeTTa view of a result, or why it only has a JSON form."""
+    from parser.semantic.metta_renderer import MettaRenderError, render_metta
+
+    try:
+        return " ".join(render_metta(result)) or "(no expressions)"
+    except MettaRenderError as error:
+        return f"(JSON only: {error})"
+
+
 def _read_evaluation_pairs(path: Path, catalog) -> list[dict]:
     pairs = []
     with path.open(encoding="utf-8") as file:
@@ -527,10 +535,7 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
     from datetime import datetime, timezone
 
     from parser.semantic.catalog_document_cli import run_export
-    from parser.semantic.catalog_student import (
-        document_target,
-        validate_catalog_student_pair,
-    )
+    from parser.semantic.catalog_student import validate_catalog_student_pair
     from parser.student.train import train
 
     if not 0 <= arguments.min_acceptance <= 1:
@@ -556,16 +561,13 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
         raise ValueError(
             "Existing splits are not regenerated from new input; use --force"
         )
-    if not cached:
+    if cached:
+        print(f"Using existing splits in {root / 'splits'}")
+    else:
+        print("Step 1: Teacher extraction")
         documents, pairs = root / "documents.jsonl", root / "pairs.jsonl"
         completed_export = arguments.resume and all(
-            path.is_file()
-            for path in (
-                documents,
-                pairs,
-                root / "rejected.jsonl",
-                root / "ontology.bundle.json",
-            )
+            path.is_file() for path in (documents, pairs, root / "rejected.jsonl")
         )
         if not completed_export:
             if root.exists() and not arguments.resume:
@@ -600,7 +602,6 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
                     output=documents,
                     rejected_output=root / "rejected.jsonl",
                     student_pairs_output=pairs,
-                    bundle_output=root / "ontology.bundle.json",
                     ontology_bundle=arguments.ontology_bundle,
                     ontology_modules=None,
                     model_revision=None,
@@ -628,6 +629,7 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
             raise ValueError(
                 "Accepted data does not meet --min-acceptance or contains no examples"
             )
+        print("\nStep 2: Split train / validation / test")
         _run_split_pairs(
             argparse.Namespace(
                 input=pairs,
@@ -647,8 +649,11 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
     verify_split_overlap(train_pairs, val_pairs, test_pairs)
     if not train_pairs or not test_pairs:
         raise ValueError("Need nonempty source-disjoint training and test sets")
-    if not arguments.skip_training:
-        from parser.ontology.miner_bundle import load_catalog_bundle
+    print("\nStep 3: Train student model")
+    if arguments.skip_training:
+        print(f"  Skipping training; using {model_dir}")
+    else:
+        from parser.ontology.catalog import load_manifest_catalog
         from parser.student.train import load_config
 
         training_config = (
@@ -659,7 +664,7 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
         manifest = training_config["data"].get("ontology_bundle_manifest")
         if not manifest:
             raise ValueError("Training configuration requires an ontology manifest")
-        training_catalog, _ = load_catalog_bundle(Path(manifest))
+        training_catalog, _ = load_manifest_catalog(Path(manifest))
         if (
             training_catalog.versions != catalog.versions
             or training_catalog.signatures() != catalog.signatures()
@@ -681,28 +686,29 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
                 **options,
             )
         )
+    print("\nStep 4: Evaluate on the held-out test set")
     student = DistilledSemanticParser.from_pretrained(str(model_dir), catalog=catalog)
     valid = exact = total = 0
     for pair in test_pairs:
         _, _, expected = validate_catalog_student_pair(pair, catalog=catalog)
         total += 1
+        sentence = pair["input"]
         try:
-            document = student.parse(
-                pair["input"], context=pair.get("reference_context", "")
-            )
-            valid += 1
-            exact += int(document_target(document) == document_target(expected))
-            print(document.canonical_json())
+            result = student.parse(sentence, context=pair.get("reference_context", ""))
         except (ValueError, RuntimeError) as error:
-            print(f"Prediction rejected: {error}", file=sys.stderr)
-    print(
-        f"Validated documents: {valid}/{total}; exact target matches: {exact}/{total}"
-    )
-    print(
-        "Exact target matching is ID-sensitive; this is not a semantic equivalence metric."
-    )
+            print(f"  [FAIL] {sentence[:40]!r} -> {error}")
+            continue
+        valid += 1
+        matches = result.extraction == expected.extraction
+        exact += int(matches)
+        verdict = "MATCH" if matches else "MISMATCH"
+        print(f"  [{verdict}] {sentence[:40]!r} -> {_metta_preview(result)}")
+    print(f"\nResults: {valid}/{total} valid")
+    print(f"Exact extraction match: {exact}/{total} ({exact / total:.1%})")
+    print("Exact matching is ID-sensitive; it is not a semantic-equivalence score.")
     if arguments.test_sentence:
         _print_document(student.parse(arguments.test_sentence), "json")
+    print(f"\nModel: {model_dir}")
     return 0 if valid == total else 2
 
 

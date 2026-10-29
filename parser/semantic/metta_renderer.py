@@ -1,4 +1,21 @@
-"""Deterministic conversion from structured semantics into MeTTa atoms."""
+"""Deterministic conversion from a SemanticParseResult into MeTTa atoms.
+
+The MeTTa view writes entity IDs as symbols, so two entities never collapse
+into one name. It shows negation, obligation, permission, and if-then rules:
+
+- "Ethiopia is located in Africa." -> ``(LocatedIn ethiopia africa)``
+- "The Supplier delivered the Goods."
+  -> ``(Evaluation deliver (List supplier goods))``
+- "The Supplier shall deliver the Goods."
+  -> ``(Obligation (Evaluation deliver (List supplier goods)))``
+- "shall not" and "may not" both forbid the action:
+  ``(Obligation (Not ...))`` and ``(Not (Permission ...))``.
+
+Plain MeTTa cannot show how the source presents a claim, so a standalone
+opinion, speculation, or hypothetical is refused instead of being shown as a
+fact. Rule parts are always hypothetical; ``Implies`` already shows that. The
+JSON result remains the complete record.
+"""
 
 from __future__ import annotations
 
@@ -26,11 +43,11 @@ def _require_bare_symbol(value: str, field: str) -> str:
 
 
 def _render_assertion(assertion: SemanticAssertion) -> str:
-    """Render one semantic assertion as MeTTa."""
+    """Render one semantic assertion, with its negation and modality, as MeTTa."""
     argument_values = [
         _require_bare_symbol(
-            argument.value,
-            "argument value",
+            argument.entity_id,
+            "argument entity ID",
         )
         for argument in assertion.arguments
     ]
@@ -58,22 +75,55 @@ def _render_assertion(assertion: SemanticAssertion) -> str:
 
         expression = f"({predicate} {arguments})"
 
-    if assertion.polarity == "negative":
+    negative = assertion.polarity == "negative"
+
+    if assertion.modality == "obligation":
+        inner = f"(Not {expression})" if negative else expression
+        return f"(Obligation {inner})"
+
+    if assertion.modality == "permission":
+        expression = f"(Permission {expression})"
+
+    if negative:
         expression = f"(Not {expression})"
 
     return expression
 
 
+def _render_standalone(assertion: SemanticAssertion) -> str:
+    """Render a standalone assertion, refusing claims the source does not assert."""
+    if assertion.factuality != "asserted":
+        name = assertion.relation or assertion.predicate
+        raise MettaRenderError(
+            f"{name!r} is {assertion.factuality}; MeTTa would show it as a fact, "
+            "so use the JSON output"
+        )
+    return _render_assertion(assertion)
+
+
 def render_metta(
     result: SemanticParseResult,
+    *,
+    asserted_only: bool = False,
 ) -> list[str]:
-    """Render validated structured semantics as MeTTa expressions."""
+    """Render validated structured semantics as MeTTa expressions.
+
+    With ``asserted_only``, claims the source does not assert (opinion,
+    speculative, and hypothetical) and all rules are left out instead of being
+    refused.
+    """
+    extraction = result.extraction
     expressions: list[str] = []
 
-    for assertion in result.assertions:
-        expressions.append(_render_assertion(assertion))
+    for assertion in extraction.assertions:
+        if asserted_only and assertion.factuality != "asserted":
+            continue
+        expressions.append(_render_standalone(assertion))
 
-    for rule in result.rules:
+    if asserted_only:
+        return expressions
+
+    for rule in extraction.rules:
         antecedents = [_render_assertion(assertion) for assertion in rule.antecedents]
 
         consequents = [_render_assertion(assertion) for assertion in rule.consequents]

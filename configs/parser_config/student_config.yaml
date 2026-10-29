@@ -1,11 +1,12 @@
-# Document-target distillation; existing legacy checkpoints are not overwritten.
+# Extraction-target distillation (semantic contract 2.0.0); existing legacy
+# checkpoints are not overwritten.
 
 student:
   base_model: Qwen/Qwen2.5-1.5B-Instruct
   output_dir: models/semantic_document_parser
 
 data:
-  contract_version: semantic-document-v1
+  contract_version: "2.0.0"
   ontology_bundle_manifest: parser/ontology/bundles/semantic-extraction-v1.yaml
   val_split: 0.1
   # Measure complete prompt + label lengths; an integer sets a strict ceiling.

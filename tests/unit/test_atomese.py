@@ -1,10 +1,4 @@
-"""tests/unit/test_atomese.py
-
-Run with: python -m pytest tests/unit/test_atomese.py -v
-
-All tests must pass before writing any other symbolic code.
-These tests define exactly what the grammar does and does not accept.
-"""
+"""Unit tests for Atomese parsing, vocabulary validation, and templates."""
 
 from pathlib import Path
 
@@ -24,21 +18,15 @@ from parser.grammar.atomese import (
 )
 
 
-def test_rejects_predicate_defined_as_semantic_and_structural(
+def test_rejects_duplicate_name_between_structural_and_operator_sections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    schema_path = tmp_path / "predicate_schema.yaml"
-    schema_path.write_text(
-        """predicates:
-  Not:
-    arity: 1
-structural_predicates:
-  Not:
-    arity: 1
-""",
+    grammar_path = tmp_path / "atomese_grammar.yaml"
+    grammar_path.write_text(
+        "structural:\n  Not: {arity: 1}\noperators:\n  Not: {arity: 1}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(atomese, "_PREDICATE_SCHEMA_PATH", schema_path)
+    monkeypatch.setattr(atomese, "_GRAMMAR_PATH", grammar_path)
 
     with pytest.raises(
         ValueError,
@@ -100,13 +88,12 @@ class TestParseAtom:
         with pytest.raises(ValueError, match="parenthes"):
             parse_atom(expression)
 
-    def test_all_predicates_parse(self):
+    def test_parses_representative_supported_forms(self):
         cases = [
             "(Inheritance dog animal)",
             "(Evaluation likes (List john mary))",
             "(CanDo bird fly)",
-            "(On cup table)",
-            "(Cause rain flood)",
+            "(Causes rain flood)",
             "(Has dog fur)",
             "(PartOf wheel car)",
             "(StateOf world stage)",
@@ -114,7 +101,7 @@ class TestParseAtom:
             "(MemberOf alice team)",
             "(UsedFor knife cutting)",
             "(Before dawn sunrise)",
-            "(After sunrise dawn)",
+            "(During meeting week)",
         ]
         for expr in cases:
             a = parse_atom(expr)
@@ -124,7 +111,7 @@ class TestParseAtom:
         cases = [
             "(Inheritance dog animal)",
             "(Evaluation likes (List john mary))",
-            "(Cause rain flood)",
+            "(Causes rain flood)",
             "(Inheritance $X animal)",
             "(Evaluation $V (List $X $Y))",
         ]
@@ -167,12 +154,11 @@ class TestValidate:
         ok, err = validate_metta_string("")
         assert not ok
 
-    def test_all_valid_predicates(self):
+    def test_valid_catalog_predicates(self):
         cases = [
             "(Inheritance dog animal)",
             "(CanDo bird fly)",
-            "(On cup table)",
-            "(Cause rain flood)",
+            "(Causes rain flood)",
             "(Has dog fur)",
             "(PartOf wheel car)",
             "(StateOf world stage)",
@@ -180,7 +166,7 @@ class TestValidate:
             "(MemberOf alice team)",
             "(UsedFor knife cutting)",
             "(Before dawn sunrise)",
-            "(After sunrise dawn)",
+            "(During meeting week)",
         ]
         for expr in cases:
             ok, err = validate_metta_string(expr)
@@ -188,9 +174,9 @@ class TestValidate:
 
     @pytest.mark.parametrize(
         "predicate",
-        ["LocatedIn", "MemberOf", "UsedFor", "Before", "After"],
+        ["LocatedIn", "MemberOf", "UsedFor", "Before", "During"],
     )
-    def test_added_predicates_require_two_children(self, predicate):
+    def test_binary_catalog_relations_reject_wrong_arity(self, predicate):
         ok, err = validate_metta_string(f"({predicate} subject object extra)")
 
         assert not ok
@@ -282,8 +268,8 @@ class TestMatchTemplate:
         assert str(result["$X"]) == "dog"
 
     def test_two_variable_match(self):
-        t = parse_atom("(Cause $X $Y)")
-        g = parse_atom("(Cause rain flood)")
+        t = parse_atom("(Causes $X $Y)")
+        g = parse_atom("(Causes rain flood)")
         result = match_template(t, g)
         assert result is not None
         assert str(result["$X"]) == "rain"
@@ -291,7 +277,7 @@ class TestMatchTemplate:
 
     def test_predicate_mismatch(self):
         t = parse_atom("(Inheritance $X animal)")
-        g = parse_atom("(Cause rain flood)")
+        g = parse_atom("(Causes rain flood)")
         assert match_template(t, g) is None
 
     def test_fixed_child_mismatch(self):
@@ -341,7 +327,7 @@ class TestGeneralize:
         assert str(t) == "(Inheritance $X $Y)"
 
     def test_generalized_is_template(self):
-        g = parse_atom("(Cause rain flood)")
+        g = parse_atom("(Causes rain flood)")
         t = generalize(g, [0])
         assert is_template(t)
 
@@ -364,36 +350,35 @@ class TestCanonical:
         assert result.strip() == "not valid metta"
 
 
-@pytest.mark.parametrize("section", ["predicates", "structural_predicates"])
-def test_rejects_operator_name_collision(tmp_path, monkeypatch, section):
+@pytest.mark.parametrize("section", ["structural", "operators"])
+def test_rejects_grammar_name_collision_with_ontology_relation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str
+) -> None:
     import json
 
-    schema = {
-        "predicates": {},
-        "structural_predicates": {},
-        "operators": {"Has": {"arity": 1}},
-    }
-    schema[section] = {"Has": {"arity": 2}}
-    path = tmp_path / "schema.yaml"
-    path.write_text(json.dumps(schema), encoding="utf-8")
-    monkeypatch.setattr(atomese, "_PREDICATE_SCHEMA_PATH", path)
+    grammar: dict[str, dict[str, dict[str, int]]] = {"structural": {}, "operators": {}}
+    grammar[section] = {"Has": {"arity": 2}}
+    path = tmp_path / "atomese_grammar.yaml"
+    path.write_text(json.dumps(grammar), encoding="utf-8")
+    monkeypatch.setattr(atomese, "_GRAMMAR_PATH", path)
     with pytest.raises(ValueError, match="unique across sections: Has"):
         atomese._load_atomese_predicates()
 
 
-def test_distinct_operator_names_preserve_predicate_arities(tmp_path, monkeypatch):
-    path = tmp_path / "schema.yaml"
+def test_structural_and_operator_arities_load_with_catalog_relations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "atomese_grammar.yaml"
     path.write_text(
-        """predicates:
-  Has: {arity: 2}
-structural_predicates:
+        """structural:
   Not: {arity: 1}
 operators:
   And: {variable_arity: true, min_arity: 2}
 """,
         encoding="utf-8",
     )
-    monkeypatch.setattr(atomese, "_PREDICATE_SCHEMA_PATH", path)
+    monkeypatch.setattr(atomese, "_GRAMMAR_PATH", path)
     fixed, variable = atomese._load_atomese_predicates()
-    assert fixed == {"Has": 2, "Not": 1}
+    assert fixed["Has"] == 2
+    assert fixed["Not"] == 1
     assert variable == {"And": (2, None)}

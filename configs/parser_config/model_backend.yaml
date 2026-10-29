@@ -8,32 +8,39 @@ profiles:
   # Hosted APIs ───────────────────────────────────────────────────────────────────────────
   openai:
     provider: openai
-    model: gpt-4.1-mini
+    model: gpt-6.1-terra
     api_key_env: OPENAI_API_KEY
-    max_output_tokens: 512
+    # Model output limit; reasoning tokens count against it.
+    max_output_tokens: 128000
 
   anthropic:
     provider: anthropic
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     api_key_env: ANTHROPIC_API_KEY
-    max_tokens: 512
+    # The SDK requires streaming above about 21,333 tokens; this backend does not stream.
+    max_tokens: 21000
 
   gemini:
     provider: gemini
-    model: gemini-3.5-flash
+    model: gemini-3.8-flash
     api_key_env: GEMINI_API_KEY
-    max_output_tokens: 512
+    # Model output limit; thinking tokens count against it.
+    max_output_tokens: 65536
 
   # OpenAI-compatible APIs ──────────────────────────────────────────────────────────
   openai_compatible:
     # For vLLM, Together, Groq, or another OpenAI-compatible endpoint.
     provider: openai-compatible
-    model: your-provider-model-id
+    model_env: OPENAI_COMPATIBLE_MODEL_USED
     api_key_env: OPENAI_COMPATIBLE_API_KEY
     base_url_env: OPENAI_COMPATIBLE_BASE_URL
-    max_output_tokens: 512
+    # Raise to your server's output limit.
+    max_output_tokens: 8192
 
   # Local or self-hosted models ────────────────────────────────────────────────────────
+  # Ollama's default context window (4,096 tokens) is smaller than the catalog
+  # prompt (about 12,000 tokens) and Ollama silently cuts the prompt's start,
+  # so every Ollama profile sets num_ctx to cover the prompt and the output.
 
   ollama:
     # Retained profile spelling; it uses the same document parser.
@@ -41,43 +48,57 @@ profiles:
     model: qwen3:8b
     host_env: OLLAMA_HOST
     max_output_tokens: 512
+    num_ctx: 24576
 
   ollama_qwen05:
     provider: ollama
     model: qwen2.5:0.5b
     host_env: OLLAMA_HOST
-    max_output_tokens: 1024
+    max_output_tokens: 3072
+    num_ctx: 24576
+    temperature: 0.0
 
   ollama_qwen25_3b:
     provider: ollama
     model: qwen2.5:3b
     host_env: OLLAMA_HOST
-    max_output_tokens: 1024
+    max_output_tokens: 3072
+    num_ctx: 24576
+    temperature: 0.0
 
   ollama_qwen3_8b:
     provider: ollama
     model: qwen3:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 1024
+    max_output_tokens: 3072
+    num_ctx: 24576
+    think: false
+    temperature: 0.0
 
   ollama_gemma3_4b:
     provider: ollama
     model: gemma3:4b
     host_env: OLLAMA_HOST
-    max_output_tokens: 1024
+    max_output_tokens: 3072
+    num_ctx: 24576
+    temperature: 0.0
 
   ollama_llama31_8b:
     provider: ollama
     model: llama3.1:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 1024
+    max_output_tokens: 3072
+    num_ctx: 24576
+    temperature: 0.0
 
   ollama_catalog:
-    # Catalog-document extraction has its own output budget and settings.
+    # Teacher: extracts catalog documents to build the student's training data.
+    # Deterministic settings and a larger output budget for full documents.
     provider: ollama
     model: qwen3:8b
     host_env: OLLAMA_HOST
     max_output_tokens: 3072
+    num_ctx: 24576
     think: false
     temperature: 0.0
 
@@ -89,7 +110,8 @@ profiles:
     max_new_tokens: 512
 
   semantic_document_student:
-    # Requires a checkpoint trained for the document target.
+    # Student: a small local model fine-tuned on the teacher's output.
+    # Run `python -m parser.semantic train-student` first to create the checkpoint.
     provider: transformers-local
     model: models/semantic_document_parser
     max_new_tokens: 3072

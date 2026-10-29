@@ -1,6 +1,6 @@
-"""Integration tests for the parser-to-miner JSONL export boundary."""
+"""Integration tests for the export of parse results and the miner hand-off."""
 
-# ruff: noqa: E402, I001
+# ruff: noqa: E402
 
 import json
 from pathlib import Path
@@ -9,20 +9,22 @@ import pytest
 
 pytest.importorskip("hybrid_miner.contracts.semantic_document")
 
-from hybrid_miner.contracts.semantic_document import SemanticDocument  # noqa: E402
+from hybrid_miner.contracts.semantic_document import SemanticDocument
 
-from parser.ontology.catalog import load_ontology_catalog  # noqa: E402
-from parser.ontology.miner_bundle import load_catalog_bundle  # noqa: E402
-from parser.semantic import catalog_document_cli  # noqa: E402
-from parser.semantic import cli, model_config  # noqa: E402
-from parser.semantic.backends import CallableBackend  # noqa: E402
-from parser.semantic.catalog_document_export import (
-    export_catalog_documents,
-)  # noqa: E402
-from parser.semantic.catalog_document_parser import (  # noqa: E402
-    CatalogSemanticDocumentParser,
+from parser.ontology.catalog import load_ontology_catalog
+from parser.semantic import catalog_document_cli, cli, model_config
+from parser.semantic.backends import CallableBackend
+from parser.semantic.catalog_document_export import export_catalog_documents
+from parser.semantic.catalog_student import validate_catalog_student_pair
+from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION, SemanticParseResult
+from parser.semantic.semantic_parser import (
+    ModelGenerationError,
+    ReferenceSemanticParser,
+    SemanticParserConfig,
 )
-from parser.semantic.semantic_parser import ModelGenerationError  # noqa: E402
+from symbolic_pipeline.document_export import export_semantic_documents
+from symbolic_pipeline.miner_bundle import load_catalog_bundle
+from tests.semantic_fixtures import target
 
 
 def _source_line(
@@ -38,12 +40,29 @@ def _source_line(
     )
 
 
-def test_exports_canonical_documents_and_auditable_rejections(tmp_path: Path) -> None:
+def _source_text(prompt: str) -> str:
+    return prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
+
+
+def _answer(*, prompt: str, model: str) -> str:
+    """Answer every prompt with a valid extraction of its own source text."""
+    return json.dumps(target(_source_text(prompt)))
+
+
+def _parser(generate=_answer, catalog=None, model_name="teacher-model"):
+    return ReferenceSemanticParser(
+        backend=CallableBackend(generate, provider_name="test-provider"),
+        config=SemanticParserConfig(model_name=model_name),
+        catalog=catalog,
+    )
+
+
+def test_exports_parse_results_and_auditable_rejections(tmp_path: Path) -> None:
     input_path = tmp_path / "source.jsonl"
     output_path = tmp_path / "parsed.jsonl"
     rejected_path = tmp_path / "rejected.jsonl"
     student_pairs_path = tmp_path / "student-pairs.jsonl"
-    source_text = "  Mira left. ðŸ™‚  "
+    source_text = "  Mira left. 🙂  "
     input_path.write_text(
         "\n".join(
             [
@@ -61,15 +80,10 @@ def test_exports_canonical_documents_and_auditable_rejections(tmp_path: Path) ->
 
     def generate(*, prompt: str, model: str) -> str:
         calls.append(prompt)
-        return '{"entities": [], "assertions": []}'
+        return _answer(prompt=prompt, model=model)
 
-    parser = CatalogSemanticDocumentParser(
-        backend=CallableBackend(generate, provider_name="test-provider"),
-        model_name="teacher-model",
-        catalog=load_ontology_catalog(modules=("upper",)),
-    )
     result = export_catalog_documents(
-        parser,
+        _parser(generate, catalog=load_ontology_catalog(modules=("upper",))),
         input_path=input_path,
         output_path=output_path,
         rejected_path=rejected_path,
@@ -79,11 +93,11 @@ def test_exports_canonical_documents_and_auditable_rejections(tmp_path: Path) ->
     assert (result.accepted, result.rejected) == (2, 3)
     assert len(calls) == 2
     accepted_lines = output_path.read_text(encoding="utf-8").splitlines()
-    documents = [SemanticDocument.model_validate_json(line) for line in accepted_lines]
-    assert [document.document_id for document in documents] == ["doc-1", "doc-2"]
-    assert documents[0].source_text == source_text
-    assert documents[0].parser.ontology_versions == ("upper-v1",)
-    assert accepted_lines == [document.canonical_json() for document in documents]
+    results = [SemanticParseResult.model_validate_json(line) for line in accepted_lines]
+    assert [item.document.document_id for item in results] == ["doc-1", "doc-2"]
+    assert results[0].document.source_text == source_text
+    assert results[0].provenance.ontology_versions == ["upper-v1"]
+    assert accepted_lines == [item.model_dump_json() for item in results]
     rejections = [
         json.loads(line)
         for line in rejected_path.read_text(encoding="utf-8").splitlines()
@@ -96,18 +110,17 @@ def test_exports_canonical_documents_and_auditable_rejections(tmp_path: Path) ->
         for line in student_pairs_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [pair["document_id"] for pair in pairs] == ["doc-1", "doc-2"]
-    assert pairs[0]["contract_version"] == "semantic-document-v1"
-    assert json.loads(pairs[0]["label"]) == {"entities": [], "assertions": []}
-    assert pairs[0]["parser"] == documents[0].parser.model_dump(mode="json")
+    assert pairs[0]["contract_version"] == SEMANTIC_CONTRACT_VERSION
+    assert json.loads(pairs[0]["label"]) == results[0].extraction.model_dump(
+        mode="json"
+    )
+    assert pairs[0]["parser"] == results[0].provenance.model_dump(mode="json")
 
 
 def test_rejects_colliding_paths_and_existing_outputs(tmp_path: Path) -> None:
     input_path = tmp_path / "source.jsonl"
     input_path.write_text(_source_line("doc-1", "Mira left.") + "\n", encoding="utf-8")
-    parser = CatalogSemanticDocumentParser(
-        backend=CallableBackend(lambda **kwargs: '{"entities": [], "assertions": []}'),
-        model_name="teacher-model",
-    )
+    parser = _parser()
     rejected_path = tmp_path / "rejected.jsonl"
 
     with pytest.raises(ValueError, match="must all differ"):
@@ -146,15 +159,11 @@ def test_backend_failure_stops_export_without_partial_output(tmp_path: Path) -> 
     def generate(*, prompt: str, model: str) -> str:
         if "Sol arrived." in prompt:
             raise ConnectionError("model server unavailable")
-        return '{"entities": [], "assertions": []}'
-
-    parser = CatalogSemanticDocumentParser(
-        backend=CallableBackend(generate), model_name="teacher-model"
-    )
+        return _answer(prompt=prompt, model=model)
 
     with pytest.raises(ModelGenerationError, match="parser failed"):
         export_catalog_documents(
-            parser,
+            _parser(generate),
             input_path=input_path,
             output_path=output_path,
             rejected_path=rejected_path,
@@ -177,8 +186,9 @@ def test_cli_uses_selected_catalog_and_reports_rejection(
         _source_line("doc-1", "Mira left.") + "\n" + "not-json\n",
         encoding="utf-8",
     )
-    backend = CallableBackend(lambda **kwargs: '{"entities": [], "assertions": []}')
-    monkeypatch.setattr(model_config, "create_backend", lambda profile: backend)
+    monkeypatch.setattr(
+        model_config, "create_backend", lambda profile: CallableBackend(_answer)
+    )
 
     exit_code = catalog_document_cli.main(
         [
@@ -194,14 +204,14 @@ def test_cli_uses_selected_catalog_and_reports_rejection(
     )
 
     assert exit_code == 2
-    document = SemanticDocument.model_validate_json(
+    result = SemanticParseResult.model_validate_json(
         output_path.read_text(encoding="utf-8").strip()
     )
-    assert document.parser.ontology_versions == ("upper-v1",)
+    assert result.provenance.ontology_versions == ["upper-v1"]
     assert len(rejected_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_existing_cli_exports_documents_with_the_selected_profile(
+def test_cli_exports_results_with_the_selected_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.jsonl"
@@ -210,7 +220,7 @@ def test_existing_cli_exports_documents_with_the_selected_profile(
 
     def backend(profile):
         selected.append(profile.name)
-        return CallableBackend(lambda **kwargs: '{"entities": [], "assertions": []}')
+        return CallableBackend(_answer)
 
     monkeypatch.setattr(model_config, "create_backend", backend)
     status = cli.main(
@@ -221,7 +231,7 @@ def test_existing_cli_exports_documents_with_the_selected_profile(
             "--input",
             str(source),
             "--output",
-            str(tmp_path / "documents.jsonl"),
+            str(tmp_path / "results.jsonl"),
             "--rejected-output",
             str(tmp_path / "rejected.jsonl"),
             "--student-pairs-output",
@@ -233,24 +243,24 @@ def test_existing_cli_exports_documents_with_the_selected_profile(
     assert (tmp_path / "pairs.jsonl").read_text(encoding="utf-8")
 
 
-def test_export_includes_the_same_bundle_used_to_validate_documents(
+def test_miner_export_includes_the_same_bundle_used_to_validate_documents(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.jsonl"
     source.write_text(_source_line("doc-1", "Mira left.") + "\n", encoding="utf-8")
     catalog, bundle = load_catalog_bundle()
-    parser = CatalogSemanticDocumentParser(
-        backend=CallableBackend(lambda **kwargs: '{"entities": [], "assertions": []}'),
-        model_name="teacher-model",
-        catalog=catalog,
-    )
-    result = export_catalog_documents(
-        parser,
+    export_catalog_documents(
+        _parser(catalog=catalog),
         input_path=source,
-        output_path=tmp_path / "documents.jsonl",
+        output_path=tmp_path / "results.jsonl",
         rejected_path=tmp_path / "rejected.jsonl",
+    )
+    result = export_semantic_documents(
+        tmp_path / "results.jsonl",
+        tmp_path / "documents.jsonl",
+        tmp_path / "documents.rejected.jsonl",
+        bundle=bundle,
         bundle_path=tmp_path / "bundle.json",
-        ontology_bundle=bundle,
     )
     assert result.bundle_path is not None
     assert (
@@ -258,27 +268,22 @@ def test_export_includes_the_same_bundle_used_to_validate_documents(
     )
 
 
-def test_build_dataset_document_target_matches_export_and_student_validation(
+def test_build_dataset_label_matches_export_and_student_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from parser.semantic.catalog_student import validate_catalog_student_pair
-
     source = tmp_path / "source.jsonl"
     source.write_text(_source_line("doc-1", "Mira left.") + "\n", encoding="utf-8")
     draft = {
         "entities": [
-            {"id": "event", "type": " Event ", "mention": "left", "occurrence": 0}
+            {"id": "Departure", "entity_type": " Event ", "mention": {"text": "left"}}
         ],
         "assertions": [
             {
                 "predicate": " Event ",
-                "arguments": ["event"],
-                "argument_types": [" Event "],
-                "status": "extracted-hypothesis",
-                "factuality": "asserted",
+                "arguments": [{"entity_id": "Departure", "role": "Event ID"}],
+                "factuality": " Asserted ",
                 "confidence": 0.9,
-                "source_quotes": [{"text": "left", "occurrence": 0}],
-                "alternatives": [],
+                "evidence": [{"text": "left"}],
             }
         ],
     }
@@ -289,21 +294,19 @@ def test_build_dataset_document_target_matches_export_and_student_validation(
         return json.dumps(draft)
 
     monkeypatch.setattr(
-        model_config,
-        "create_backend",
-        lambda profile: CallableBackend(generate),
+        model_config, "create_backend", lambda profile: CallableBackend(generate)
     )
     pairs = tmp_path / "pairs.jsonl"
-    documents = tmp_path / "documents.jsonl"
+    results = tmp_path / "results.jsonl"
     status = cli.main(
         [
             "build-dataset",
             "--target",
-            "semantic-document-v1",
+            SEMANTIC_CONTRACT_VERSION,
             "--input",
             str(source),
             "--output",
-            str(documents),
+            str(results),
             "--student-pairs-output",
             str(pairs),
             "--rejected-output",
@@ -318,17 +321,17 @@ def test_build_dataset_document_target_matches_export_and_student_validation(
     _, label, rebuilt = validate_catalog_student_pair(
         pair, catalog=load_ontology_catalog(modules=("upper",))
     )
-    assert rebuilt.canonical_json() + "\n" == documents.read_text(encoding="utf-8")
+    assert rebuilt.model_dump_json() + "\n" == results.read_text(encoding="utf-8")
     assert json.loads(label) == json.loads(pair["label"])
-    assert json.loads(label)["assertions"][0]["conditional_on"] is None
-    assert json.loads(label)["assertions"][0]["predicate"] == "Event"
+    assertion = json.loads(label)["assertions"][0]
+    assert assertion["predicate"] == "Event"
+    assert assertion["factuality"] == "asserted"
+    assert assertion["arguments"] == [{"entity_id": "departure", "role": "event_id"}]
 
 
-def test_document_dataset_keeps_complete_documents_with_a_filtered_view(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+def test_dataset_keeps_complete_results_with_a_filtered_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.semantic_fixtures import target
-
     payload = target("Mira left.")
     payload["assertions"][0]["factuality"] = "speculative"
     monkeypatch.setattr(
@@ -346,7 +349,7 @@ def test_document_dataset_keeps_complete_documents_with_a_filtered_view(
                 "--input",
                 str(tmp_path / "source.jsonl"),
                 "--output",
-                str(tmp_path / "documents.jsonl"),
+                str(tmp_path / "results.jsonl"),
                 "--rejected-output",
                 str(tmp_path / "rejected.jsonl"),
                 "--asserted-only",
@@ -354,12 +357,12 @@ def test_document_dataset_keeps_complete_documents_with_a_filtered_view(
         )
         == 0
     )
-    document = SemanticDocument.model_validate_json(
-        (tmp_path / "documents.jsonl").read_text(encoding="utf-8")
+    result = SemanticParseResult.model_validate_json(
+        (tmp_path / "results.jsonl").read_text(encoding="utf-8")
     )
-    assert document.assertions[0].factuality == "speculative"
+    assert result.extraction.assertions[0].factuality == "speculative"
     metadata = json.loads(
-        (tmp_path / "documents.metadata.jsonl").read_text(encoding="utf-8")
+        (tmp_path / "results.metadata.jsonl").read_text(encoding="utf-8")
     )
     assert metadata["metta"] == []
     assert metadata["metta_asserted_only"] is True
@@ -370,26 +373,24 @@ def test_resume_preserves_work_and_does_not_repeat_completed_calls(tmp_path):
     available = False
 
     def generate(*, prompt, model):
-        text = prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
+        text = _source_text(prompt)
         calls.append(text)
         if text == "Second." and not available:
             raise ConnectionError("offline")
-        return '{"entities": [], "assertions": []}'
+        return json.dumps(target(text))
 
-    parser = CatalogSemanticDocumentParser(
-        backend=CallableBackend(generate), model_name="resume-review"
-    )
+    parser = _parser(generate, model_name="resume-review")
     source = tmp_path / "source.txt"
     source.write_text("First.\nSecond.\n", encoding="utf-8")
     options = {
         "input_path": source,
-        "output_path": tmp_path / "documents.jsonl",
+        "output_path": tmp_path / "results.jsonl",
         "rejected_path": tmp_path / "rejected.jsonl",
         "student_pairs_path": tmp_path / "pairs.jsonl",
     }
     with pytest.raises(ModelGenerationError):
         export_catalog_documents(parser, **options)
-    checkpoint = tmp_path / "documents.jsonl.checkpoint.json"
+    checkpoint = tmp_path / "results.jsonl.checkpoint.json"
     assert json.loads(checkpoint.read_text(encoding="utf-8"))["accepted"] == 1
     assert not options["output_path"].exists()
     available = True
@@ -408,14 +409,12 @@ def test_resume_rejects_changed_inputs_before_generation(tmp_path, changed):
         calls.append(kwargs)
         raise ConnectionError("offline")
 
-    parser = CatalogSemanticDocumentParser(
-        backend=CallableBackend(generate), model_name="resume-review"
-    )
+    parser = _parser(generate, model_name="resume-review")
     source = tmp_path / "source.txt"
     source.write_text("First.\n", encoding="utf-8")
     options = {
         "input_path": source,
-        "output_path": tmp_path / "documents.jsonl",
+        "output_path": tmp_path / "results.jsonl",
         "rejected_path": tmp_path / "rejected.jsonl",
     }
     with pytest.raises(ModelGenerationError):
@@ -423,12 +422,48 @@ def test_resume_rejects_changed_inputs_before_generation(tmp_path, changed):
     if changed == "source":
         source.write_text("Changed.\n", encoding="utf-8")
     else:
-        partial = tmp_path / "documents.jsonl.partial"
+        partial = tmp_path / "results.jsonl.partial"
         partial.write_text("corrupt", encoding="utf-8")
-        state_path = tmp_path / "documents.jsonl.checkpoint.json"
+        state_path = tmp_path / "results.jsonl.checkpoint.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["files"]["documents"]["size"] = 7
         state_path.write_text(json.dumps(state), encoding="utf-8")
     with pytest.raises(ValueError, match="checkpoint"):
         export_catalog_documents(parser, **options, resume=True)
     assert len(calls) == 1
+
+
+def test_exported_results_convert_to_valid_miner_documents(tmp_path: Path) -> None:
+    source = tmp_path / "source.jsonl"
+    source.write_text(
+        _source_line("doc-1", "Mira left.")
+        + "\n"
+        + _source_line("doc-2", "Sol sang.")
+        + "\n",
+        encoding="utf-8",
+    )
+    catalog, bundle = load_catalog_bundle()
+    export_catalog_documents(
+        _parser(catalog=catalog),
+        input_path=source,
+        output_path=tmp_path / "results.jsonl",
+        rejected_path=tmp_path / "rejected.jsonl",
+    )
+
+    converted = export_semantic_documents(
+        tmp_path / "results.jsonl",
+        tmp_path / "documents.jsonl",
+        tmp_path / "documents.rejected.jsonl",
+        bundle=bundle,
+    )
+
+    assert (converted.accepted, converted.rejected) == (2, 0)
+    documents = [
+        SemanticDocument.model_validate_json(line)
+        for line in (tmp_path / "documents.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [document.document_id for document in documents] == ["doc-1", "doc-2"]
+    assert documents[0].assertions[0].predicate == "Event"
+    assert documents[0].parser.ontology_versions == catalog.versions

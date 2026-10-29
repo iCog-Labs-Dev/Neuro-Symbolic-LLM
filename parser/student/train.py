@@ -146,8 +146,8 @@ def evaluate(
     valid = 0
     for sentence in test_sentences:
         try:
-            document = parser.parse(sentence)
-            print(document.canonical_json())
+            result = parser.parse(sentence)
+            print(result.model_dump_json())
             valid += 1
         except (ValueError, RuntimeError) as error:
             print(f"Rejected prediction: {error}")
@@ -166,15 +166,18 @@ def train(
     val_file: str | None = None,
 ) -> str:
     config = load_config(config_path)
-    from parser.ontology.miner_bundle import load_catalog_bundle
+    from parser.ontology.catalog import load_manifest_catalog
+    from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION
 
     contract_version = config["data"].get("contract_version")
-    if contract_version != "semantic-document-v1":
-        raise ValueError("Student training requires the semantic-document-v1 target")
+    if contract_version != SEMANTIC_CONTRACT_VERSION:
+        raise ValueError(
+            f"Student training requires contract version {SEMANTIC_CONTRACT_VERSION}"
+        )
     manifest = config["data"].get("ontology_bundle_manifest")
     if not isinstance(manifest, str) or not manifest.strip():
         raise ValueError("Document training requires ontology_bundle_manifest")
-    catalog, _ = load_catalog_bundle(Path(manifest))
+    catalog, _ = load_manifest_catalog(Path(manifest))
     training_prompt_version = _catalog_training_prompt_version(catalog)
 
     base_model = config["student"]["base_model"]

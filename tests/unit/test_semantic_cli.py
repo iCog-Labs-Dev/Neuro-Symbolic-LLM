@@ -1,12 +1,18 @@
-"""Production commands share one document exporter and one training target."""
+"""Tests for semantic-parser CLI routing and local checkpoint validation."""
 
 import json
+import sys
+from types import ModuleType
 
 import pytest
 
+from parser.ontology.catalog import load_ontology_catalog
 from parser.semantic import cli, model_config
 from parser.semantic.backends import CallableBackend
+from parser.semantic.dataset import verify_split_overlap
+from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION
 from tests.semantic_fixtures import pair, target
+from tests.semantic_fixtures import result as fixture_result
 
 
 @pytest.fixture
@@ -15,37 +21,45 @@ def backend(monkeypatch):
 
     def generate(*, prompt, model):
         calls.append(prompt)
-        text = prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
-        return json.dumps(target(text))
+        source = prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
+        return json.dumps(target(source))
 
     monkeypatch.setattr(
         model_config, "create_backend", lambda profile: CallableBackend(generate)
     )
+    monkeypatch.setattr(
+        cli, "command_catalog", lambda arguments: load_ontology_catalog()
+    )
     return calls
 
 
-def test_parse_defaults_to_document_json(backend, capsys):
+def test_parse_defaults_to_current_parse_result_json(backend, capsys):
     assert cli.main(["parse", "Mira left."]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["contract_version"] == "semantic-document-v1"
-    assert result["assertions"][0]["predicate"] == "Event"
+
+    assert result["contract_version"] == SEMANTIC_CONTRACT_VERSION
+    assert result["document"]["source_text"] == "Mira left."
+    assert result["extraction"]["assertions"][0]["predicate"] == "Event"
     assert len(backend) == 1
 
 
-def test_parse_metta_is_only_a_derived_view(backend, capsys):
+def test_parse_metta_is_a_derived_view(backend, capsys):
     assert cli.main(["parse", "Mira left.", "--format", "metta"]) == 0
-    assert "Evaluation" in capsys.readouterr().out
+
+    assert capsys.readouterr().out.strip() == "(Event e1)"
     assert len(backend) == 1
 
 
 @pytest.mark.parametrize("command", ["build-dataset", "export-documents"])
-def test_dataset_commands_export_the_same_target(tmp_path, backend, command):
-    source, docs, labels = (
-        tmp_path / "sources.txt",
-        tmp_path / "docs.jsonl",
-        tmp_path / "pairs.jsonl",
-    )
+def test_document_commands_delegate_with_current_target(tmp_path, monkeypatch, command):
+    source = tmp_path / "sources.txt"
+    output = tmp_path / "results.jsonl"
     source.write_text("Mira left.\n", encoding="utf-8")
+    captured = []
+    exporter = ModuleType("parser.semantic.catalog_document_cli")
+    exporter.run_export = lambda arguments: captured.append(arguments) or 0
+    monkeypatch.setitem(sys.modules, exporter.__name__, exporter)
+
     assert (
         cli.main(
             [
@@ -53,179 +67,60 @@ def test_dataset_commands_export_the_same_target(tmp_path, backend, command):
                 "--input",
                 str(source),
                 "--output",
-                str(docs),
+                str(output),
                 "--student-pairs-output",
-                str(labels),
+                str(tmp_path / "pairs.jsonl"),
                 "--rejected-output",
                 str(tmp_path / "rejected.jsonl"),
             ]
         )
         == 0
     )
-    document = json.loads(docs.read_text(encoding="utf-8"))
-    student_pair = json.loads(labels.read_text(encoding="utf-8"))
-    assert (
-        document["contract_version"]
-        == student_pair["contract_version"]
-        == "semantic-document-v1"
-    )
-    assert len(backend) == 1
+
+    assert len(captured) == 1
+    assert captured[0].target == SEMANTIC_CONTRACT_VERSION
+    assert captured[0].input == source
+    assert captured[0].output == output
 
 
-def test_manifest_source_metadata_survives_into_training_pair(tmp_path, backend):
-    source = tmp_path / "source.jsonl"
-    source.write_text(
-        json.dumps(
-            {
-                "text": "Mira left.",
-                "source_dataset": "pilot",
-                "source_domain": "narrative",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    docs, labels = tmp_path / "docs.jsonl", tmp_path / "pairs.jsonl"
+def test_convert_to_pairs_uses_current_parse_result_jsonl(tmp_path, backend):
+    source = tmp_path / "results.jsonl"
+    output = tmp_path / "pairs.jsonl"
+    source.write_text(fixture_result().model_dump_json() + "\n", encoding="utf-8")
+
     assert (
         cli.main(
             [
-                "build-dataset",
-                "--input",
-                str(source),
-                "--output",
-                str(docs),
-                "--student-pairs-output",
-                str(labels),
-                "--rejected-output",
-                str(tmp_path / "rejected.jsonl"),
-            ]
-        )
-        == 0
-    )
-    record = json.loads(labels.read_text(encoding="utf-8"))
-    assert record["source_dataset"] == "pilot"
-    assert record["source_domain"] == "narrative"
-    assert json.loads(docs.read_text(encoding="utf-8"))["corpus_id"] == "pilot"
-
-
-@pytest.mark.parametrize("collision", ["input", "rejected", "labels"])
-def test_export_refuses_path_collisions_without_data_loss(tmp_path, backend, collision):
-    source, docs = tmp_path / "source.txt", tmp_path / "docs.jsonl"
-    source.write_text("Mira left.\n", encoding="utf-8")
-    rejected, labels = tmp_path / "rejected.jsonl", tmp_path / "pairs.jsonl"
-    if collision == "input":
-        docs = source
-    elif collision == "rejected":
-        rejected = docs
-    else:
-        labels = docs
-    assert (
-        cli.main(
-            [
-                "build-dataset",
-                "--input",
-                str(source),
-                "--output",
-                str(docs),
-                "--student-pairs-output",
-                str(labels),
-                "--rejected-output",
-                str(rejected),
-            ]
-        )
-        == 1
-    )
-    assert source.read_text(encoding="utf-8") == "Mira left.\n"
-    assert backend == []
-
-
-def test_help_supports_windows_encoding():
-    assert cli.build_argument_parser().format_help().encode("cp1252")
-
-
-def test_export_defaults_rejections_and_retains_derived_metadata(tmp_path, backend):
-    source, output = tmp_path / "input.txt", tmp_path / "documents.jsonl"
-    source.write_text("Mira left.\n", encoding="utf-8")
-    assert (
-        cli.main(
-            [
-                "build-dataset",
+                "convert-to-pairs",
                 "--input",
                 str(source),
                 "--output",
                 str(output),
-                "--include-metta",
             ]
         )
         == 0
     )
-    assert (tmp_path / "documents.rejected.jsonl").read_text(encoding="utf-8") == ""
-    metadata = json.loads(
-        (tmp_path / "documents.metadata.jsonl").read_text(encoding="utf-8")
-    )
-    assert metadata["metta"]
-    assert "metta" not in json.loads(output.read_text(encoding="utf-8"))
+
+    converted = json.loads(output.read_text(encoding="utf-8"))
+    assert converted["contract_version"] == SEMANTIC_CONTRACT_VERSION
+    assert converted["input"] == "Mira left."
+    assert json.loads(converted["label"])["assertions"][0]["predicate"] == "Event"
+    assert backend == []
 
 
-def test_e2e_uses_accepted_pairs_and_normalized_expected_labels(
-    tmp_path, monkeypatch, backend, capsys
-):
-    from parser.semantic.catalog_student import validate_catalog_student_pair
-    from parser.student import train as training
-
-    calls = []
-
-    def train(**kwargs):
-        calls.append(kwargs)
-        return kwargs["output_dir"]
-
-    monkeypatch.setattr(training, "train", train)
-    inferred = []
-
-    class Student:
-        def parse(self, text, context=""):
-            inferred.append(text)
-            return validate_catalog_student_pair(
-                pair(text),
-                catalog=cli.command_catalog(
-                    cli.build_argument_parser().parse_args(["parse", text])
-                ),
-            )[2]
-
-    monkeypatch.setattr(
-        cli.DistilledSemanticParser, "from_pretrained", lambda *_, **__: Student()
-    )
-    sentences = [f"Source {index}." for index in range(10)]
-    # The exporter quarantines an invalid source without discarding accepted data.
-    sentences.append(" ")
-    root = tmp_path / "run"
-    assert cli.main(["e2e", "--sentences", *sentences, "--output-dir", str(root)]) == 0
-    assert len(calls) == 1
-    assert len(inferred) == 1
-    assert "exact target matches: 1/1" in capsys.readouterr().out
-    assert len((root / "rejected.jsonl").read_text(encoding="utf-8").splitlines()) == 1
-    assert cli.main(["e2e", "--output-dir", str(root), "--skip-training"]) == 1
-    # Real checkpoint validation remains mandatory when training is skipped.
-
-
-def test_legacy_target_is_not_an_active_choice():
-    with pytest.raises(SystemExit):
-        cli.build_argument_parser().parse_args(
-            ["build-dataset", "--target", "legacy-semantic-v1"]
-        )
-
-
-def test_split_validates_labels_and_writes_disjoint_sources(tmp_path):
+def test_split_validates_pairs_and_writes_source_disjoint_sets(tmp_path, backend):
     source = tmp_path / "pairs.jsonl"
     source.write_text(
-        "".join(json.dumps(pair(f"Source {i}.")) + "\n" for i in range(10)),
+        "".join(json.dumps(pair(f"Source {index}.")) + "\n" for index in range(10)),
         encoding="utf-8",
     )
     output = tmp_path / "splits"
+
     assert (
         cli.main(["split-pairs", "--input", str(source), "--output-dir", str(output)])
         == 0
     )
+
     splits = [
         [
             json.loads(line)
@@ -233,47 +128,41 @@ def test_split_validates_labels_and_writes_disjoint_sources(tmp_path):
         ]
         for name in ("train.jsonl", "validation.jsonl", "test.jsonl")
     ]
-    assert [len(items) for items in splits] == [8, 1, 1]
-    from parser.semantic.dataset import verify_split_overlap
-
+    assert [len(records) for records in splits] == [8, 1, 1]
     verify_split_overlap(*splits)
+    assert backend == []
 
 
 @pytest.mark.parametrize("record", [None, [], {"input": "Dog", "label": "{}"}])
-def test_split_refuses_old_or_invalid_labels_before_writing(tmp_path, record):
+def test_split_refuses_malformed_or_old_pairs_before_writing(tmp_path, backend, record):
     source = tmp_path / "pairs.jsonl"
     source.write_text(json.dumps(record), encoding="utf-8")
+    output = tmp_path / "splits"
+
     assert (
-        cli.main(
-            [
-                "split-pairs",
-                "--input",
-                str(source),
-                "--output-dir",
-                str(tmp_path / "splits"),
-            ]
-        )
+        cli.main(["split-pairs", "--input", str(source), "--output-dir", str(output)])
         == 1
     )
-    assert not (tmp_path / "splits").exists()
+    assert not output.exists()
+    assert backend == []
 
 
-def test_e2e_never_reuses_an_existing_run(tmp_path):
-    assert (
-        cli.main(
+def test_unsupported_target_contract_is_not_an_active_choice():
+    with pytest.raises(SystemExit):
+        cli.build_argument_parser().parse_args(
             [
-                "e2e",
+                "build-dataset",
                 "--input",
-                str(tmp_path / "source.txt"),
-                "--output-dir",
-                str(tmp_path),
+                "source.txt",
+                "--output",
+                "docs.jsonl",
+                "--target",
+                "semantic-document-v1",
             ]
         )
-        == 1
-    )
 
 
-def test_train_command_passes_existing_training_controls(monkeypatch, tmp_path):
+def test_train_command_passes_current_training_controls(monkeypatch, tmp_path):
     from parser.student import train as training
 
     options = []
@@ -285,7 +174,7 @@ def test_train_command_passes_existing_training_controls(monkeypatch, tmp_path):
                 "--train-file",
                 str(tmp_path / "train.jsonl"),
                 "--val-file",
-                str(tmp_path / "val.jsonl"),
+                str(tmp_path / "validation.jsonl"),
                 "--method",
                 "lora",
             ]
@@ -293,12 +182,12 @@ def test_train_command_passes_existing_training_controls(monkeypatch, tmp_path):
         == 0
     )
     assert options[0]["method"] == "lora"
-    assert options[0]["val_file"].endswith("val.jsonl")
+    assert options[0]["val_file"].endswith("validation.jsonl")
     assert options[0]["output_dir"] is None
 
 
-def write_checkpoint(path):
-    """Save a tiny usable checkpoint without network access."""
+def _write_checkpoint(path):
+    """Write a small local Transformers checkpoint without network access."""
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
@@ -327,8 +216,8 @@ def write_checkpoint(path):
         "bad_tokenizer",
     ],
 )
-def test_checkpoint_rejects_missing_or_unreadable_files(tmp_path, damage):
-    write_checkpoint(tmp_path)
+def test_checkpoint_validation_rejects_missing_or_unreadable_files(tmp_path, damage):
+    _write_checkpoint(tmp_path)
     if damage == "empty_weights":
         (tmp_path / "model.safetensors").write_bytes(b"")
     elif damage == "bad_config":
@@ -337,11 +226,12 @@ def test_checkpoint_rejects_missing_or_unreadable_files(tmp_path, damage):
         (tmp_path / "tokenizer.json").write_text("null", encoding="utf-8")
     else:
         (tmp_path / damage).unlink()
+
     assert cli._checkpoint_error(tmp_path) is not None
 
 
-def test_checkpoint_requires_every_indexed_shard(tmp_path):
-    write_checkpoint(tmp_path)
+def test_checkpoint_validation_requires_every_indexed_shard(tmp_path):
+    _write_checkpoint(tmp_path)
     (tmp_path / "model.safetensors").rename(tmp_path / "shard-1.safetensors")
     index = tmp_path / "model.safetensors.index.json"
     index.write_text(
@@ -355,6 +245,7 @@ def test_checkpoint_requires_every_indexed_shard(tmp_path):
         ),
         encoding="utf-8",
     )
+
     assert "shard-2.safetensors" in cli._checkpoint_error(tmp_path)
     (tmp_path / "shard-2.safetensors").write_bytes(
         (tmp_path / "shard-1.safetensors").read_bytes()
@@ -365,23 +256,33 @@ def test_checkpoint_requires_every_indexed_shard(tmp_path):
 @pytest.mark.parametrize(
     "index", [None, {}, {"weight_map": {}}, {"weight_map": {"a": None}}]
 )
-def test_checkpoint_rejects_malformed_index(tmp_path, index):
-    write_checkpoint(tmp_path)
+def test_checkpoint_validation_rejects_malformed_index(tmp_path, index):
+    _write_checkpoint(tmp_path)
     (tmp_path / "model.safetensors").unlink()
     (tmp_path / "model.safetensors.index.json").write_text(
         json.dumps(index), encoding="utf-8"
     )
+
     assert cli._checkpoint_error(tmp_path) is not None
 
 
-def test_checkpoint_accepts_pytorch_weights(tmp_path):
-    write_checkpoint(tmp_path)
+def test_checkpoint_validation_accepts_pytorch_weights(tmp_path):
+    _write_checkpoint(tmp_path)
     (tmp_path / "model.safetensors").unlink()
     import torch
 
     torch.save({"weight": torch.ones(1)}, tmp_path / "pytorch_model.bin")
+
     assert cli._checkpoint_error(tmp_path) is None
 
 
-def test_distill_requires_real_checkpoint(tmp_path):
+def test_distill_requires_a_real_checkpoint(tmp_path):
     assert cli.main(["distill", "--model-dir", str(tmp_path), "Mira left."]) == 1
+
+
+def test_e2e_requires_explicit_sources(tmp_path, backend, monkeypatch):
+    exporter = ModuleType("parser.semantic.catalog_document_cli")
+    exporter.run_export = lambda arguments: 0
+    monkeypatch.setitem(sys.modules, exporter.__name__, exporter)
+    assert cli.main(["e2e", "--output-dir", str(tmp_path / "run")]) == 1
+    assert backend == []

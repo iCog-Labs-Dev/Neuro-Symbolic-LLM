@@ -6,11 +6,13 @@ import pytest
 
 from parser.ontology.catalog import load_ontology_catalog
 from parser.semantic.catalog_prompt import build_catalog_document_prompt
+from parser.semantic.schema import SourceDocument
 from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParseError,
     SemanticParserConfig,
 )
+from tests.semantic_fixtures import target
 
 
 class RecordingBackend:
@@ -25,64 +27,89 @@ class RecordingBackend:
         return self.response
 
 
-def test_all_generation_uses_the_document_prompt() -> None:
+def _parser(
+    response: str | RecordingBackend, *, catalog=None
+) -> ReferenceSemanticParser:
+    backend = (
+        response
+        if isinstance(response, RecordingBackend)
+        else RecordingBackend(response)
+    )
+    return ReferenceSemanticParser(
+        backend=backend,
+        config=SemanticParserConfig(model_name="teacher-model"),
+        catalog=catalog,
+    )
+
+
+def test_parser_exposes_current_prompt_without_generation() -> None:
+    parser = _parser('{"entities": [], "assertions": [], "rules": []}')
     prompt = ReferenceSemanticParser.build_prompt("Alice opened the door.")
-    assert SemanticParserConfig(model_name="teacher-model").prompt_version == "2.0.0"
+
+    assert parser.prompt_version.startswith("catalog-document-v15+sha256.")
     assert "<worked_example>" in prompt
     assert "Shared source interpretation rules:" in prompt
 
 
-def test_instance_prompt_and_generation_use_the_selected_catalog():
+def test_instance_prompt_and_generation_use_the_selected_catalog() -> None:
     catalog = load_ontology_catalog(modules=("upper",))
-    backend = RecordingBackend('{"entities": [], "assertions": [], "rules": []}')
+    source = "Mira left."
+    backend = RecordingBackend(json.dumps(target(source)))
     parser = ReferenceSemanticParser(
         backend=backend,
         config=SemanticParserConfig(model_name="review"),
         catalog=catalog,
     )
-    inspected = parser.build_document_prompt("Mira left.")
-    parser.parse("Mira left.")
+
+    inspected = parser.build_document_prompt(source)
+    result = parser.parse(source)
+
     assert inspected.text == backend.calls[0][0]
     assert "Ontology versions: upper-v1\n" in inspected.text
+    assert result.provenance.prompt_version == inspected.version
+    assert result.document.source_text == source
 
 
-def test_reference_context_is_not_added_to_the_extraction_source():
-    from tests.semantic_fixtures import target
+def test_reference_context_is_not_added_to_the_extraction_source() -> None:
+    source = "She left."
+    backend = RecordingBackend(json.dumps(target(source)))
+    parser = _parser(backend)
 
-    backend = RecordingBackend(json.dumps(target("She left.")))
-    parser = ReferenceSemanticParser(
-        backend=backend, config=SemanticParserConfig(model_name="review")
-    )
-    document = parser.parse("She left.", context="Nora arrived yesterday.")
-    assert document.source_text == "She left."
+    result = parser.parse(source, context="Nora arrived yesterday.")
+
+    assert result.document.source_text == source
     assert (
         "<reference_context>\nNora arrived yesterday.\n</reference_context>"
         in backend.calls[0][0]
     )
-    assert document.assertions[0].source_spans[0].end == len("She left.")
+    quote = result.extraction.assertions[0].evidence[0]
+    assert result.locate(quote) == (0, len(source))
+
     backend.response = json.dumps(target("Nora arrived yesterday."))
-    with pytest.raises(SemanticParseError, match="absent from source"):
-        parser.parse("She left.", context="Nora arrived yesterday.")
+    with pytest.raises(SemanticParseError, match="not in the source text"):
+        parser.parse(source, context="Nora arrived yesterday.")
 
 
-def test_uses_existing_backend_and_retains_prompt_version() -> None:
-    backend = RecordingBackend('```json\n{"entities": [], "assertions": []}\n```')
+def test_generation_returns_extraction_and_prompt_version() -> None:
     source = "  Mira left.  "
-
-    parser = ReferenceSemanticParser(
-        catalog=load_ontology_catalog(),
-        backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+    payload = target(source)
+    backend = RecordingBackend(f"```json\n{json.dumps(payload)}\n```")
+    catalog = load_ontology_catalog()
+    parser = _parser(backend, catalog=catalog)
+    document = SourceDocument(
+        document_id="generation-test",
+        corpus_id="unit-tests",
+        source_text=source,
     )
-    payload, prompt_version = parser.generate_document_target(source)
 
+    generated, prompt_version = parser.generate_extraction_payload(
+        document, catalog=catalog
+    )
+
+    assert generated == payload
     assert (
-        prompt_version
-        == build_catalog_document_prompt(
-            source, catalog=load_ontology_catalog()
-        ).version
+        prompt_version == build_catalog_document_prompt(source, catalog=catalog).version
     )
-    assert payload == {"entities": [], "assertions": []}
     assert backend.calls[0][1] == "teacher-model"
     assert f"<source_text>\n{source}\n</source_text>" in backend.calls[0][0]
 
@@ -91,27 +118,20 @@ def test_uses_existing_backend_and_retains_prompt_version() -> None:
     "response",
     [
         "[]",
-        json.dumps({"entities": [], "assertions": [], "source_text": "forged"}),
-        json.dumps({"entities": {}, "assertions": []}),
+        json.dumps(
+            {"entities": [], "assertions": [], "rules": [], "source_text": "forged"}
+        ),
+        json.dumps({"entities": {}, "assertions": [], "rules": []}),
     ],
 )
-def test_rejects_wrong_envelope_and_model_supplied_metadata(response: str) -> None:
-    with pytest.raises(SemanticParseError, match="Document output|must be lists"):
-        ReferenceSemanticParser(
-            catalog=load_ontology_catalog(),
-            backend=RecordingBackend(response),
-            config=SemanticParserConfig(model_name="teacher-model"),
-        ).generate_document_target("Mira left.")
+def test_parse_rejects_wrong_envelopes_and_model_supplied_metadata(
+    response: str,
+) -> None:
+    with pytest.raises(SemanticParseError):
+        _parser(response).parse("Mira left.")
 
 
 def test_rejects_invalid_or_empty_model_output() -> None:
-    for response, error_type in (
-        ("not JSON", SemanticParseError),
-        ("  ", SemanticParseError),
-    ):
-        with pytest.raises(error_type):
-            ReferenceSemanticParser(
-                catalog=load_ontology_catalog(),
-                backend=RecordingBackend(response),
-                config=SemanticParserConfig(model_name="teacher-model"),
-            ).generate_document_target("Mira left.")
+    for response in ("not JSON", "  "):
+        with pytest.raises(SemanticParseError):
+            _parser(response).parse("Mira left.")

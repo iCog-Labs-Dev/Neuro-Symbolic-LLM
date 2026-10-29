@@ -1,4 +1,8 @@
-"""Export validated catalog semantic documents from source-record JSONL."""
+"""Export validated semantic parse results from source-record JSONL.
+
+Each accepted source becomes one SemanticParseResult line. The export keeps a
+fingerprinted checkpoint, so an interrupted run resumes where it stopped.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +12,11 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from parser.semantic.document_metadata import document_metadata, metadata_path
+from parser.semantic.schema import SourceDocument
 from parser.semantic.semantic_parser import ReferenceSemanticParser
-
-if TYPE_CHECKING:
-    from hybrid_miner.ontology.bundle import OntologyBundle
 
 _SOURCE_FIELDS = frozenset({"document_id", "corpus_id", "source_text"})
 _IDENTIFIER = re.compile(r"^[^\s]+$")
@@ -29,7 +31,6 @@ class ExportResult:
     output_path: Path
     rejected_path: Path
     student_pairs_path: Path | None = None
-    bundle_path: Path | None = None
     metadata_path: Path | None = None
 
 
@@ -100,8 +101,6 @@ def export_catalog_documents(
     output_path: str | Path,
     rejected_path: str | Path,
     student_pairs_path: str | Path | None = None,
-    bundle_path: str | Path | None = None,
-    ontology_bundle: OntologyBundle | None = None,
     corpus_id: str | None = None,
     metadata_output: str | Path | None = None,
     include_metta: bool = False,
@@ -130,10 +129,6 @@ def export_catalog_documents(
     }
     if student_pairs_path is not None:
         outputs["pairs"] = Path(student_pairs_path)
-    if bundle_path is not None:
-        if ontology_bundle is None:
-            raise ValueError("Bundle output requires the loaded ontology bundle")
-        outputs["bundle"] = Path(bundle_path)
     checkpoint = accepted.with_name(accepted.name + ".checkpoint.json")
     partials = {
         name: path.with_name(path.name + ".partial") for name, path in outputs.items()
@@ -165,11 +160,9 @@ def export_catalog_documents(
                 "_think",
                 "_temperature",
                 "_seed",
+                "_num_ctx",
             )
         },
-        "bundle": (
-            ontology_bundle.canonical_json() if ontology_bundle is not None else None
-        ),
         "corpus_id": corpus_id,
         "include_metta": include_metta,
         "asserted_only": asserted_only,
@@ -268,8 +261,6 @@ def export_catalog_documents(
                     _write_checkpoint(checkpoint, state)
 
                 if not resume:
-                    if ontology_bundle is not None and "bundle" in handles:
-                        write("bundle", ontology_bundle.canonical_json())
                     mark()
                     persist()
                 with source.open(encoding="utf-8") as source_file:
@@ -296,18 +287,13 @@ def export_catalog_documents(
                             if key in seen:
                                 raise ValueError(f"Duplicate source document {key!r}")
                             seen.add(key)
-                            if "pairs" in handles:
-                                document, target = parser.parse_document_with_target(
+                            result = parser.parse_document(
+                                SourceDocument(
                                     document_id=doc_id,
                                     corpus_id=corpus,
                                     source_text=text,
                                 )
-                            else:
-                                document = parser.parse_document(
-                                    document_id=doc_id,
-                                    corpus_id=corpus,
-                                    source_text=text,
-                                )
+                            )
                         except ValueError as error:
                             write(
                                 "rejected",
@@ -322,21 +308,24 @@ def export_catalog_documents(
                             )
                             state["rejected"] += 1
                         else:
-                            metadata = document_metadata(document, **annotations)
+                            metadata = document_metadata(result, **annotations)
                             if include_metta or asserted_only:
-                                from parser.semantic.compatibility import (
-                                    render_document_view,
+                                from parser.semantic.metta_renderer import (
+                                    render_metta,
+                                    validate_rendered_metta,
                                 )
 
                                 try:
-                                    metadata["metta"] = render_document_view(
-                                        document, asserted_only=asserted_only
+                                    expressions = render_metta(
+                                        result, asserted_only=asserted_only
                                     )
+                                    validate_rendered_metta(expressions)
+                                    metadata["metta"] = expressions
                                     metadata["metta_asserted_only"] = asserted_only
                                 except ValueError as error:
                                     metadata["rendering_error"] = str(error)
                             payloads = {
-                                "documents": document.canonical_json(),
+                                "documents": result.model_dump_json(),
                                 "metadata": json.dumps(metadata, ensure_ascii=False),
                             }
                             if "pairs" in handles:
@@ -345,9 +334,7 @@ def export_catalog_documents(
                                 )
 
                                 payloads["pairs"] = json.dumps(
-                                    make_student_pair(
-                                        document, target=target, **annotations
-                                    ),
+                                    make_student_pair(result, **annotations),
                                     ensure_ascii=False,
                                 )
                             for name, payload in payloads.items():
@@ -379,7 +366,6 @@ def export_catalog_documents(
         accepted,
         rejected,
         outputs.get("pairs"),
-        outputs.get("bundle"),
         outputs["metadata"],
     )
 

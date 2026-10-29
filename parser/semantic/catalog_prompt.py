@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from parser.ontology.catalog import OntologyCatalog
-from parser.semantic.normalization import normalize_document_target
+from parser.semantic.schema import SemanticExtraction
 
 _PROMPT_CONFIG_PATH = (
     Path(__file__).resolve().parents[2]
@@ -20,12 +20,6 @@ _PROMPT_CONFIG_PATH = (
 )
 _PROMPT_EXAMPLES_PATH = _PROMPT_CONFIG_PATH.with_name("catalog_document_examples.jsonl")
 _EXTRACTION_CONFIG_PATH = _PROMPT_CONFIG_PATH.with_name("parser_prompt.yaml")
-_PREDICATE_CONFIG_PATH = _PROMPT_CONFIG_PATH.with_name("predicate_schema.yaml")
-
-# Reviewed semantic equivalences, not a spelling-based alias rule. The source
-# supplies interpretation guidance; the target catalog still owns its types,
-# confidence bounds, and admissibility. Argument order must match exactly.
-_LEGACY_CATALOG_EQUIVALENTS = {"Cause": "Causes"}
 
 
 def load_shared_extraction_guidance() -> str:
@@ -60,83 +54,6 @@ def _catalog_guide(catalog: OntologyCatalog) -> str:
             f"{relation.extraction_instruction}"
         )
     return "\n".join(lines)
-
-
-def _relation_guidance(catalog: OntologyCatalog) -> str:
-    """Build interpretation guidance from predicate definitions.
-
-    Only explicitly reviewed equivalents supplement known catalog predicates.
-    Other descriptions guide ProvisionalRelation extraction. Legacy operators
-    and representation-specific arities are not catalog relation definitions.
-    """
-    raw = yaml.safe_load(_PREDICATE_CONFIG_PATH.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or not isinstance(raw.get("predicates"), dict):
-        raise ValueError("Predicate guidance requires a predicates mapping")
-    mapped = []
-    provisional = []
-    fallback = []
-    for name, definition in raw["predicates"].items():
-        if (
-            not isinstance(name, str)
-            or not name.strip()
-            or not isinstance(definition, dict)
-        ):
-            raise ValueError(f"Invalid predicate guidance for {name!r}")
-        description = definition.get("description")
-        if not isinstance(description, str) or not description.strip():
-            raise ValueError(f"Predicate guidance requires a description: {name}")
-        description = " ".join(description.split())
-        if definition.get("fallback"):
-            # Reuse the fallback's meaning, not Evaluation's legacy JSON shape
-            # or its renderer-specific argument limits.
-            fallback.append(f"- {name}: {description}")
-            continue
-        roles = definition.get("roles")
-        arity = definition.get("arity")
-        if (
-            not isinstance(roles, list)
-            or isinstance(arity, bool)
-            or not isinstance(arity, int)
-            or arity < 1
-            or len(roles) != arity
-        ):
-            raise ValueError(
-                f"Predicate guidance requires arity matching ordered roles: {name}"
-            )
-        if any(not isinstance(role, str) or not role.strip() for role in roles):
-            raise ValueError(f"Invalid argument roles for {name!r}")
-        if len(set(roles)) != len(roles):
-            raise ValueError(f"Duplicate argument roles for {name!r}")
-        target = _LEGACY_CATALOG_EQUIVALENTS.get(name)
-        if name in catalog.relations and target != name:
-            raise ValueError(
-                f"Predicate guidance collision for {name!r}: an explicit reviewed "
-                "catalog equivalence is required"
-            )
-        if target is not None and target in catalog.relations:
-            relation = catalog.relations[target]
-            if tuple(roles) != tuple(argument.name for argument in relation.arguments):
-                raise ValueError(
-                    f"Predicate guidance {name!r} -> {target!r} disagrees with "
-                    "the catalog's arity or ordered argument roles"
-                )
-            mapped.append(
-                f"- {target}({', '.join(roles)}) [catalog predicate; guidance "
-                f"reused from {name}]: {description}"
-            )
-        else:
-            provisional.append(f"- {name}({', '.join(roles)}): {description}")
-    sections = []
-    if mapped:
-        sections.append("Reviewed catalog equivalents:\n" + "\n".join(mapped))
-    if provisional:
-        sections.append(
-            "Uncataloged relation hints (use ProvisionalRelation):\n"
-            + "\n".join(provisional)
-        )
-    if fallback:
-        sections.append("Fallback interpretation guidance:\n" + "\n".join(fallback))
-    return "\n\n".join(sections)
 
 
 def _worked_examples(catalog: OntologyCatalog) -> str:
@@ -176,13 +93,13 @@ def _worked_examples(catalog: OntologyCatalog) -> str:
             raise ValueError(f"Invalid catalog example on line {line_number}")
         if not set(required) <= selected_versions:
             continue
-        output = normalize_document_target(
+        output = SemanticExtraction.model_validate(
             {
                 "entities": example["entities"],
                 "assertions": example["assertions"],
                 "rules": example.get("rules", []),
             }
-        )
+        ).model_dump(mode="json")
         rendered.append(
             "<worked_example>\n"
             f"<example_source_text>\n{example['source_text']}\n</example_source_text>\n"
@@ -216,7 +133,6 @@ def build_catalog_document_prompt(
         or "{catalog_guide}" not in system_prompt
         or "{worked_examples}" not in system_prompt
         or "{extraction_guidance}" not in system_prompt
-        or "{relation_guidance}" not in system_prompt
     ):
         raise ValueError("Catalog prompt is missing its ontology placeholders")
 
@@ -224,7 +140,6 @@ def build_catalog_document_prompt(
         system_prompt.replace("{ontology_versions}", ", ".join(catalog.versions))
         .replace("{catalog_guide}", _catalog_guide(catalog))
         .replace("{extraction_guidance}", load_shared_extraction_guidance())
-        .replace("{relation_guidance}", _relation_guidance(catalog))
         .replace("{worked_examples}", _worked_examples(catalog))
     )
     guidance = guidance.rstrip()

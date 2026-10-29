@@ -1,316 +1,214 @@
+"""Tests for semantic parser normalization and repair behavior."""
+
 from __future__ import annotations
 
 import pytest
 
 from parser.semantic import ReferenceSemanticParser, SemanticParseError
+from parser.semantic.backends import CallableBackend
 from parser.semantic.schema import SemanticParseResult
+from parser.semantic.semantic_parser import SemanticParserConfig
+from tests.semantic_fixtures import result as fixture_result
 
 
-def make_result(assertions: list[dict[str, object]]) -> SemanticParseResult:
-    """Build structured semantic output for repair/regression tests."""
-    return SemanticParseResult.model_validate({"assertions": assertions})
-
-
-# Coreference repair
-
-
-def test_rejects_when_unresolved_pronoun_breaks_only_known_predicate() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "StateOf",
-                "relation": None,
-                "arguments": [
-                    {"value": "She", "role": "entity"},
-                    {"value": "tired", "role": "state"},
-                ],
-                "fallback": False,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.9,
-                "source_span": "She was tired.",
-                "alternatives": [],
-            }
-        ]
+def _parser() -> ReferenceSemanticParser:
+    return ReferenceSemanticParser(
+        backend=CallableBackend(lambda **_: "{}"),
+        config=SemanticParserConfig(model_name="fixture"),
     )
 
-    with pytest.raises(
-        SemanticParseError,
-        match="No grounded assertions remain",
-    ):
-        ReferenceSemanticParser.repair_ambiguous_pronouns(result)
+
+def _assertion(
+    predicate: str,
+    entity_id: str,
+    evidence: str,
+    *,
+    relation: str | None = None,
+    fallback: bool = False,
+    factuality: str = "asserted",
+) -> dict:
+    return {
+        "predicate": predicate,
+        "relation": relation,
+        "arguments": [{"entity_id": entity_id, "role": "event_id"}],
+        "fallback": fallback,
+        "factuality": factuality,
+        "confidence": 0.9,
+        "evidence": [{"text": evidence}],
+    }
 
 
-def test_removes_unresolved_pronoun_from_evaluation() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": "be",
-                "arguments": [
-                    {"value": "he", "role": "agent"},
-                    {"value": "late", "role": "patient"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.9,
-                "source_span": "he was late",
-                "alternatives": [],
-            }
-        ]
+def _result(source: str, extraction: dict) -> SemanticParseResult:
+    base = fixture_result(source)
+    data = base.model_dump(mode="json")
+    data["extraction"] = extraction
+    return SemanticParseResult.model_validate(data)
+
+
+def test_unresolved_pronoun_is_kept_and_recorded_as_a_repair() -> None:
+    result = _result(
+        "She left.",
+        {
+            "entities": [
+                {"id": "she", "entity_type": "Entity", "mention": {"text": "She"}}
+            ],
+            "assertions": [_assertion("Event", "she", "She left.")],
+            "rules": [],
+        },
     )
 
-    repaired = ReferenceSemanticParser.repair_ambiguous_pronouns(result)
+    repaired, changes = _parser().repair_ambiguous_pronouns(result)
 
-    assert len(repaired.assertions) == 1
-
-    assertion = repaired.assertions[0]
-
-    assert assertion.predicate == "Evaluation"
-    assert assertion.relation == "be"
-    assert assertion.fallback is True
-    assert [argument.value for argument in assertion.arguments] == ["late"]
+    assert repaired.extraction.assertions[0].arguments[0].entity_id == "she"
+    assert [change.kind for change in changes] == ["unresolved_pronoun"]
+    assert result.provenance.repairs == []
 
 
-def test_preserves_resolved_coreference() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": "enter",
-                "arguments": [
-                    {"value": "Alice", "role": "agent"},
-                    {"value": "room", "role": "patient"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.99,
-                "source_span": "She entered the room.",
-                "alternatives": [],
-            }
-        ]
+def test_pronoun_kind_is_cleared_without_mutating_input() -> None:
+    result = _result(
+        "She left.",
+        {
+            "entities": [
+                {
+                    "id": "she",
+                    "entity_type": "Entity",
+                    "kind": "she",
+                    "mention": {"text": "She"},
+                }
+            ],
+            "assertions": [_assertion("Event", "she", "She left.")],
+            "rules": [],
+        },
     )
 
-    repaired = ReferenceSemanticParser.repair_ambiguous_pronouns(result)
+    repaired, changes = _parser().repair_ambiguous_pronouns(result)
 
-    assert len(repaired.assertions) == 1
-
-    assertion = repaired.assertions[0]
-
-    assert assertion.relation == "enter"
-    assert [argument.value for argument in assertion.arguments] == [
-        "Alice",
-        "room",
-    ]
-    assert [argument.role for argument in assertion.arguments] == [
-        "agent",
-        "patient",
-    ]
+    assert repaired.extraction.entities[0].kind is None
+    assert result.extraction.entities[0].kind == "she"
+    assert {change.kind for change in changes} == {"pronoun_kind", "unresolved_pronoun"}
 
 
-def test_rejects_when_only_argument_is_unresolved_pronoun() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": "leave",
-                "arguments": [
-                    {"value": "he", "role": "agent"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.7,
-                "source_span": "he should leave",
-                "alternatives": [],
-            }
-        ]
+def test_known_predicate_contract_repair_clears_relation_and_fallback() -> None:
+    result = _result(
+        "Mira left.",
+        {
+            "entities": [
+                {"id": "mira", "entity_type": "Entity", "mention": {"text": "Mira"}}
+            ],
+            "assertions": [
+                _assertion(
+                    "Event", "mira", "Mira left.", relation="leave", fallback=True
+                )
+            ],
+            "rules": [],
+        },
     )
 
-    with pytest.raises(
-        SemanticParseError,
-        match="No grounded assertions remain",
-    ):
-        ReferenceSemanticParser.repair_ambiguous_pronouns(result)
+    repaired, changes = _parser().repair_known_predicate_contract(result)
+
+    assertion = repaired.extraction.assertions[0]
+    assert assertion.relation is None
+    assert assertion.fallback is False
+    assert [change.kind for change in changes] == ["predicate_contract"]
+    assert result.extraction.assertions[0].relation == "leave"
 
 
-def test_keeps_grounded_assertion_and_drops_incomplete_known_predicate() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": "examine",
-                "arguments": [
-                    {"value": "doctor", "role": "agent"},
-                    {"value": "patient", "role": "patient"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.99,
-                "source_span": "The doctor examined the patient.",
-                "alternatives": [],
-            },
-            {
-                "predicate": "StateOf",
-                "relation": None,
-                "arguments": [
-                    {"value": "She", "role": "entity"},
-                    {"value": "tired", "role": "state"},
-                ],
-                "fallback": False,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.7,
-                "source_span": "She was tired.",
-                "alternatives": [
-                    "entity could be doctor",
-                    "entity could be patient",
-                ],
-            },
-        ]
+def test_unresolved_pronoun_in_universal_rule_binds_to_its_variable() -> None:
+    result = _result(
+        "They shall leave.",
+        {
+            "entities": [
+                {"id": "they", "entity_type": "Entity", "mention": {"text": "They"}}
+            ],
+            "assertions": [],
+            "rules": [
+                {
+                    "scope": "universal",
+                    "variables": [{"id": "$person", "entity_type": "Entity"}],
+                    "antecedents": [
+                        _assertion(
+                            "Evaluation",
+                            "they",
+                            "They",
+                            relation="leave",
+                            fallback=True,
+                            factuality="hypothetical",
+                        )
+                    ],
+                    "consequents": [
+                        _assertion(
+                            "Evaluation",
+                            "they",
+                            "leave",
+                            relation="leave",
+                            fallback=True,
+                            factuality="hypothetical",
+                        )
+                    ],
+                    "evidence": [{"text": "They shall leave."}],
+                }
+            ],
+        },
     )
 
-    repaired = ReferenceSemanticParser.repair_ambiguous_pronouns(result)
+    repaired, changes = _parser().repair_ambiguous_pronouns(result)
 
-    assert len(repaired.assertions) == 1
-
-    assertion = repaired.assertions[0]
-
-    assert assertion.predicate == "Evaluation"
-    assert assertion.relation == "examine"
-    assert [argument.value for argument in assertion.arguments] == [
-        "doctor",
-        "patient",
-    ]
+    rule = repaired.extraction.rules[0]
+    assert rule.antecedents[0].arguments[0].entity_id == "$person"
+    assert rule.consequents[0].arguments[0].entity_id == "$person"
+    assert [change.kind for change in changes] == ["pronoun_in_rule", "pronoun_in_rule"]
 
 
-def test_keeps_grounded_assertion_and_drops_pronoun_only_evaluation() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": "tell",
-                "arguments": [
-                    {"value": "John", "role": "agent"},
-                    {"value": "Peter", "role": "patient"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.99,
-                "source_span": "John told Peter",
-                "alternatives": [],
-            },
-            {
-                "predicate": "Evaluation",
-                "relation": "leave",
-                "arguments": [
-                    {"value": "he", "role": "agent"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.7,
-                "source_span": "he should leave",
-                "alternatives": [
-                    "agent could be John",
-                    "agent could be Peter",
-                ],
-            },
-        ]
+@pytest.mark.parametrize("role", ["agent", "patient", "entity"])
+def test_semantic_argument_roles_are_preserved(role: str) -> None:
+    result = fixture_result("Mira left.")
+    argument = result.extraction.assertions[0].arguments[0]
+    argument.role = role
+
+    reparsed = SemanticParseResult.model_validate(result.model_dump())
+    assert reparsed.extraction.assertions[0].arguments[0].role == role
+
+
+def test_rejects_unresolved_pronoun_with_multiple_universal_variables() -> None:
+    result = _result(
+        "She shall leave.",
+        {
+            "entities": [
+                {"id": "she", "entity_type": "Entity", "mention": {"text": "She"}}
+            ],
+            "assertions": [],
+            "rules": [
+                {
+                    "scope": "universal",
+                    "variables": [
+                        {"id": "$person", "entity_type": "Entity"},
+                        {"id": "$agent", "entity_type": "Entity"},
+                    ],
+                    "antecedents": [
+                        _assertion(
+                            "Evaluation",
+                            "she",
+                            "She",
+                            relation="leave",
+                            fallback=True,
+                            factuality="hypothetical",
+                        )
+                    ],
+                    "consequents": [
+                        _assertion(
+                            "Evaluation",
+                            "she",
+                            "leave",
+                            relation="leave",
+                            fallback=True,
+                            factuality="hypothetical",
+                        )
+                    ],
+                    "evidence": [{"text": "She shall leave."}],
+                }
+            ],
+        },
     )
 
-    repaired = ReferenceSemanticParser.repair_ambiguous_pronouns(result)
-
-    assert len(repaired.assertions) == 1
-
-    assertion = repaired.assertions[0]
-
-    assert assertion.relation == "tell"
-    assert [argument.value for argument in assertion.arguments] == [
-        "John",
-        "Peter",
-    ]
-
-
-def test_coreference_repair_does_not_mutate_original() -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": "be",
-                "arguments": [
-                    {"value": "he", "role": "agent"},
-                    {"value": "late", "role": "patient"},
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.9,
-                "source_span": "he was late",
-                "alternatives": [],
-            }
-        ]
-    )
-
-    repaired = ReferenceSemanticParser.repair_ambiguous_pronouns(result)
-
-    assert [argument.value for argument in repaired.assertions[0].arguments] == ["late"]
-
-    assert [argument.value for argument in result.assertions[0].arguments] == [
-        "he",
-        "late",
-    ]
-
-
-# Semantic role consistency
-
-
-@pytest.mark.parametrize(
-    ("relation", "value", "role"),
-    [
-        ("work", "machine", "agent"),
-        ("fail", "machine", "patient"),
-        ("stop", "process", "patient"),
-        ("expand", "company", "patient"),
-        ("succeed", "product", "patient"),
-        ("work", "drug", "agent"),
-        ("recover", "patient", "patient"),
-        ("sleep", "child", "agent"),
-        ("open", "door", "patient"),
-        ("increase", "temperature", "entity"),
-    ],
-)
-def test_single_participant_semantic_roles(
-    relation: str,
-    value: str,
-    role: str,
-) -> None:
-    result = make_result(
-        [
-            {
-                "predicate": "Evaluation",
-                "relation": relation,
-                "arguments": [
-                    {
-                        "value": value,
-                        "role": role,
-                    }
-                ],
-                "fallback": True,
-                "polarity": "positive",
-                "factuality": "asserted",
-                "confidence": 0.99,
-                "source_span": "test",
-                "alternatives": [],
-            }
-        ]
-    )
-
-    assertion = result.assertions[0]
-
-    assert assertion.arguments[0].value == value
-    assert assertion.arguments[0].role == role
+    with pytest.raises(SemanticParseError, match="universal rule"):
+        _parser().repair_ambiguous_pronouns(result)

@@ -48,6 +48,26 @@ def _require_text(output: str | None, provider: str) -> str:
     return output.strip()
 
 
+class OutputTruncatedError(RuntimeError):
+    """Raised when a provider stops at the output-token limit."""
+
+
+def _reject_truncation(truncated: bool, provider: str) -> None:
+    """Fail clearly instead of returning output cut off at the token limit."""
+    if truncated:
+        raise OutputTruncatedError(
+            f"{provider} stopped at the output-token limit; "
+            "raise the profile's token budget"
+        )
+
+
+def _field(value: Any, name: str) -> Any:
+    """Read a field from an SDK object or a plain mapping response."""
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
 # ── Hosted teacher backends ────────────────────────────────────────────────────
 
 
@@ -61,6 +81,7 @@ class GeminiBackend:
         client: Any | None = None,
         *,
         max_output_tokens: int = 256,
+        api_key: str | None = None,
     ) -> None:
         """Create the backend, optionally injecting a client for tests."""
         if max_output_tokens <= 0:
@@ -73,7 +94,7 @@ class GeminiBackend:
                     "GeminiBackend requires 'google-genai'. "
                     "Install it with: pip install google-genai"
                 ) from error
-            client = genai.Client()
+            client = genai.Client(api_key=api_key)
         self._client = client
         self._max_output_tokens = max_output_tokens
 
@@ -83,6 +104,14 @@ class GeminiBackend:
             model=model,
             contents=prompt,
             config={"max_output_tokens": self._max_output_tokens},
+        )
+        candidates = getattr(response, "candidates", None) or []
+        finish_reason = (
+            getattr(candidates[0], "finish_reason", None) if candidates else None
+        )
+        _reject_truncation(
+            getattr(finish_reason, "name", finish_reason) == "MAX_TOKENS",
+            self.provider_name,
         )
         return _require_text(
             getattr(response, "text", None),
@@ -100,6 +129,7 @@ class OpenAIBackend:
         client: Any | None = None,
         *,
         max_output_tokens: int = 256,
+        api_key: str | None = None,
     ) -> None:
         """Create the backend, optionally injecting a client for tests."""
         if max_output_tokens <= 0:
@@ -112,7 +142,7 @@ class OpenAIBackend:
                     "OpenAIBackend requires 'openai'. "
                     "Install it with: pip install openai"
                 ) from error
-            client = OpenAI()
+            client = OpenAI(api_key=api_key)
         self._client = client
         self._max_output_tokens = max_output_tokens
 
@@ -122,6 +152,11 @@ class OpenAIBackend:
             model=model,
             input=prompt,
             max_output_tokens=self._max_output_tokens,
+        )
+        incomplete = getattr(response, "incomplete_details", None)
+        _reject_truncation(
+            getattr(incomplete, "reason", None) == "max_output_tokens",
+            self.provider_name,
         )
         return _require_text(
             getattr(response, "output_text", None),
@@ -139,6 +174,7 @@ class AnthropicBackend:
         client: Any | None = None,
         *,
         max_tokens: int = 256,
+        api_key: str | None = None,
     ) -> None:
         """Create the backend, optionally injecting a client for tests."""
         if max_tokens <= 0:
@@ -152,7 +188,7 @@ class AnthropicBackend:
                     "AnthropicBackend requires 'anthropic'. "
                     "Install it with: pip install anthropic"
                 ) from error
-            client = Anthropic()
+            client = Anthropic(api_key=api_key)
 
         self._client = client
         self._max_tokens = max_tokens
@@ -163,6 +199,10 @@ class AnthropicBackend:
             model=model,
             max_tokens=self._max_tokens,
             messages=[{"role": "user", "content": prompt}],
+        )
+        _reject_truncation(
+            getattr(response, "stop_reason", None) == "max_tokens",
+            self.provider_name,
         )
         output = "".join(
             block.text
@@ -197,6 +237,9 @@ class OpenAICompatibleBackend:
         choices = getattr(response, "choices", None)
         if not choices:
             raise RuntimeError("openai-compatible returned a response without choices")
+        _reject_truncation(
+            getattr(choices[0], "finish_reason", None) == "length", self.provider_name
+        )
         return _require_text(
             getattr(choices[0].message, "content", None),
             self.provider_name,
@@ -204,7 +247,13 @@ class OpenAICompatibleBackend:
 
 
 class OllamaBackend:
-    """Generate output using a local or remote Ollama server."""
+    """Generate output using a local or remote Ollama server.
+
+    ``num_ctx`` sets the context window for each request. Ollama's default
+    (4,096 tokens in current releases) is smaller than the catalog prompt, and
+    Ollama silently drops the start of a prompt that does not fit, so the
+    window must cover the prompt plus ``max_output_tokens``.
+    """
 
     provider_name = "ollama"
 
@@ -216,10 +265,18 @@ class OllamaBackend:
         think: bool | None = None,
         temperature: float | None = None,
         seed: int | None = None,
+        num_ctx: int | None = None,
+        host: str | None = None,
     ) -> None:
         """Create the backend, optionally injecting a client for tests."""
         if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be greater than zero")
+        if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
+            raise ValueError("Ollama seed must be an integer")
+        if num_ctx is not None and (
+            not isinstance(num_ctx, int) or isinstance(num_ctx, bool) or num_ctx <= 0
+        ):
+            raise ValueError("Ollama num_ctx must be a positive integer")
         if client is None:
             try:
                 from ollama import Client
@@ -228,14 +285,13 @@ class OllamaBackend:
                     "OllamaBackend requires 'ollama'. "
                     "Install it with: pip install ollama"
                 ) from error
-            client = Client()
+            client = Client(host=host)
         self._client = client
         self._max_output_tokens = max_output_tokens
         self._think = think
         self._temperature = temperature
-        if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool)):
-            raise ValueError("Ollama seed must be an integer")
         self._seed = seed
+        self._num_ctx = num_ctx
 
     def generate(self, *, prompt: str, model: str) -> str:
         """Generate text using an Ollama model."""
@@ -253,6 +309,8 @@ class OllamaBackend:
             options["temperature"] = self._temperature
         if self._seed is not None:
             options["seed"] = self._seed
+        if self._num_ctx is not None:
+            options["num_ctx"] = self._num_ctx
         thinking = {"think": self._think} if self._think is not None else {}
         formatting = {"format": schema} if schema is not None else {}
         response = self._client.generate(
@@ -263,12 +321,10 @@ class OllamaBackend:
             **thinking,
             **formatting,
         )
-        output = (
-            response.get("response")
-            if isinstance(response, dict)
-            else getattr(response, "response", None)
+        _reject_truncation(
+            _field(response, "done_reason") == "length", self.provider_name
         )
-        return _require_text(output, self.provider_name)
+        return _require_text(_field(response, "response"), self.provider_name)
 
 
 class TransformersBackend:
@@ -314,11 +370,26 @@ class TransformersBackend:
 
         input_length = inputs["input_ids"].shape[1]
         generated_ids = output_ids[0, input_length:]
+        _reject_truncation(
+            len(generated_ids) >= self._max_new_tokens
+            and int(generated_ids[-1]) not in self._eos_token_ids(),
+            self.provider_name,
+        )
         output = self._tokenizer.decode(
             generated_ids,
             skip_special_tokens=True,
         )
         return _require_text(output, self.provider_name)
+
+    def _eos_token_ids(self) -> set[int]:
+        """Return the token ids that end generation for the loaded model."""
+        config = getattr(self._model, "generation_config", None)
+        eos = getattr(config, "eos_token_id", None)
+        if eos is None:
+            eos = getattr(self._tokenizer, "eos_token_id", None)
+        if eos is None:
+            return set()
+        return {int(token) for token in (eos if isinstance(eos, list) else [eos])}
 
 
 class CallableBackend:

@@ -6,8 +6,6 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from hybrid_miner.contracts import SemanticDocument
-
     from parser.semantic.backends import (
         AnthropicBackend,
         CallableBackend,
@@ -33,16 +31,24 @@ if TYPE_CHECKING:
     )
     from parser.semantic.normalization import (
         SemanticNormalizationError,
-        normalize_semantic_result,
+        normalize_extraction_payload,
         normalize_symbol,
     )
     from parser.semantic.schema import (
         SemanticArgument,
         SemanticAssertion,
+        SemanticEntity,
+        SemanticExtraction,
+        SemanticParseProvenance,
         SemanticParseResult,
+        SemanticRepair,
+        SemanticRule,
+        SemanticRuleVariable,
+        SourceDocument,
+        SourceQuote,
     )
     from parser.semantic.semantic_parser import (
-        ALLOWED_PREDICATES,
+        PARSER_VERSION,
         DistilledSemanticParser,
         ModelGenerationError,
         ReferenceSemanticParser,
@@ -51,7 +57,6 @@ if TYPE_CHECKING:
     )
 
 _EXPORTS = {
-    "SemanticDocument": "hybrid_miner.contracts",
     **dict.fromkeys(
         (
             "AnthropicBackend",
@@ -81,16 +86,32 @@ _EXPORTS = {
         "parser.semantic.model_config",
     ),
     **dict.fromkeys(
-        ("SemanticNormalizationError", "normalize_semantic_result", "normalize_symbol"),
+        (
+            "SemanticNormalizationError",
+            "normalize_extraction_payload",
+            "normalize_symbol",
+        ),
         "parser.semantic.normalization",
     ),
     **dict.fromkeys(
-        ("SemanticArgument", "SemanticAssertion", "SemanticParseResult"),
+        (
+            "SemanticArgument",
+            "SemanticAssertion",
+            "SemanticEntity",
+            "SemanticExtraction",
+            "SemanticParseProvenance",
+            "SemanticParseResult",
+            "SemanticRepair",
+            "SemanticRule",
+            "SemanticRuleVariable",
+            "SourceDocument",
+            "SourceQuote",
+        ),
         "parser.semantic.schema",
     ),
     **dict.fromkeys(
         (
-            "ALLOWED_PREDICATES",
+            "PARSER_VERSION",
             "DistilledSemanticParser",
             "ModelGenerationError",
             "ReferenceSemanticParser",
@@ -101,7 +122,6 @@ _EXPORTS = {
     ),
 }
 __all__ = [
-    "ALLOWED_PREDICATES",
     "AnthropicBackend",
     "CallableBackend",
     "DistillationRecord",
@@ -113,23 +133,31 @@ __all__ = [
     "OllamaBackend",
     "OpenAIBackend",
     "OpenAICompatibleBackend",
+    "PARSER_VERSION",
     "ReferenceSemanticParser",
     "RejectedRecord",
     "SemanticArgument",
     "SemanticAssertion",
-    "SemanticDocument",
+    "SemanticDatasetBuilder",
+    "SemanticEntity",
+    "SemanticExtraction",
     "SemanticNormalizationError",
     "SemanticParseError",
+    "SemanticParseProvenance",
     "SemanticParseResult",
     "SemanticParserConfig",
-    "SemanticDatasetBuilder",
+    "SemanticRepair",
+    "SemanticRule",
+    "SemanticRuleVariable",
+    "SourceDocument",
+    "SourceQuote",
     "TransformersBackend",
     "build_distilled_semantic_parser",
     "build_reference_semantic_parser",
     "create_backend",
     "default_model_config_path",
     "load_model_profile",
-    "normalize_semantic_result",
+    "normalize_extraction_payload",
     "normalize_symbol",
 ]
 
@@ -137,14 +165,7 @@ __all__ = [
 def __getattr__(name: str) -> Any:
     if name not in _EXPORTS:
         raise AttributeError(name)
-    try:
-        value = getattr(import_module(_EXPORTS[name]), name)
-    except ModuleNotFoundError as error:
-        if error.name and error.name.startswith("hybrid_miner"):
-            raise ModuleNotFoundError(
-                "Semantic document parsing requires Hybrid Miner. "
-                "Install the project with its [miner] extra on Python 3.11+."
-            ) from error
-        raise
+
+    value = getattr(import_module(_EXPORTS[name]), name)
     globals()[name] = value
     return value
