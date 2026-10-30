@@ -17,6 +17,7 @@ def test_loads_versioned_catalog_with_explicit_types() -> None:
     assert catalog.types == frozenset({"Entity", "Event", "Proposition", "Clause"})
     assert catalog.versions == (
         "discourse-v1",
+        "general-v1",
         "lexical-v1",
         "narrative-v1",
         "program-v1",
@@ -79,7 +80,7 @@ def test_exports_ordered_immutable_type_signatures() -> None:
 
 
 @pytest.mark.parametrize("name", ["AliasOf", "PipelineRole"])
-def test_provisional_program_relations_are_not_approved_predicates(name: str) -> None:
+def test_legacy_relations_are_not_approved_predicates(name: str) -> None:
     catalog = load_ontology_catalog()
 
     assert name not in catalog.relations

@@ -8,7 +8,7 @@ pytest.importorskip("hybrid_miner.ontology.bundle")
 
 from hybrid_miner.ontology.bundle import OntologyBundle  # noqa: E402
 
-from parser.ontology.miner_bundle import load_catalog_bundle  # noqa: E402
+from symbolic_pipeline.miner_bundle import load_catalog_bundle  # noqa: E402
 
 
 def test_default_bundle_round_trips_with_miner_contract(tmp_path: Path) -> None:

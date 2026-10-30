@@ -1,5 +1,6 @@
 """Tests for configuration-driven semantic-parser backend selection."""
 
+import pytest
 import yaml
 
 from parser.semantic.model_config import default_model_config_path, load_model_profile
@@ -52,3 +53,97 @@ def test_distilled_factory_uses_shipped_provider_budget_and_catalog(monkeypatch)
     model_config.build_distilled_semantic_parser(catalog=catalog)
     assert calls[0]["max_new_tokens"] == 777
     assert calls[0]["catalog"] is catalog
+
+
+def _profile(provider: str, **settings):
+    from parser.semantic.model_config import ModelProfile
+
+    return ModelProfile(name="test", provider=provider, model="m", settings=settings)
+
+
+def test_hosted_backend_receives_key_from_configured_variable(monkeypatch) -> None:
+    from parser.semantic import backends, model_config
+
+    captured = {}
+    monkeypatch.setattr(model_config, "_load_environment", lambda: None)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CUSTOM_OPENAI_KEY", "sk-custom")
+    monkeypatch.setattr(
+        backends.OpenAIBackend,
+        "__init__",
+        lambda self, **kwargs: captured.update(kwargs),
+    )
+
+    model_config.create_backend(_profile("openai", api_key_env="CUSTOM_OPENAI_KEY"))
+
+    assert captured["api_key"] == "sk-custom"
+
+
+def test_ollama_backend_receives_host_from_configured_variable(monkeypatch) -> None:
+    from parser.semantic import backends, model_config
+
+    captured = {}
+    monkeypatch.setattr(model_config, "_load_environment", lambda: None)
+    monkeypatch.setenv("CUSTOM_OLLAMA_HOST", "http://gpu-box:11434")
+    monkeypatch.setattr(
+        backends.OllamaBackend,
+        "__init__",
+        lambda self, **kwargs: captured.update(kwargs),
+    )
+
+    model_config.create_backend(_profile("ollama", host_env="CUSTOM_OLLAMA_HOST"))
+
+    assert captured["host"] == "http://gpu-box:11434"
+
+
+def test_missing_credentials_and_invalid_settings_name_the_profile(
+    monkeypatch,
+) -> None:
+    from parser.semantic import model_config
+
+    monkeypatch.setattr(model_config, "_load_environment", lambda: None)
+    monkeypatch.delenv("UNSET_KEY", raising=False)
+    monkeypatch.delenv("UNSET_URL", raising=False)
+
+    with pytest.raises(ValueError, match="'test' requires UNSET_KEY"):
+        model_config.create_backend(_profile("anthropic", api_key_env="UNSET_KEY"))
+    with pytest.raises(ValueError, match="'test' requires UNSET_URL"):
+        model_config.create_backend(
+            _profile("openai-compatible", base_url_env="UNSET_URL")
+        )
+    with pytest.raises(ValueError, match="'max_output_tokens' must be a positive"):
+        model_config.create_backend(_profile("ollama", max_output_tokens="512"))
+    with pytest.raises(ValueError, match="'seed' must be an integer"):
+        model_config.create_backend(_profile("ollama", seed=True))
+
+
+def test_model_env_resolves_model_and_rejects_ambiguous_profiles(
+    tmp_path, monkeypatch
+) -> None:
+    from parser.semantic import model_config
+
+    monkeypatch.setattr(model_config, "_load_environment", lambda: None)
+    monkeypatch.setenv("SERVED_MODEL", " served/model ")
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "active": "env_model",
+                "profiles": {
+                    "env_model": {"provider": "ollama", "model_env": "SERVED_MODEL"},
+                    "both": {
+                        "provider": "ollama",
+                        "model": "m",
+                        "model_env": "SERVED_MODEL",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_model_profile(config)
+    assert profile.model == "served/model"
+    assert "model_env" not in profile.settings
+    with pytest.raises(ValueError, match="either 'model' or 'model_env'"):
+        load_model_profile(config, profile_name="both")

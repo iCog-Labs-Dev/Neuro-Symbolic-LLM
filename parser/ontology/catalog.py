@@ -299,3 +299,75 @@ def load_ontology_catalog(
         types=frozenset(declared_types),
         relations=MappingProxyType(relations),
     )
+
+
+DEFAULT_BUNDLE_MANIFEST = (
+    Path(__file__).resolve().parent / "bundles" / "semantic-extraction-v1.yaml"
+)
+
+
+@dataclass(frozen=True)
+class BundleManifest:
+    """A named, versioned set of ontology modules, read from a manifest file."""
+
+    bundle_id: str
+    bundle_version: str
+    modules: Mapping[str, str]
+
+
+def load_manifest_catalog(
+    manifest_path: Path = DEFAULT_BUNDLE_MANIFEST,
+    *,
+    ontology_directory: Path | None = None,
+) -> tuple[OntologyCatalog, BundleManifest]:
+    """Load the modules a bundle manifest selects and reject version mismatches.
+
+    The manifest pins one version per module, so annotation, training, and
+    checkpoint inference use the same catalog. symbolic_pipeline builds the
+    miner's ontology bundle from the same manifest.
+    """
+
+    try:
+        raw: Any = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise OntologyCatalogError(
+            f"Cannot load ontology bundle manifest {manifest_path}: {error}"
+        ) from error
+    if not isinstance(raw, dict) or set(raw) != {
+        "bundle_id",
+        "bundle_version",
+        "modules",
+    }:
+        raise OntologyCatalogError(
+            "Ontology bundle manifest requires bundle_id, bundle_version, and modules"
+        )
+    for field in ("bundle_id", "bundle_version"):
+        if not isinstance(raw[field], str) or not raw[field].strip():
+            raise OntologyCatalogError(f"Ontology bundle {field} must be nonempty text")
+    modules = raw["modules"]
+    if (
+        not isinstance(modules, dict)
+        or not modules
+        or any(
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(version, str)
+            or not version.strip()
+            for name, version in modules.items()
+        )
+    ):
+        raise OntologyCatalogError(
+            "Ontology bundle modules must map names to version identifiers"
+        )
+    catalog = load_ontology_catalog(ontology_directory, modules=modules)
+    actual_versions = dict(zip(sorted(modules), catalog.versions, strict=True))
+    if actual_versions != modules:
+        raise OntologyCatalogError(
+            f"Ontology bundle version mismatch: declared={modules}, actual={actual_versions}"
+        )
+    manifest = BundleManifest(
+        bundle_id=raw["bundle_id"],
+        bundle_version=raw["bundle_version"],
+        modules=MappingProxyType(dict(modules)),
+    )
+    return catalog, manifest

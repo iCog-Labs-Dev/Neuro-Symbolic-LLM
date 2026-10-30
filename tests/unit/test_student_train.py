@@ -1,13 +1,27 @@
 """Exercise training settings with a tiny local model and real optimizer steps."""
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 
+from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION
 from parser.student import train as training
 from tests.semantic_fixtures import pair as canonical_pair
 from tests.semantic_fixtures import write_checkpoint_metadata
+
+
+def _stub_catalog_bundle_loader(monkeypatch):
+    """Keep training unit tests independent of the optional miner package."""
+    from parser.ontology.catalog import load_ontology_catalog
+
+    module = ModuleType("parser.ontology.miner_bundle")
+    module.load_catalog_bundle = lambda *_args, **_kwargs: (
+        load_ontology_catalog(),
+        None,
+    )
+    monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
 class TinyModel(torch.nn.Module):
@@ -27,13 +41,16 @@ class TinyModel(torch.nn.Module):
 
 @pytest.fixture
 def run_training(monkeypatch, tmp_path):
+    _stub_catalog_bundle_loader(monkeypatch)
     config = {
         "student": {"base_model": "tiny", "output_dir": str(tmp_path)},
         "data": {
             "val_split": 0,
             "max_length": 32,
-            "contract_version": "semantic-document-v1",
-            "ontology_bundle_manifest": "parser/ontology/bundles/semantic-extraction-v1.yaml",
+            "contract_version": SEMANTIC_CONTRACT_VERSION,
+            "ontology_bundle_manifest": (
+                "parser/ontology/bundles/semantic-extraction-v1.yaml"
+            ),
         },
         "training": {
             "batch_size": 1,
@@ -155,13 +172,16 @@ def capture_training_splits(monkeypatch, tmp_path):
     """Use real JSONL loading and stop before any model is downloaded."""
     import json
 
+    _stub_catalog_bundle_loader(monkeypatch)
     config = {
         "student": {"base_model": "tiny", "output_dir": str(tmp_path / "model")},
         "data": {
             "val_split": 0.2,
             "max_length": 32,
-            "contract_version": "semantic-document-v1",
-            "ontology_bundle_manifest": "parser/ontology/bundles/semantic-extraction-v1.yaml",
+            "contract_version": SEMANTIC_CONTRACT_VERSION,
+            "ontology_bundle_manifest": (
+                "parser/ontology/bundles/semantic-extraction-v1.yaml"
+            ),
         },
         "training": {"seed": 42},
     }

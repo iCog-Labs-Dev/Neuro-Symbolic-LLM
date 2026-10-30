@@ -7,7 +7,7 @@ relations:
         type: Entity
       - name: arguments
         type: Entity
-    confidence_range: [0.9, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Represent a parsed AST application node with its callable and argument structure."
   Lambda:
     arity: 2
@@ -16,7 +16,7 @@ relations:
         type: Entity
       - name: body
         type: Entity
-    confidence_range: [0.9, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Represent a parsed lambda node with its bound parameter and body."
   Map:
     arity: 2
@@ -25,7 +25,7 @@ relations:
         type: Entity
       - name: collection
         type: Entity
-    confidence_range: [0.9, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Represent a parsed map application over a collection."
   Fold:
     arity: 3
@@ -36,5 +36,5 @@ relations:
         type: Entity
       - name: reducer
         type: Entity
-    confidence_range: [0.9, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Represent a parsed fold application with its collection, initial value, and reducer."

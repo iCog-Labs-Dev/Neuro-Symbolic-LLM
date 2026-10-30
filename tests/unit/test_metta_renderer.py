@@ -20,37 +20,66 @@ def make_result(
     relation: str | None = None,
     fallback: bool = False,
     polarity: str = "positive",
+    factuality: str = "asserted",
+    modality: str = "none",
 ) -> SemanticParseResult:
-    """Build structured output for renderer tests."""
+    """Build a complete parse result whose arguments refer to entity IDs."""
+    assert len(values) == len(roles)
+    source_text = " ".join((*values, "supporting text"))
+    entity_ids = [f"entity_{index}" for index in range(len(values))]
     return SemanticParseResult.model_validate(
         {
-            "assertions": [
-                {
-                    "predicate": predicate,
-                    "relation": relation,
-                    "arguments": [
-                        {"value": value, "role": role}
-                        for value, role in zip(values, roles, strict=True)
-                    ],
-                    "fallback": fallback,
-                    "polarity": polarity,
-                    "confidence": 0.99,
-                    "source_span": "supporting text",
-                    "alternatives": [],
-                }
-            ]
+            "document": {
+                "document_id": "renderer-test",
+                "corpus_id": "unit-tests",
+                "source_text": source_text,
+            },
+            "provenance": {
+                "provider": "test",
+                "model": "fixture",
+                "parser_version": "test-v1",
+                "prompt_version": "test-v1",
+                "ontology_versions": ["test-v1"],
+            },
+            "extraction": {
+                "entities": [
+                    {
+                        "id": entity_id,
+                        "entity_type": "Entity",
+                        "mention": {"text": value},
+                    }
+                    for entity_id, value in zip(entity_ids, values, strict=True)
+                ],
+                "assertions": [
+                    {
+                        "predicate": predicate,
+                        "relation": relation,
+                        "arguments": [
+                            {"entity_id": entity_id, "role": role}
+                            for entity_id, role in zip(entity_ids, roles, strict=True)
+                        ],
+                        "fallback": fallback,
+                        "polarity": polarity,
+                        "factuality": factuality,
+                        "modality": modality,
+                        "confidence": 0.99,
+                        "evidence": [{"text": "supporting text"}],
+                    }
+                ],
+                "rules": [],
+            },
         }
     )
 
 
-def test_renders_known_predicate() -> None:
+def test_renders_known_predicate_with_entity_ids() -> None:
     result = make_result(
         predicate="Has",
         values=("dog", "fur"),
         roles=("owner", "possessed"),
     )
 
-    assert render_metta(result) == ["(Has dog fur)"]
+    assert render_metta(result) == ["(Has entity_0 entity_1)"]
 
 
 def test_renders_evaluation_with_argument_list() -> None:
@@ -62,94 +91,74 @@ def test_renders_evaluation_with_argument_list() -> None:
         fallback=True,
     )
 
-    assert render_metta(result) == ["(Evaluation buy (List Ben car))"]
+    assert render_metta(result) == ["(Evaluation buy (List entity_0 entity_1))"]
 
 
 def test_renders_negative_assertion() -> None:
     result = make_result(
-        predicate="On",
+        predicate="LocatedIn",
         values=("cat", "chair"),
-        roles=("entity", "surface"),
+        roles=("entity", "location"),
         polarity="negative",
     )
 
-    assert render_metta(result) == ["(Not (On cat chair))"]
+    assert render_metta(result) == ["(Not (LocatedIn entity_0 entity_1))"]
 
 
-def test_preserves_symbol_case() -> None:
+def test_preserves_symbol_case_in_entity_ids() -> None:
     result = make_result(
         predicate="LocatedIn",
         values=("Apple", "California"),
         roles=("entity", "location"),
     )
 
-    assert render_metta(result) == ["(LocatedIn Apple California)"]
+    assert render_metta(result) == ["(LocatedIn entity_0 entity_1)"]
 
 
 def test_renders_multiple_assertions_in_order() -> None:
-    first = make_result(
+    result = make_result(
         predicate="Has",
         values=("dog", "fur"),
         roles=("owner", "possessed"),
     )
     second = make_result(
         predicate="CanDo",
-        values=("dog", "bark"),
+        values=("dog", "fur"),
         roles=("agent", "action"),
     )
-    result = SemanticParseResult(assertions=[first.assertions[0], second.assertions[0]])
+    result.extraction.assertions.append(second.extraction.assertions[0])
 
-    assert render_metta(result) == ["(Has dog fur)", "(CanDo dog bark)"]
+    assert render_metta(result) == [
+        "(Has entity_0 entity_1)",
+        "(CanDo entity_0 entity_1)",
+    ]
 
 
-@pytest.mark.parametrize("unsafe_value", ["New York", "car)", "(car"])
-def test_rejects_unsafe_argument_symbols(unsafe_value: str) -> None:
+def test_rejects_predicate_that_would_change_expression_structure() -> None:
     result = make_result(
-        predicate="Has",
-        values=("company", unsafe_value),
+        predicate="Has)",
+        values=("company", "car"),
         roles=("owner", "possessed"),
     )
 
-    with pytest.raises(MettaRenderError, match="argument value"):
-        render_metta(result)
-
-
-def test_rejects_unsafe_evaluation_relation() -> None:
-    result = make_result(
-        predicate="Evaluation",
-        relation="buy car",
-        values=("Ben", "car"),
-        roles=("agent", "patient"),
-        fallback=True,
-    )
-
-    with pytest.raises(MettaRenderError, match="relation"):
+    with pytest.raises(MettaRenderError, match="predicate"):
         render_metta(result)
 
 
 def test_validates_and_parses_rendered_expressions() -> None:
-    atoms = validate_rendered_metta(["(Has dog fur)", "(Not (On cat chair))"])
+    atoms = validate_rendered_metta(
+        ["(Has entity_0 entity_1)", "(Not (LocatedIn entity_0 entity_1))"]
+    )
 
     assert [str(atom) for atom in atoms] == [
-        "(Has dog fur)",
-        "(Not (On cat chair))",
+        "(Has entity_0 entity_1)",
+        "(Not (LocatedIn entity_0 entity_1))",
     ]
 
 
 def test_rejects_invalid_rendered_expression() -> None:
     with pytest.raises(MettaRenderError, match="Rendered invalid MeTTa"):
-        validate_rendered_metta(["(Unknown dog fur)"])
-
-
-def test_renders_negative_known_predicate() -> None:
-    result = make_result(
-        predicate="Contains",
-        values=("tank", "water"),
-        roles=("container", "contained"),
-        polarity="negative",
-    )
-
-    assert render_metta(result) == ["(Not (Contains tank water))"]
+        validate_rendered_metta(["(Unknown entity_0 entity_1)"])
 
 
 def test_renders_negative_evaluation() -> None:
@@ -162,18 +171,7 @@ def test_renders_negative_evaluation() -> None:
         polarity="negative",
     )
 
-    assert render_metta(result) == ["(Not (Evaluation open (List Alice door)))"]
-
-
-def test_renders_negative_inheritance_without_invented_fact() -> None:
-    result = make_result(
-        predicate="Inheritance",
-        values=("dog", "cat"),
-        roles=("instance", "class"),
-        polarity="negative",
-    )
-
-    assert render_metta(result) == ["(Not (Inheritance dog cat))"]
+    assert render_metta(result) == ["(Not (Evaluation open (List entity_0 entity_1)))"]
 
 
 def test_renders_zero_argument_evaluation() -> None:
@@ -188,161 +186,138 @@ def test_renders_zero_argument_evaluation() -> None:
     assert render_metta(result) == ["(Evaluation rain (List))"]
 
 
-def test_renders_single_antecedent_rule() -> None:
-    result = SemanticParseResult.model_validate(
+@pytest.mark.parametrize(
+    ("modality", "polarity", "expected"),
+    [
+        ("obligation", "positive", "(Obligation (Evaluation deliver (List entity_0)))"),
+        (
+            "obligation",
+            "negative",
+            "(Obligation (Not (Evaluation deliver (List entity_0))))",
+        ),
+        ("permission", "positive", "(Permission (Evaluation deliver (List entity_0)))"),
+        (
+            "permission",
+            "negative",
+            "(Not (Permission (Evaluation deliver (List entity_0))))",
+        ),
+    ],
+)
+def test_renders_assertion_modality(
+    modality: str, polarity: str, expected: str
+) -> None:
+    result = make_result(
+        predicate="Evaluation",
+        relation="deliver",
+        values=("supplier",),
+        roles=("agent",),
+        fallback=True,
+        polarity=polarity,
+        modality=modality,
+    )
+
+    assert render_metta(result) == [expected]
+
+
+def _rule_result(antecedent_count: int) -> SemanticParseResult:
+    properties = ("red", "rough")[:antecedent_count]
+    source_text = "Mira " + " and ".join(properties) + " then nice."
+    return SemanticParseResult.model_validate(
         {
-            "assertions": [],
-            "rules": [
-                {
-                    "antecedents": [
+            "document": {
+                "document_id": "rule-test",
+                "corpus_id": "unit-tests",
+                "source_text": source_text,
+            },
+            "provenance": {
+                "provider": "test",
+                "model": "fixture",
+                "parser_version": "test-v1",
+                "prompt_version": "test-v1",
+                "ontology_versions": ["test-v1"],
+            },
+            "extraction": {
+                "entities": [
+                    {
+                        "id": "mira",
+                        "entity_type": "Entity",
+                        "mention": {"text": "Mira"},
+                    },
+                    *[
                         {
-                            "predicate": "PropertyOf",
-                            "relation": None,
-                            "arguments": [
-                                {
-                                    "value": "someone",
-                                    "role": "entity",
-                                    "type": None,
-                                },
-                                {
-                                    "value": "red",
-                                    "role": "property",
-                                    "type": None,
-                                },
-                            ],
-                            "fallback": False,
-                            "polarity": "positive",
-                            "factuality": "hypothetical",
-                            "confidence": 0.99,
-                            "source_span": "someone is red",
-                            "alternatives": [],
+                            "id": f"property_{index}",
+                            "entity_type": "Entity",
+                            "mention": {"text": prop},
                         }
+                        for index, prop in enumerate((*properties, "nice"))
                     ],
-                    "consequents": [
-                        {
-                            "predicate": "PropertyOf",
-                            "relation": None,
-                            "arguments": [
-                                {
-                                    "value": "someone",
-                                    "role": "entity",
-                                    "type": None,
-                                },
-                                {
-                                    "value": "nice",
-                                    "role": "property",
-                                    "type": None,
-                                },
-                            ],
-                            "fallback": False,
-                            "polarity": "positive",
-                            "factuality": "hypothetical",
-                            "confidence": 0.99,
-                            "source_span": "they are nice",
-                            "alternatives": [],
-                        }
-                    ],
-                    "source_span": ("If someone is red then they are nice."),
-                }
-            ],
+                ],
+                "assertions": [],
+                "rules": [
+                    {
+                        "scope": "specific",
+                        "antecedents": [
+                            {
+                                "predicate": "PropertyOf",
+                                "arguments": [
+                                    {"entity_id": "mira", "role": "entity"},
+                                    {
+                                        "entity_id": f"property_{index}",
+                                        "role": "property",
+                                    },
+                                ],
+                                "factuality": "hypothetical",
+                                "confidence": 0.99,
+                                "evidence": [{"text": prop}],
+                            }
+                            for index, prop in enumerate(properties)
+                        ],
+                        "consequents": [
+                            {
+                                "predicate": "PropertyOf",
+                                "arguments": [
+                                    {"entity_id": "mira", "role": "entity"},
+                                    {
+                                        "entity_id": f"property_{len(properties)}",
+                                        "role": "property",
+                                    },
+                                ],
+                                "factuality": "hypothetical",
+                                "confidence": 0.99,
+                                "evidence": [{"text": "nice"}],
+                            }
+                        ],
+                        "evidence": [{"text": "then nice."}],
+                    }
+                ],
+            },
         }
     )
 
-    assert render_metta(result) == [
-        ("(Implies " "(PropertyOf someone red) " "(PropertyOf someone nice))")
+
+def test_renders_single_antecedent_rule() -> None:
+    assert render_metta(_rule_result(1)) == [
+        "(Implies (PropertyOf mira property_0) (PropertyOf mira property_1))"
     ]
 
 
 def test_renders_multiple_antecedents_with_and() -> None:
-    result = SemanticParseResult.model_validate(
-        {
-            "assertions": [],
-            "rules": [
-                {
-                    "antecedents": [
-                        {
-                            "predicate": "PropertyOf",
-                            "relation": None,
-                            "arguments": [
-                                {
-                                    "value": "Harry",
-                                    "role": "entity",
-                                    "type": None,
-                                },
-                                {
-                                    "value": "big",
-                                    "role": "property",
-                                    "type": None,
-                                },
-                            ],
-                            "fallback": False,
-                            "polarity": "positive",
-                            "factuality": "hypothetical",
-                            "confidence": 0.99,
-                            "source_span": "Harry is big",
-                            "alternatives": [],
-                        },
-                        {
-                            "predicate": "PropertyOf",
-                            "relation": None,
-                            "arguments": [
-                                {
-                                    "value": "Harry",
-                                    "role": "entity",
-                                    "type": None,
-                                },
-                                {
-                                    "value": "rough",
-                                    "role": "property",
-                                    "type": None,
-                                },
-                            ],
-                            "fallback": False,
-                            "polarity": "positive",
-                            "factuality": "hypothetical",
-                            "confidence": 0.99,
-                            "source_span": "Harry is rough",
-                            "alternatives": [],
-                        },
-                    ],
-                    "consequents": [
-                        {
-                            "predicate": "PropertyOf",
-                            "relation": None,
-                            "arguments": [
-                                {
-                                    "value": "Harry",
-                                    "role": "entity",
-                                    "type": None,
-                                },
-                                {
-                                    "value": "nice",
-                                    "role": "property",
-                                    "type": None,
-                                },
-                            ],
-                            "fallback": False,
-                            "polarity": "positive",
-                            "factuality": "hypothetical",
-                            "confidence": 0.99,
-                            "source_span": "Harry is nice",
-                            "alternatives": [],
-                        }
-                    ],
-                    "source_span": (
-                        "If Harry is big and Harry is rough " "then Harry is nice."
-                    ),
-                }
-            ],
-        }
+    assert render_metta(_rule_result(2)) == [
+        "(Implies (And (PropertyOf mira property_0) "
+        "(PropertyOf mira property_1)) (PropertyOf mira property_2))"
+    ]
+
+
+def test_refuses_non_asserted_standalone_claims() -> None:
+    result = make_result(
+        predicate="Evaluation",
+        relation="leave",
+        values=("Mira",),
+        roles=("agent",),
+        fallback=True,
+        factuality="speculative",
     )
 
-    assert render_metta(result) == [
-        (
-            "(Implies "
-            "(And "
-            "(PropertyOf Harry big) "
-            "(PropertyOf Harry rough)) "
-            "(PropertyOf Harry nice))"
-        )
-    ]
+    with pytest.raises(MettaRenderError, match="is speculative"):
+        render_metta(result)
+    assert render_metta(result, asserted_only=True) == []

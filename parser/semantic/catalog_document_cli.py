@@ -7,8 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from parser.ontology.catalog import load_ontology_catalog
-from parser.ontology.miner_bundle import load_catalog_bundle
+from parser.ontology.catalog import load_manifest_catalog, load_ontology_catalog
 from parser.semantic.catalog_document_export import export_catalog_documents
 from parser.semantic.cli import add_document_export_arguments
 from parser.semantic.model_config import build_reference_semantic_parser
@@ -38,16 +37,13 @@ def run_export(arguments: argparse.Namespace) -> int:
     try:
         if arguments.ontology_modules:
             catalog = load_ontology_catalog(modules=arguments.ontology_modules)
-            bundle = None
-            if arguments.bundle_output is not None:
-                raise ValueError("--bundle-output requires an ontology bundle manifest")
         else:
-            bundle_arguments = (
+            manifest_arguments = (
                 (arguments.ontology_bundle,)
                 if arguments.ontology_bundle is not None
                 else ()
             )
-            catalog, bundle = load_catalog_bundle(*bundle_arguments)
+            catalog, _ = load_manifest_catalog(*manifest_arguments)
         parser = build_reference_semantic_parser(
             arguments.config,
             profile_name=arguments.profile,
@@ -62,8 +58,6 @@ def run_export(arguments: argparse.Namespace) -> int:
             rejected_path=arguments.rejected_output
             or arguments.output.with_name(f"{arguments.output.stem}.rejected.jsonl"),
             student_pairs_path=arguments.student_pairs_output,
-            bundle_path=arguments.bundle_output,
-            ontology_bundle=bundle,
             corpus_id=arguments.corpus_id,
             metadata_output=getattr(arguments, "metadata_output", None),
             include_metta=getattr(arguments, "include_metta", False),
@@ -78,8 +72,6 @@ def run_export(arguments: argparse.Namespace) -> int:
     print(f"Rejected: {result.rejected} -> {result.rejected_path}")
     if result.student_pairs_path is not None:
         print(f"Student pairs: {result.accepted} -> {result.student_pairs_path}")
-    if result.bundle_path is not None:
-        print(f"Ontology bundle: {result.bundle_path}")
     print(f"Source metadata: {result.metadata_path}")
     return 2 if result.rejected else 0
 

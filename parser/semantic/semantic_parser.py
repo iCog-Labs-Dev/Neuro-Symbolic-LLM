@@ -5,26 +5,25 @@ Structured natural-language semantic parsers.
 ReferenceSemanticParser uses a large model (teacher) for offline annotation.
 DistilledSemanticParser uses a saved fine-tuned model (student) for inference.
 
-Both generate the same document target; rendering is a derived view.
+Both produce a SemanticParseResult; MeTTa rendering is a derived view.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, Final
 
 import torch
-import yaml
 from pydantic import ValidationError
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from parser.grammar.atomese import LinkAtom
 from parser.ontology.catalog import OntologyCatalog, load_ontology_catalog
-from parser.semantic.backends import ModelBackend
+from parser.semantic.backends import ModelBackend, OutputTruncatedError
 from parser.semantic.catalog_prompt import build_catalog_document_prompt
 from parser.semantic.metta_renderer import (
     MettaRenderError,
@@ -37,13 +36,18 @@ from parser.semantic.metta_renderer import (
 )
 from parser.semantic.normalization import (
     SemanticNormalizationError,
-    normalize_semantic_result,
+    normalize_extraction_payload,
 )
 from parser.semantic.output_cleanup import clean_model_output
-from parser.semantic.schema import SemanticParseResult
-
-if TYPE_CHECKING:
-    from hybrid_miner.contracts.semantic_document import SemanticDocument
+from parser.semantic.schema import (
+    SemanticAssertion,
+    SemanticExtraction,
+    SemanticParseProvenance,
+    SemanticParseResult,
+    SemanticRepair,
+    SourceDocument,
+    SourceQuote,
+)
 
 
 class SemanticParseError(ValueError):
@@ -56,97 +60,19 @@ class ModelGenerationError(RuntimeError):
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-_PARSER_PROMPT_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "configs"
-    / "parser_config"
-    / "parser_prompt.yaml"
-)
+PARSER_VERSION: Final = "1.0.0"
 
-_PREDICATE_SCHEMA_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "configs"
-    / "parser_config"
-    / "predicate_schema.yaml"
+_PRONOUNS: Final = frozenset({"he", "she", "it", "they", "him", "her", "them"})
+_EXPLETIVE_IT_RELATIONS: Final = frozenset(
+    {"rain", "snow", "hail", "drizzle", "thunder"}
 )
 
 
-def _load_predicate_schemas() -> dict[str, dict[str, object]]:
-    """Load predicate schemas and reject invalid configuration early."""
-    with _PREDICATE_SCHEMA_CONFIG_PATH.open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-    if not isinstance(config, dict):
-        raise ValueError("Predicate schema must be a YAML mapping")
-    predicates = config.get("predicates")
-    if not isinstance(predicates, dict) or not predicates:
-        raise ValueError("Predicate schema must define a nonempty 'predicates' mapping")
+def _iter_all_assertions(result: SemanticParseResult) -> Iterator[SemanticAssertion]:
+    """Yield standalone assertions and the parts of every rule."""
+    yield from result.extraction.assertions
 
-    for name, schema in predicates.items():
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("Predicate names must be nonempty strings")
-        if not isinstance(schema, dict):
-            raise ValueError(f"Schema for {name!r} must be a mapping")
-        description = schema.get("description")
-        if not isinstance(description, str) or not description.strip():
-            raise ValueError(f"Schema for {name!r} requires a description")
-
-        if schema.get("variable_arity") is True:
-            minimum = schema.get("min_arity")
-            maximum = schema.get("max_arity")
-            if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
-                raise ValueError(f"Invalid min_arity for {name!r}")
-            if maximum is not None and (
-                not isinstance(maximum, int)
-                or isinstance(maximum, bool)
-                or maximum < minimum
-            ):
-                raise ValueError(f"Invalid max_arity for {name!r}")
-            continue
-
-        arity = schema.get("arity")
-        roles = schema.get("roles")
-        if not isinstance(arity, int) or isinstance(arity, bool) or arity < 1:
-            raise ValueError(f"Invalid arity for {name!r}")
-        if (
-            not isinstance(roles, list)
-            or len(roles) != arity
-            or any(not isinstance(role, str) or not role.strip() for role in roles)
-        ):
-            raise ValueError(f"Schema roles for {name!r} must match its arity")
-
-    evaluation = predicates.get("Evaluation")
-    if not isinstance(evaluation, dict) or evaluation.get("fallback") is not True:
-        raise ValueError("Evaluation must be defined with fallback=true")
-    return predicates
-
-
-PREDICATE_SCHEMAS = _load_predicate_schemas()
-
-# Historical reader vocabulary; active generation uses the ontology catalogs.
-ALLOWED_PREDICATES = ", ".join(sorted(PREDICATE_SCHEMAS))
-
-
-def _build_predicate_guide() -> str:
-    """Describe predicate roles directly from the validated YAML schema."""
-    lines = []
-    for name, schema in PREDICATE_SCHEMAS.items():
-        description = schema["description"]
-        if schema.get("variable_arity") is True:
-            roles = "semantic roles appropriate to the relation"
-        else:
-            roles = ", ".join(cast(list[str], schema["roles"]))
-        lines.append(f"- {name}({roles}): {description}")
-    return "\n".join(lines)
-
-
-PREDICATE_GUIDE = _build_predicate_guide()
-
-
-def _iter_all_assertions(result: SemanticParseResult):
-    """Yield standalone assertions and assertions contained in rules."""
-    yield from result.assertions
-
-    for rule in result.rules:
+    for rule in result.extraction.rules:
         yield from rule.antecedents
         yield from rule.consequents
 
@@ -156,15 +82,10 @@ class SemanticParserConfig:
     """Configuration shared by both semantic parser roles."""
 
     model_name: str
-    # Retained constructor compatibility. The active extraction prompt's
-    # identity is derived from its assembled guidance, not this legacy label.
-    prompt_version: str = "2.0.0"
 
     def __post_init__(self) -> None:
         if not self.model_name.strip():
             raise ValueError("model_name cannot be empty")
-        if not self.prompt_version.strip():
-            raise ValueError("prompt_version cannot be empty")
 
 
 # ── Base Parser ────────────────────────────────────────────────────────────────
@@ -198,7 +119,7 @@ class _BaseSemanticParser:
         self._config = config
         self._model = model
         self._tokenizer = tokenizer
-        self._catalog = catalog
+        self._catalog = catalog if catalog is not None else load_ontology_catalog()
         if model_revision is not None and not model_revision.strip():
             raise ValueError("model_revision cannot be empty")
         self._model_revision = model_revision
@@ -217,9 +138,7 @@ class _BaseSemanticParser:
     @property
     def prompt_version(self) -> str:
         """Return the active prompt identity without invoking the model."""
-        catalog = (
-            self._catalog if self._catalog is not None else load_ontology_catalog()
-        )
+        catalog = self._catalog
         return build_catalog_document_prompt("prompt identity", catalog=catalog).version
 
     @staticmethod
@@ -244,355 +163,300 @@ class _BaseSemanticParser:
         """Inspect the prompt for this instance's configured catalog."""
         return build_catalog_document_prompt(
             source_text,
-            catalog=(
-                self._catalog if self._catalog is not None else load_ontology_catalog()
-            ),
+            catalog=self._catalog,
             context=context,
         )
 
-    @staticmethod
     def repair_known_predicate_contract(
-        result: SemanticParseResult,
-    ) -> SemanticParseResult:
-        """Repair deterministic contract fields for known predicates."""
+        self, result: SemanticParseResult
+    ) -> tuple[SemanticParseResult, list[SemanticRepair]]:
+        """Clear relation and fallback on catalog predicates.
+
+        Only Evaluation carries a relation and fallback=true. Clearing these
+        fields on a catalog predicate keeps its facts instead of rejecting the
+        whole document for a format slip.
+        """
         repaired = result.model_copy(deep=True)
-
+        repairs: list[SemanticRepair] = []
         for assertion in _iter_all_assertions(repaired):
-            if (
-                assertion.predicate in PREDICATE_SCHEMAS
-                and assertion.predicate != "Evaluation"
-            ):
-                assertion.relation = None
-                assertion.fallback = False
-
-        return repaired
+            if assertion.predicate not in self._catalog.relations:
+                continue
+            if assertion.relation is None and not assertion.fallback:
+                continue
+            repairs.append(
+                SemanticRepair(
+                    kind="predicate_contract",
+                    detail=f"cleared relation and fallback on {assertion.predicate}",
+                )
+            )
+            assertion.relation = None
+            assertion.fallback = False
+        return repaired, repairs
 
     @staticmethod
     def repair_ambiguous_pronouns(
         result: SemanticParseResult,
-    ) -> SemanticParseResult:
-        """Repair or remove unresolved referential pronouns safely.
+    ) -> tuple[SemanticParseResult, list[SemanticRepair]]:
+        """Remove pronoun kinds and bind unresolved pronouns in universal rules.
 
-        Standalone assertions preserve the existing behavior: unresolved
-        referential pronouns are removed when possible.
-
-        Inside rules, a pronoun may be resolved only when the rule has exactly
-        one clear generic participant such as ``someone``, ``something``, or a
-        MeTTa variable. Otherwise the rule is rejected rather than guessed.
-
-        Expletive ``it`` in weather expressions is preserved.
+        The model resolves a pronoun by giving its entity the kind of what it
+        refers to, so a pronoun entity without a kind is unresolved. Entity IDs
+        belong to one document, so an unresolved pronoun is still a valid,
+        linked participant. Two cases stay unsafe: a pronoun used as a kind,
+        which would join unrelated documents, and an unresolved pronoun inside
+        a universal rule, which must stand for the rule's variable. A universal
+        rule without exactly one variable to bind is rejected rather than
+        guessed. Every unresolved pronoun that stays in the document is
+        recorded, so the rate of unresolved pronouns can be measured.
+        Expletive ``it`` in weather expressions ("it rains") refers to nothing
+        and is kept.
         """
         repaired = result.model_copy(deep=True)
+        repairs: list[SemanticRepair] = []
+        extraction = repaired.extraction
+
+        for entity in extraction.entities:
+            if entity.kind in _PRONOUNS:
+                repairs.append(
+                    SemanticRepair(
+                        kind="pronoun_kind",
+                        detail=f"cleared pronoun kind {entity.kind!r} on {entity.id!r}",
+                    )
+                )
+                entity.kind = None
 
         pronouns = {
-            "he",
-            "she",
-            "it",
-            "they",
-            "him",
-            "her",
-            "them",
+            entity.id: entity.mention.text.casefold()
+            for entity in extraction.entities
+            if entity.kind is None and entity.mention.text.casefold() in _PRONOUNS
         }
 
-        expletive_it_relations = {
-            "rain",
-            "snow",
-            "hail",
-            "drizzle",
-            "thunder",
-        }
-
-        def is_expletive_it(assertion, value: str) -> bool:
-            return (
-                value == "it"
-                and assertion.predicate == "Evaluation"
-                and assertion.relation is not None
-                and assertion.relation.casefold() in expletive_it_relations
+        def binds(part: SemanticAssertion, entity_id: str) -> bool:
+            if entity_id not in pronouns:
+                return False
+            return not (
+                pronouns[entity_id] == "it" and part.relation in _EXPLETIVE_IT_RELATIONS
             )
 
-        # Preserve the existing standalone-assertion behavior.
-        repaired_assertions = []
-
-        for assertion in repaired.assertions:
-            filtered_arguments = []
-
-            for argument in assertion.arguments:
-                value = argument.value.casefold()
-
-                if value not in pronouns:
-                    filtered_arguments.append(argument)
-                    continue
-
-                if is_expletive_it(assertion, value):
-                    filtered_arguments.append(argument)
-                    continue
-
-                # Otherwise the raw pronoun is unresolved and is removed.
-
-            if len(filtered_arguments) == len(assertion.arguments):
-                repaired_assertions.append(assertion)
+        for rule in extraction.rules:
+            if rule.scope != "universal":
                 continue
-
-            if not filtered_arguments:
+            parts = [*rule.antecedents, *rule.consequents]
+            used = sorted(
+                {
+                    argument.entity_id
+                    for part in parts
+                    for argument in part.arguments
+                    if binds(part, argument.entity_id)
+                }
+            )
+            if not used:
                 continue
-
-            assertion.arguments = filtered_arguments
-
-            if assertion.predicate != "Evaluation":
-                schema = PREDICATE_SCHEMAS.get(assertion.predicate)
-
-                if isinstance(schema, dict):
-                    expected_arity = schema.get("arity")
-
-                    if (
-                        isinstance(expected_arity, int)
-                        and len(assertion.arguments) != expected_arity
-                    ):
-                        continue
-
-            repaired_assertions.append(assertion)
-
-        # If standalone repair would remove every assertion and there are no rules,
-        # fail before assigning an invalid empty state to the Pydantic model.
-        if not repaired_assertions and not repaired.rules:
-            raise SemanticParseError(
-                "No grounded assertions remain after unresolved pronoun repair"
-            )
-
-        repaired.assertions = repaired_assertions
-
-        # Repair pronouns inside rules.
-        for rule in repaired.rules:
-            generic_candidates = set()
-
-            for assertion in rule.antecedents:
-                for argument in assertion.arguments:
-                    value = argument.value
-
-                    if value.startswith("$") or value.casefold() in {
-                        "someone",
-                        "something",
-                    }:
-                        generic_candidates.add(value)
-
-            replacement = (
-                next(iter(generic_candidates)) if len(generic_candidates) == 1 else None
-            )
-
-            for assertion in [
-                *rule.antecedents,
-                *rule.consequents,
-            ]:
-                for argument in assertion.arguments:
-                    value = argument.value.casefold()
-
-                    if value not in pronouns:
-                        continue
-
-                    if is_expletive_it(assertion, value):
-                        continue
-
-                    if replacement is None:
-                        raise SemanticParseError(
-                            "Unresolved pronoun inside conditional rule: "
-                            f"{argument.value!r}"
+            if len(rule.variables) != 1:
+                raise SemanticParseError(
+                    f"Pronoun entities {used} inside a universal rule with "
+                    f"{len(rule.variables)} variables cannot be resolved"
+                )
+            variable = rule.variables[0].id
+            for part in parts:
+                for argument in part.arguments:
+                    if binds(part, argument.entity_id):
+                        repairs.append(
+                            SemanticRepair(
+                                kind="pronoun_in_rule",
+                                detail=f"bound {argument.entity_id!r} to {variable}",
+                            )
                         )
+                        argument.entity_id = variable
 
-                    argument.value = replacement
+        kept = sorted(
+            {
+                argument.entity_id
+                for part in _iter_all_assertions(repaired)
+                for argument in part.arguments
+                if binds(part, argument.entity_id)
+            }
+        )
+        for entity_id in kept:
+            repairs.append(
+                SemanticRepair(
+                    kind="unresolved_pronoun",
+                    detail=f"kept unresolved pronoun {entity_id!r} as a participant",
+                )
+            )
 
-        return repaired
+        return repaired, repairs
 
-    @staticmethod
-    def validate_predicates(result: SemanticParseResult) -> SemanticParseResult:
-        """Validate predicate and fallback consistency."""
+    def validate_predicates(self, result: SemanticParseResult) -> SemanticParseResult:
+        """Require catalog predicates, or Evaluation as the fallback.
+
+        Evaluation must set fallback to true. A catalog predicate must set
+        fallback to false, leave relation empty, and keep its confidence
+        inside the catalog's confidence range.
+        """
         for assertion in _iter_all_assertions(result):
             predicate = assertion.predicate
-            if predicate not in PREDICATE_SCHEMAS:
-                raise SemanticParseError(f"Unknown semantic predicate: {predicate!r}")
             if predicate == "Evaluation":
                 if not assertion.fallback:
                     raise SemanticParseError("Evaluation must have fallback=true")
-                if not assertion.relation:
-                    raise SemanticParseError("Evaluation requires a relation")
-            else:
-                if assertion.fallback:
-                    raise SemanticParseError(
-                        f"{predicate} is a known predicate, so fallback must be false"
-                    )
-                if assertion.relation is not None:
-                    raise SemanticParseError(f"{predicate} should have relation=null")
-        return result
-
-    @staticmethod
-    def validate_arguments(result: SemanticParseResult) -> SemanticParseResult:
-        """Validate assertion argument counts against the YAML schema."""
-        for assertion in _iter_all_assertions(result):
-            schema = PREDICATE_SCHEMAS.get(assertion.predicate)
-            if not isinstance(schema, dict):
-                raise SemanticParseError(
-                    f"No schema defined for predicate {assertion.predicate!r}"
-                )
-            actual_arity = len(assertion.arguments)
-            if schema.get("variable_arity") is True:
-                minimum, maximum = schema.get("min_arity"), schema.get("max_arity")
-                if not isinstance(minimum, int) or minimum < 0:
-                    raise ValueError(f"Invalid min_arity for {assertion.predicate!r}")
-                if maximum is not None and (
-                    not isinstance(maximum, int) or maximum < minimum
-                ):
-                    raise ValueError(f"Invalid max_arity for {assertion.predicate!r}")
-                if actual_arity < minimum:
-                    raise SemanticParseError(
-                        f"{assertion.predicate} requires at least {minimum} arguments, "
-                        f"got {actual_arity}"
-                    )
-                if isinstance(maximum, int) and actual_arity > maximum:
-                    raise SemanticParseError(
-                        f"{assertion.predicate} allows at most {maximum} arguments, "
-                        f"got {actual_arity}"
-                    )
                 continue
-
-            expected_arity = schema.get("arity")
-            if not isinstance(expected_arity, int):
-                raise ValueError(f"Invalid arity schema for {assertion.predicate!r}")
-            if actual_arity != expected_arity:
+            if predicate not in self._catalog.relations:
+                raise SemanticParseError(f"Unknown semantic predicate: {predicate!r}")
+            if assertion.fallback:
                 raise SemanticParseError(
-                    f"{assertion.predicate} requires {expected_arity} arguments, "
-                    f"got {actual_arity}"
+                    f"{predicate} is a catalog predicate, so fallback must be false"
                 )
-            expected_roles = schema.get("roles")
-            actual_roles = [argument.role for argument in assertion.arguments]
-            if actual_roles != expected_roles:
+            if assertion.relation is not None:
+                raise SemanticParseError(f"{predicate} should have relation=null")
+            lower, upper = self._catalog.relations[predicate].confidence_range
+            if not lower <= assertion.confidence <= upper:
                 raise SemanticParseError(
-                    f"{assertion.predicate} requires argument roles "
-                    f"{expected_roles!r}, got {actual_roles!r}"
+                    f"{predicate} confidence {assertion.confidence} is outside "
+                    f"the catalog range [{lower}, {upper}]"
                 )
         return result
+
+    def validate_arguments(self, result: SemanticParseResult) -> SemanticParseResult:
+        """Check entity types and catalog argument signatures.
+
+        Every entity and rule variable must use a catalog type. A catalog
+        predicate must have its catalog arity, its argument names as roles in
+        catalog order, and an allowed type in every position. Evaluation
+        arguments are free-form and are not checked here.
+        """
+        extraction = result.extraction
+        entity_types = {entity.id: entity.entity_type for entity in extraction.entities}
+        for entity_id, entity_type in entity_types.items():
+            self._require_catalog_type(entity_type, f"Entity {entity_id!r}")
+
+        for assertion in extraction.assertions:
+            self._validate_signature(assertion, entity_types)
+
+        for rule in extraction.rules:
+            rule_types = dict(entity_types)
+            for variable in rule.variables:
+                self._require_catalog_type(
+                    variable.entity_type, f"Variable {variable.id!r}"
+                )
+                rule_types[variable.id] = variable.entity_type
+            for part in [*rule.antecedents, *rule.consequents]:
+                self._validate_signature(part, rule_types)
+
+        return result
+
+    def _require_catalog_type(self, entity_type: str, owner: str) -> None:
+        """Reject a type the active catalog does not declare."""
+        if entity_type not in self._catalog.types:
+            raise SemanticParseError(
+                f"{owner} uses unknown type {entity_type!r}; "
+                f"allowed types are {sorted(self._catalog.types)}"
+            )
+
+    def _validate_signature(
+        self, assertion: SemanticAssertion, types: Mapping[str, str]
+    ) -> None:
+        """Check one catalog assertion against its relation signature."""
+        if assertion.predicate == "Evaluation":
+            return
+
+        relation = self._catalog.relations[assertion.predicate]
+        if len(assertion.arguments) != relation.arity:
+            raise SemanticParseError(
+                f"{assertion.predicate} requires {relation.arity} arguments, "
+                f"got {len(assertion.arguments)}"
+            )
+
+        expected_roles = [spec.name for spec in relation.arguments]
+        actual_roles = [argument.role for argument in assertion.arguments]
+        if actual_roles != expected_roles:
+            raise SemanticParseError(
+                f"{assertion.predicate} requires argument roles "
+                f"{expected_roles!r}, got {actual_roles!r}"
+            )
+
+        for argument, spec in zip(assertion.arguments, relation.arguments, strict=True):
+            actual = types[argument.entity_id]
+            if actual not in spec.allowed_types:
+                raise SemanticParseError(
+                    f"{assertion.predicate} argument {spec.name!r} must be "
+                    f"{'|'.join(spec.allowed_types)}, got {actual!r} "
+                    f"for {argument.entity_id!r}"
+                )
 
     @staticmethod
     def repair_rule_duplication(
         result: SemanticParseResult,
-    ) -> SemanticParseResult:
-        """Remove standalone assertions redundantly emitted with rules.
+    ) -> tuple[SemanticParseResult, list[SemanticRepair]]:
+        """Remove standalone assertions that repeat a part of a rule.
 
-        Exact duplicates are always removed.
-
-        Also remove a hypothetical standalone assertion when:
-        - it contains a MeTTa variable;
-        - that variable also occurs inside a rule; and
-        - its source span is contained within that rule's source span.
-
-        This handles redundant universal-rule output such as emitting both
-        PropertyOf($x, rough) and the rule
-        PropertyOf($x, smart) -> PropertyOf($x, rough),
-        without attempting broader semantic rewriting.
+        A standalone assertion is a copy when it has the same predicate,
+        relation, polarity, modality, and arguments as a rule part, and its
+        evidence lies inside that rule's evidence. Keeping the copy would turn
+        a conditional statement into an unconditional fact.
         """
-        if not result.rules or not result.assertions:
-            return result
+        extraction = result.extraction
+        if not extraction.rules or not extraction.assertions:
+            return result, []
 
-        repaired = result.model_copy(deep=True)
+        def signature(assertion: SemanticAssertion) -> tuple[object, ...]:
+            return (
+                assertion.predicate,
+                assertion.relation,
+                assertion.polarity,
+                assertion.modality,
+                tuple((arg.entity_id, arg.role) for arg in assertion.arguments),
+            )
 
-        rule_assertions = {
-            assertion.model_dump_json()
-            for rule in repaired.rules
-            for assertion in [
-                *rule.antecedents,
-                *rule.consequents,
-            ]
-        }
+        def extent(quotes: list[SourceQuote]) -> tuple[int, int]:
+            offsets = [result.locate(quote) for quote in quotes]
+            return min(start for start, _ in offsets), max(end for _, end in offsets)
 
-        def assertion_variables(assertion) -> set[str]:
-            return {
-                argument.value
-                for argument in assertion.arguments
-                if argument.value.startswith("$")
-            }
+        rule_parts = [
+            (signature(part), extent(rule.evidence))
+            for rule in extraction.rules
+            for part in [*rule.antecedents, *rule.consequents]
+        ]
+        kept: list[SemanticAssertion] = []
+        repairs: list[SemanticRepair] = []
+        for assertion in extraction.assertions:
+            start, end = extent(assertion.evidence)
+            if any(
+                part == signature(assertion) and rule_start <= start and end <= rule_end
+                for part, (rule_start, rule_end) in rule_parts
+            ):
+                name = assertion.predicate + (
+                    f"({assertion.relation})" if assertion.relation else ""
+                )
+                repairs.append(
+                    SemanticRepair(
+                        kind="rule_duplicate",
+                        detail=f"removed standalone {name} repeated in a rule",
+                    )
+                )
+            else:
+                kept.append(assertion)
 
-        rule_metadata = []
-
-        for rule in repaired.rules:
-            variables = {
-                variable
-                for assertion in [
-                    *rule.antecedents,
-                    *rule.consequents,
-                ]
-                for variable in assertion_variables(assertion)
-            }
-
-            rule_span = " ".join(rule.source_span.split()).casefold()
-
-            rule_metadata.append((variables, rule_span))
-
-        kept_assertions = []
-
-        for assertion in repaired.assertions:
-            if assertion.model_dump_json() in rule_assertions:
-                continue
-
-            assertion_vars = assertion_variables(assertion)
-
-            assertion_span = " ".join(assertion.source_span.split()).casefold()
-
-            redundant_rule_assertion = False
-
-            if assertion.factuality == "hypothetical" and assertion_vars:
-                for rule_vars, rule_span in rule_metadata:
-                    if (
-                        assertion_vars & rule_vars
-                        and assertion_span
-                        and assertion_span in rule_span
-                    ):
-                        redundant_rule_assertion = True
-                        break
-
-            if not redundant_rule_assertion:
-                kept_assertions.append(assertion)
-
-        repaired.assertions = kept_assertions
-
-        return repaired
-
-    @staticmethod
-    def validate_source_spans(
-        result: SemanticParseResult,
-        sentence: str,
-        context: str = "",
-    ) -> SemanticParseResult:
-        """Ensure every source span is grounded in the supplied text."""
-        source_text = " ".join(
-            part.strip() for part in (context, sentence) if part.strip()
+        if not repairs:
+            return result, []
+        repaired = result.model_copy(
+            update={"extraction": extraction.model_copy(update={"assertions": kept})}
         )
+        return repaired, repairs
 
-        if not source_text:
-            raise SemanticParseError("Source text cannot be empty")
-
-        source_text_normalized = " ".join(source_text.split()).casefold()
-
-        for assertion in _iter_all_assertions(result):
-            span = " ".join(assertion.source_span.split()).strip()
-
-            if not span:
-                raise SemanticParseError("source_span cannot be empty")
-
-            if span.casefold() not in source_text_normalized:
-                raise SemanticParseError(
-                    f"source_span is not supported by the input text: {span!r}"
-                )
-
-        for rule in result.rules:
-            span = " ".join(rule.source_span.split()).strip()
-
-            if not span:
-                raise SemanticParseError("rule source_span cannot be empty")
-
-            if span.casefold() not in source_text_normalized:
-                raise SemanticParseError(
-                    f"rule source_span is not supported by the input text: {span!r}"
-                )
-
-        return result
+    def _apply_repairs(self, result: SemanticParseResult) -> SemanticParseResult:
+        """Run every repair in order and record each change in the provenance."""
+        repairs: list[SemanticRepair] = []
+        for repair in (
+            self.repair_known_predicate_contract,
+            self.repair_ambiguous_pronouns,
+            self.repair_rule_duplication,
+        ):
+            result, applied = repair(result)
+            repairs.extend(applied)
+        if not repairs:
+            return result
+        provenance = result.provenance.model_copy(update={"repairs": repairs})
+        return result.model_copy(update={"provenance": provenance})
 
     @staticmethod
     def render_metta(result: SemanticParseResult) -> list[str]:
@@ -664,10 +528,18 @@ class _BaseSemanticParser:
         else:
             raise ValueError("No backend or model available")
 
-    def _generate_response(
+    def _generate_json_text(
         self, prompt: str, *, output_schema: dict[str, Any] | None = None
     ) -> str:
-        """Execute a document-target request and clean only its response envelope."""
+        """Ask the model for one response and strip its JSON envelope.
+
+        Uses the backend's JSON-schema decoding when an output schema is given and
+        the backend supports it. Otherwise it falls back to plain generation, or
+        raises ValueError if require_structured_output is set. Backend failures
+        become ModelGenerationError; only a truncation keeps its message, since
+        other provider errors can contain request details. The text inside the
+        envelope is not changed.
+        """
         generate_json = getattr(self._backend, "generate_json", None)
         if (
             output_schema is not None
@@ -684,6 +556,11 @@ class _BaseSemanticParser:
                 )
             else:
                 output = self._generate_text(prompt)
+        except OutputTruncatedError as error:
+            raise ModelGenerationError(
+                f"{self.parser_role} parser failed with model {self.model_name!r}: "
+                f"{error}"
+            ) from error
         except Exception as error:
             raise ModelGenerationError(
                 f"{self.parser_role} parser failed with model {self.model_name!r}: "
@@ -691,28 +568,19 @@ class _BaseSemanticParser:
             ) from error
         return self.clean_model_output(output)
 
-    def generate_document_target(
-        self,
-        source_text: str,
-        *,
-        catalog: OntologyCatalog | None = None,
-        context: str = "",
+    def generate_extraction_payload(
+        self, document: SourceDocument, *, catalog: OntologyCatalog
     ) -> tuple[dict[str, Any], str]:
-        """Generate the quote-based document target with this parser's model.
+        """Ask the model for the raw extraction of one document.
 
-        This is a draft, not an accepted document. Call parse_document() for
-        source anchoring, contract validation, and ontology validation.
+        Returns the decoded JSON object and the prompt version. The payload is
+        a draft: parse_document normalizes and validates it.
         """
-        active_catalog = catalog if catalog is not None else self._catalog
-        if active_catalog is None:
-            active_catalog = load_ontology_catalog()
         prompt = build_catalog_document_prompt(
-            source_text, catalog=active_catalog, context=context
+            document.source_text, catalog=catalog, context=document.context
         )
-        from parser.semantic.catalog_output_schema import catalog_output_schema
-
-        cleaned = self._generate_response(
-            prompt.text, output_schema=catalog_output_schema(active_catalog)
+        cleaned = self._generate_json_text(
+            prompt.text, output_schema=SemanticExtraction.model_json_schema()
         )
         if not cleaned:
             raise SemanticParseError("The model returned an empty response")
@@ -720,123 +588,57 @@ class _BaseSemanticParser:
             payload = json.loads(cleaned)
         except json.JSONDecodeError as error:
             raise SemanticParseError("The model returned invalid JSON") from error
-        if not isinstance(payload, dict) or set(payload) not in (
-            {"entities", "assertions"},
-            {"entities", "assertions", "rules"},
-        ):
-            raise SemanticParseError(
-                "Document output must contain entities, assertions, and optional rules"
-            )
-        if not isinstance(payload["entities"], list) or not isinstance(
-            payload["assertions"], list
-        ):
-            raise SemanticParseError("Catalog entities and assertions must be lists")
-        if "rules" in payload and not isinstance(payload["rules"], list):
-            raise SemanticParseError("Document rules must be a list")
+        if not isinstance(payload, dict):
+            raise SemanticParseError("Model output must be a JSON object")
         return payload, prompt.version
 
     def parse_document(
-        self, *, document_id: str, corpus_id: str, source_text: str, context: str = ""
-    ) -> SemanticDocument:
-        """Parse an identified source document into the shared contract."""
-        document, _ = self.parse_document_with_target(
-            document_id=document_id,
-            corpus_id=corpus_id,
-            source_text=source_text,
-            context=context,
-        )
-        return document
-
-    def parse_document_with_target(
-        self, *, document_id: str, corpus_id: str, source_text: str, context: str = ""
-    ) -> tuple[SemanticDocument, dict[str, object]]:
-        """Return a validated document and its normalized quote-based label."""
-        from parser.semantic.catalog_document_parser import (
-            CATALOG_PARSER_VERSION,
-            prepare_catalog_target,
-        )
-
-        catalog = (
-            self._catalog if self._catalog is not None else load_ontology_catalog()
-        )
-        payload, prompt_version = self.generate_document_target(
-            source_text, catalog=catalog, context=context
-        )
-        document, payload = prepare_catalog_target(
-            payload,
-            document_id=document_id,
-            corpus_id=corpus_id,
-            source_text=source_text,
-            parser_provenance={
-                "model": self.model_name,
-                "parser_version": CATALOG_PARSER_VERSION,
-                "prompt_version": prompt_version,
-                "ontology_versions": catalog.versions,
-                "provider": self.provider_name,
-                "model_revision": self._model_revision,
-            },
-            catalog=catalog,
-        )
-        return document, payload
-
-    @classmethod
-    def read_legacy_result(
-        cls,
-        output: str,
-        *,
-        sentence: str,
-        context: str = "",
-        aliases: Mapping[str, str] | None = None,
-        alias_types: Mapping[str, str] | None = None,
-    ) -> SemanticParseResult:
-        """Read historical records without invoking a teacher or student."""
-        if not sentence.strip():
-            raise ValueError("The sentence cannot be empty")
-        cleaned = cls.clean_model_output(output)
-        if not cleaned:
-            raise SemanticParseError("The legacy record is empty")
-        try:
-            result = SemanticParseResult.model_validate_json(cleaned)
-        except ValidationError as error:
-            raise SemanticParseError(
-                f"Invalid structured legacy record: {error}"
-            ) from error
-        try:
-            result = normalize_semantic_result(
-                result, aliases=aliases, alias_types=alias_types
-            )
-        except SemanticNormalizationError as error:
-            raise SemanticParseError(str(error)) from error
-        result = cls.repair_ambiguous_pronouns(result)
-        result = cls.repair_known_predicate_contract(result)
-        result = cls.validate_predicates(result)
-        result = cls.validate_arguments(result)
-        result = cls.repair_rule_duplication(result)
-        return cls.validate_source_spans(result, sentence=sentence, context=context)
-
-    def generate_structured(
         self,
-        sentence: str,
-        context: str = "",
+        document: SourceDocument,
         *,
         aliases: Mapping[str, str] | None = None,
-        alias_types: Mapping[str, str] | None = None,
     ) -> SemanticParseResult:
-        """Derive a compatibility view from one canonical generation."""
-        from parser.semantic.compatibility import document_to_legacy_result
-
-        document = self.parse(sentence, context=context)
-        return document_to_legacy_result(
-            document, aliases=aliases, alias_types=alias_types
+        """Parse one identified source document into a SemanticParseResult."""
+        catalog = self._catalog
+        payload, prompt_version = self.generate_extraction_payload(
+            document, catalog=catalog
         )
+        try:
+            extraction = SemanticExtraction.model_validate(
+                normalize_extraction_payload(payload, aliases=aliases)
+            )
+            result = SemanticParseResult(
+                document=document,
+                provenance=SemanticParseProvenance(
+                    provider=self.provider_name,
+                    model=self.model_name,
+                    model_revision=self._model_revision,
+                    parser_version=PARSER_VERSION,
+                    prompt_version=prompt_version,
+                    ontology_versions=list(catalog.versions),
+                ),
+                extraction=extraction,
+            )
+            result = self._apply_repairs(result)
+            self.validate_predicates(result)
+            self.validate_arguments(result)
+        except (
+            SemanticNormalizationError,
+            SemanticParseError,
+            ValidationError,
+        ) as error:
+            raise SemanticParseError(
+                f"Document {document.document_id!r}: {error}"
+            ) from error
+        return result
 
-    def parse(self, sentence: str, context: str = "") -> SemanticDocument:
-        """Extract the sentence, using optional reference-only background."""
+    def parse(self, sentence: str, context: str = "") -> SemanticParseResult:
+        """Parse one sentence, using optional reference-only background."""
         from hashlib import sha256
 
         if not sentence.strip():
             raise ValueError("The sentence cannot be empty")
-        return self.parse_document(
+        document = SourceDocument(
             document_id="text-"
             + sha256(
                 ((context + "\0") if context else "").encode("utf-8")
@@ -846,6 +648,7 @@ class _BaseSemanticParser:
             source_text=sentence,
             context=context,
         )
+        return self.parse_document(document)
 
 
 # ── Reference Parser (Teacher) ───────────────────────────────────────────────
@@ -945,7 +748,6 @@ class DistilledSemanticParser(_BaseSemanticParser):
         # Create config
         config = SemanticParserConfig(
             model_name=self.metadata.get("base_model", "unknown"),
-            prompt_version=self.metadata.get("prompt_version") or "2.0.0",
         )
 
         # Initialize base class with model and tokenizer
@@ -978,6 +780,22 @@ class DistilledSemanticParser(_BaseSemanticParser):
 
 
 # ── Builder functions ─────────────────────────────────────────────────────────
+
+
+def validate_against_catalog(
+    result: SemanticParseResult, catalog: OntologyCatalog
+) -> None:
+    """Run the parser's catalog checks on an existing result, such as a label.
+
+    Raises SemanticParseError for the same predicates, argument signatures,
+    types, and confidence ranges that parse_document rejects.
+    """
+    checker = _BaseSemanticParser(
+        config=SemanticParserConfig(model_name=result.provenance.model),
+        catalog=catalog,
+    )
+    checker.validate_predicates(result)
+    checker.validate_arguments(result)
 
 
 def build_distilled_parser(

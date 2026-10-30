@@ -1,77 +1,133 @@
-"""Deterministic normalization for structured semantic output."""
+"""Deterministic normalization for structured semantic output.
+
+normalize_extraction_payload cleans the format of the model's raw extraction
+before it is validated as a SemanticExtraction. It changes letter case,
+spacing, and punctuation of names, never their meaning: quotations stay
+exact, catalog names only lose surrounding whitespace, and synonyms are
+merged only through explicit aliases.
+"""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any
 
-from parser.semantic.schema import SemanticAssertion, SemanticParseResult
-
 _WHITESPACE_RE = re.compile(r"\s+")
-_NUMERIC_PREFIX_RE = re.compile(r"^[0-9]")
-
-_TEMPORAL_ROLES = {
-    "time",
-    "start_time",
-    "end_time",
-    "time_or_event",
-}
 
 
 class SemanticNormalizationError(ValueError):
     """Raised when semantic values cannot be normalized safely."""
 
 
-def normalize_document_target(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize representation tokens without rewriting evidence or identity.
+def normalize_extraction_payload(
+    payload: dict[str, Any],
+    *,
+    aliases: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return a normalized copy of the model's (LLM's) raw extraction.
 
-    Catalog names and enum values allow surrounding whitespace cleanup only.
-    Entity IDs, references, quotations, alternatives, and provisional relation
-    identifiers remain exact. In particular, this does not merge aliases,
-    reorder arguments, infer factuality, or repair an incorrect entity type.
+    Entity IDs, kinds, relations, roles, and rule variables become lowercase
+    snake_case names. Aliases map an observed kind or relation to its
+    canonical name (for example ``vendor`` to ``supplier``); they are explicit
+    rather than guessed. Values with an unexpected shape are left unchanged
+    for schema validation to reject.
     """
     normalized = deepcopy(payload)
-    entities = normalized.get("entities")
-    assertions = normalized.get("assertions")
-    if not isinstance(entities, list) or not isinstance(assertions, list):
-        raise SemanticNormalizationError(
-            "Document entities and assertions must be lists"
+    canonical_names = {
+        _normalize_name(alias, "alias"): _normalize_name(canonical, "alias target")
+        for alias, canonical in (aliases or {}).items()
+    }
+
+    for entity in _dicts(normalized.get("entities")):
+        _apply(entity, "id", lambda value: _normalize_name(value, "entity id"))
+        _apply(
+            entity,
+            "kind",
+            lambda value: _canonical_name(value, "kind", canonical_names),
         )
-    for entity in entities:
-        if isinstance(entity, dict) and isinstance(entity.get("type"), str):
-            entity["type"] = entity["type"].strip()
-    all_assertions = [*assertions]
-    rules = normalized.get("rules", [])
-    if not isinstance(rules, list):
-        raise SemanticNormalizationError("Document rules must be a list")
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        variables = rule.get("variables", [])
-        if isinstance(variables, list):
-            for variable in variables:
-                if isinstance(variable, dict) and isinstance(variable.get("type"), str):
-                    variable["type"] = variable["type"].strip()
-        for side in ("antecedents", "consequents"):
-            if isinstance(rule.get(side), list):
-                all_assertions.extend(rule[side])
-    for assertion in all_assertions:
-        if not isinstance(assertion, dict):
-            continue
-        for field in ("predicate", "status", "factuality", "polarity"):
-            if isinstance(assertion.get(field), str):
-                assertion[field] = assertion[field].strip()
-        types = assertion.get("argument_types")
-        if isinstance(types, list):
-            assertion["argument_types"] = [
-                value.strip() if isinstance(value, str) else value for value in types
-            ]
-        # Absence denotes no explicit condition reference, never a guessed one.
-        assertion.setdefault("conditional_on", None)
+        _apply(entity, "entity_type", str.strip)
+
+    for assertion in _dicts(normalized.get("assertions")):
+        _normalize_assertion_payload(assertion, canonical_names)
+
+    for rule in _dicts(normalized.get("rules")):
+        _apply(rule, "scope", _normalize_enum)
+        for variable in _dicts(rule.get("variables")):
+            _apply(variable, "id", lambda value: _normalize_name(value, "variable"))
+            _apply(variable, "entity_type", str.strip)
+        for part in [
+            *_dicts(rule.get("antecedents")),
+            *_dicts(rule.get("consequents")),
+        ]:
+            _normalize_assertion_payload(part, canonical_names)
+
     return normalized
+
+
+def _normalize_assertion_payload(
+    assertion: dict[str, Any], canonical_names: Mapping[str, str]
+) -> None:
+    """Normalize one raw assertion in place; its evidence quotes are left exact."""
+    _apply(assertion, "predicate", str.strip)
+    _apply(
+        assertion,
+        "relation",
+        lambda value: _canonical_name(value, "relation", canonical_names),
+    )
+
+    for argument in _dicts(assertion.get("arguments")):
+        _apply(argument, "entity_id", lambda value: _normalize_name(value, "entity id"))
+        _apply(argument, "role", lambda value: _normalize_name(value, "role"))
+
+    for name in ("polarity", "factuality", "modality"):
+        _apply(assertion, name, _normalize_enum)
+
+    alternatives = assertion.get("alternatives")
+    if isinstance(alternatives, list):
+        assertion["alternatives"] = [
+            _normalize_phrase(item, "alternative") if isinstance(item, str) else item
+            for item in alternatives
+        ]
+
+
+def _normalize_name(value: str, field: str) -> str:
+    """Convert a name into lowercase snake_case, keeping a leading ``$``.
+
+    A name that would start with a digit gets a ``num_`` prefix, so
+    ``30 days`` becomes ``num_30_days``.
+    """
+    name = normalize_symbol(value.casefold(), field)
+    if name[0].isdigit():
+        return f"num_{name}"
+    return name
+
+
+def _canonical_name(value: str, field: str, canonical_names: Mapping[str, str]) -> str:
+    """Normalize a kind or relation, then replace it by its alias target."""
+    name = _normalize_name(value, field)
+    return canonical_names.get(name, name)
+
+
+def _normalize_enum(value: str) -> str:
+    """Normalize a fixed option such as a factuality; every option is lowercase."""
+    return value.strip().casefold()
+
+
+def _apply(record: dict[str, Any], key: str, normalize: Callable[[str], str]) -> None:
+    """Normalize ``record[key]`` in place when it is a string."""
+    value = record.get(key)
+    if isinstance(value, str):
+        record[key] = normalize(value)
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    """Return the dictionaries of a list, or nothing for any other value."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _normalize_phrase(value: str, field: str) -> str:
@@ -148,158 +204,3 @@ def normalize_symbol(value: str, field: str = "symbol") -> str:
         raise SemanticNormalizationError(f"{field} cannot be empty")
 
     return normalized
-
-
-def normalize_argument_value(value: str, role: str) -> str:
-    """Normalize an argument into a safe MeTTa symbol.
-
-    Temporal numeric values receive a ``time_`` prefix.
-    Other values beginning with a digit receive a ``num_`` prefix.
-
-    Examples:
-        2025, role=time       -> time_2025
-        10 AM, role=time      -> time_10_AM
-        25 liters             -> num_25_liters
-        1,000 employees       -> num_1000_employees
-        37.5 degrees          -> num_37_5_degrees
-        25%                   -> num_25_percent
-    """
-    normalized = normalize_symbol(value, "argument value")
-    role_normalized = role.casefold()
-
-    if normalized.startswith("time_") or normalized.startswith("num_"):
-        return normalized
-
-    if _NUMERIC_PREFIX_RE.match(normalized):
-        if role_normalized in _TEMPORAL_ROLES:
-            return f"time_{normalized}"
-
-        return f"num_{normalized}"
-
-    return normalized
-
-
-def _normalize_assertion(
-    assertion: SemanticAssertion,
-    *,
-    normalized_aliases: Mapping[str, str],
-    normalized_types: Mapping[str, str],
-) -> None:
-    """Normalize one semantic assertion in place."""
-    if assertion.relation is not None:
-        assertion.relation = normalize_symbol(
-            assertion.relation.casefold(),
-            "relation",
-        )
-
-    for argument in assertion.arguments:
-        entity = _normalize_phrase(
-            argument.value,
-            "argument value",
-        )
-
-        entity = normalized_aliases.get(entity, entity)
-
-        expected_type = normalized_types.get(entity)
-
-        if (
-            expected_type is not None
-            and argument.type is not None
-            and _normalize_phrase(
-                argument.type,
-                "argument type",
-            ).casefold()
-            != expected_type.casefold()
-        ):
-            raise SemanticNormalizationError(
-                f"Alias/type conflict for {entity!r}: expected "
-                f"{expected_type!r}, got {argument.type!r}"
-            )
-
-        argument.role = _normalize_phrase(
-            argument.role,
-            "argument role",
-        ).casefold()
-
-        argument.value = normalize_argument_value(
-            entity,
-            argument.role,
-        )
-
-        if argument.type is not None:
-            argument.type = _normalize_phrase(
-                argument.type,
-                "argument type",
-            )
-
-    assertion.source_span = _normalize_phrase(
-        assertion.source_span,
-        "source span",
-    )
-
-    assertion.alternatives = [
-        _normalize_phrase(
-            alternative,
-            "alternative",
-        )
-        for alternative in assertion.alternatives
-    ]
-
-
-def normalize_semantic_result(
-    result: SemanticParseResult,
-    *,
-    aliases: Mapping[str, str] | None = None,
-    alias_types: Mapping[str, str] | None = None,
-) -> SemanticParseResult:
-    """Return a normalized deep copy of structured semantic output.
-
-    Aliases are explicit rather than guessed. Keys are observed entity names
-    and values are their canonical names. Entity case is preserved.
-    """
-    normalized_result = result.model_copy(deep=True)
-
-    normalized_aliases = {
-        _normalize_phrase(alias, "alias"): _normalize_phrase(
-            canonical,
-            "alias target",
-        )
-        for alias, canonical in (aliases or {}).items()
-    }
-
-    normalized_types = {
-        _normalize_phrase(entity, "typed entity"): _normalize_phrase(
-            entity_type,
-            "entity type",
-        )
-        for entity, entity_type in (alias_types or {}).items()
-    }
-
-    for assertion in normalized_result.assertions:
-        _normalize_assertion(
-            assertion,
-            normalized_aliases=normalized_aliases,
-            normalized_types=normalized_types,
-        )
-
-    for rule in normalized_result.rules:
-        rule.source_span = _normalize_phrase(
-            rule.source_span,
-            "rule source span",
-        )
-
-        for assertion in rule.antecedents:
-            _normalize_assertion(
-                assertion,
-                normalized_aliases=normalized_aliases,
-                normalized_types=normalized_types,
-            )
-
-        for assertion in rule.consequents:
-            _normalize_assertion(
-                assertion,
-                normalized_aliases=normalized_aliases,
-                normalized_types=normalized_types,
-            )
-
-    return normalized_result

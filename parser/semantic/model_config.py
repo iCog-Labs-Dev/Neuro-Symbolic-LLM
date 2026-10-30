@@ -2,14 +2,17 @@
 
 Configuration-driven backend selection for semantic parsers.
 
-This page contains:
-  - ModelProfile:       one named model/provider configuration
-  - load_model_profile: YAML → validated ModelProfile
-  - create_backend:     ModelProfile → provider backend instance
-  - build_reference_semantic_parser(): configuration → ready parser
+This module contains:
+  - ModelProfile:                      one named model/provider configuration
+  - load_model_profile:                YAML → validated ModelProfile
+  - create_backend:                    ModelProfile → provider backend instance
+  - build_reference_semantic_parser:   configuration → ready reference parser
+  - build_distilled_semantic_parser:   configuration → ready local student
 
 The YAML file contains model choices. The local ``.env`` file contains API
-keys. Keeping those responsibilities separate makes it safe to commit YAML.
+keys, hosts, and other deployment values. Profiles name the environment
+variables they read (``api_key_env``, ``base_url_env``, ``host_env``,
+``hf_token_env``, ``model_env``), which keeps the YAML safe to commit.
 """
 
 from __future__ import annotations
@@ -90,11 +93,21 @@ def load_model_profile(
         raise ValueError(f"Unknown model profile: {selected_name!r}")
 
     provider = raw_profile.get("provider")
-    model = raw_profile.get("model")
     if not isinstance(provider, str) or not provider.strip():
         raise ValueError(f"Profile {selected_name!r} must define a provider")
+
+    model = raw_profile.get("model")
+    model_env = raw_profile.get("model_env")
+    if model_env is not None:
+        if model is not None:
+            raise ValueError(
+                f"Profile {selected_name!r} must define either 'model' or "
+                "'model_env', not both"
+            )
+        model = _require_environment(selected_name, "model_env", model_env)
     if not isinstance(model, str) or not model.strip():
         raise ValueError(f"Profile {selected_name!r} must define a model")
+
     return ModelProfile(
         name=selected_name,
         provider=provider.strip(),
@@ -102,7 +115,7 @@ def load_model_profile(
         settings={
             key: value
             for key, value in raw_profile.items()
-            if key not in {"provider", "model"}
+            if key not in {"provider", "model", "model_env"}
         },
     )
 
@@ -121,17 +134,93 @@ def _load_environment() -> None:
     load_dotenv(override=False)
 
 
-def _required_environment(profile: ModelProfile, setting: str) -> str:
-    variable_name = profile.settings.get(setting)
-    if not isinstance(variable_name, str) or not variable_name:
-        raise ValueError(f"Profile {profile.name!r} must define {setting!r}")
-    value = os.getenv(variable_name)
-    if not value:
+def _read_environment(
+    profile_name: str, setting: str, variable_name: Any
+) -> str | None:
+    """Return the stripped value of the variable a profile setting names, if set."""
+    if not isinstance(variable_name, str) or not variable_name.strip():
         raise ValueError(
-            f"Profile {profile.name!r} requires {variable_name}. "
+            f"Profile {profile_name!r} setting {setting!r} must name an "
+            "environment variable"
+        )
+    _load_environment()
+    value = os.getenv(variable_name.strip())
+    return value.strip() if value and value.strip() else None
+
+
+def _require_environment(profile_name: str, setting: str, variable_name: Any) -> str:
+    """Return the value of the variable a profile setting names, or fail."""
+    value = _read_environment(profile_name, setting, variable_name)
+    if value is None:
+        raise ValueError(
+            f"Profile {profile_name!r} requires {variable_name.strip()}. "
             "Add it to .env or the process environment."
         )
     return value
+
+
+def _required_environment(profile: ModelProfile, setting: str) -> str:
+    """Return the value of a mandatory environment-backed setting."""
+    if setting not in profile.settings:
+        raise ValueError(f"Profile {profile.name!r} must define {setting!r}")
+    return _require_environment(profile.name, setting, profile.settings[setting])
+
+
+def _optional_environment(profile: ModelProfile, setting: str) -> str | None:
+    """Return the value of an optional environment-backed setting, if set."""
+    if profile.settings.get(setting) is None:
+        return None
+    return _read_environment(profile.name, setting, profile.settings[setting])
+
+
+# ── Typed settings ────────────────────────────────────────────────────────────
+
+
+def _int_setting(profile: ModelProfile, setting: str, default: int) -> int:
+    value = profile.settings.get(setting, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(
+            f"Profile {profile.name!r} setting {setting!r} must be a positive integer"
+        )
+    return value
+
+
+def _optional_int_setting(profile: ModelProfile, setting: str) -> int | None:
+    value = profile.settings.get(setting)
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+        raise ValueError(
+            f"Profile {profile.name!r} setting {setting!r} must be an integer"
+        )
+    return value
+
+
+def _optional_float_setting(profile: ModelProfile, setting: str) -> float | None:
+    value = profile.settings.get(setting)
+    if value is None:
+        return None
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise ValueError(
+            f"Profile {profile.name!r} setting {setting!r} must be a number"
+        )
+    return float(value)
+
+
+def _optional_bool_setting(profile: ModelProfile, setting: str) -> bool | None:
+    value = profile.settings.get(setting)
+    if value is not None and not isinstance(value, bool):
+        raise ValueError(
+            f"Profile {profile.name!r} setting {setting!r} must be a boolean"
+        )
+    return value
+
+
+def _str_setting(profile: ModelProfile, setting: str, default: str) -> str:
+    value = profile.settings.get(setting, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"Profile {profile.name!r} setting {setting!r} must be a non-empty string"
+        )
+    return value.strip()
 
 
 # ── Backend factory ───────────────────────────────────────────────────────────
@@ -139,60 +228,58 @@ def _required_environment(profile: ModelProfile, setting: str) -> str:
 
 def create_backend(profile: ModelProfile) -> ModelBackend:
     """Instantiate the implementation selected by a model profile."""
-    _load_environment()
     if profile.provider == "openai":
-        _required_environment(profile, "api_key_env")
         return OpenAIBackend(
-            max_output_tokens=int(profile.settings.get("max_output_tokens", 256))
+            api_key=_required_environment(profile, "api_key_env"),
+            max_output_tokens=_int_setting(profile, "max_output_tokens", 256),
         )
     if profile.provider == "anthropic":
-        _required_environment(profile, "api_key_env")
-        return AnthropicBackend(max_tokens=int(profile.settings.get("max_tokens", 256)))
+        return AnthropicBackend(
+            api_key=_required_environment(profile, "api_key_env"),
+            max_tokens=_int_setting(profile, "max_tokens", 256),
+        )
     if profile.provider == "gemini":
-        _required_environment(profile, "api_key_env")
         return GeminiBackend(
-            max_output_tokens=int(profile.settings.get("max_output_tokens", 256))
+            api_key=_required_environment(profile, "api_key_env"),
+            max_output_tokens=_int_setting(profile, "max_output_tokens", 256),
         )
     if profile.provider == "ollama":
-        think = profile.settings.get("think")
-        if think is not None and not isinstance(think, bool):
-            raise ValueError("Ollama profile 'think' must be a boolean")
-        temperature = profile.settings.get("temperature")
         return OllamaBackend(
-            max_output_tokens=int(profile.settings.get("max_output_tokens", 256)),
-            think=think,
-            temperature=float(temperature) if temperature is not None else None,
-            seed=profile.settings.get("seed"),
+            host=_optional_environment(profile, "host_env"),
+            max_output_tokens=_int_setting(profile, "max_output_tokens", 256),
+            think=_optional_bool_setting(profile, "think"),
+            temperature=_optional_float_setting(profile, "temperature"),
+            seed=_optional_int_setting(profile, "seed"),
+            num_ctx=_optional_int_setting(profile, "num_ctx"),
         )
     if profile.provider == "openai-compatible":
-        api_key_env = profile.settings.get("api_key_env")
-        base_url_env = profile.settings.get("base_url_env")
-        api_key = os.getenv(api_key_env) if isinstance(api_key_env, str) else None
-        base_url = os.getenv(base_url_env) if isinstance(base_url_env, str) else None
+        base_url = _required_environment(profile, "base_url_env")
+        api_key = _optional_environment(profile, "api_key_env")
         try:
             from openai import OpenAI
         except ImportError as error:
             raise ImportError("OpenAI-compatible profiles require 'openai'.") from error
         return OpenAICompatibleBackend(
+            # The SDK rejects a missing key, but many self-hosted servers need none.
             OpenAI(api_key=api_key or "not-needed", base_url=base_url),
-            max_output_tokens=int(profile.settings.get("max_output_tokens", 256)),
+            max_output_tokens=_int_setting(profile, "max_output_tokens", 256),
         )
     if profile.provider == "transformers-local":
-        add_special_tokens = profile.settings.get("add_special_tokens", True)
-        if not isinstance(add_special_tokens, bool):
-            raise ValueError("Local profile 'add_special_tokens' must be a boolean")
+        add_special_tokens = _optional_bool_setting(profile, "add_special_tokens")
+        if add_special_tokens is None:
+            add_special_tokens = True
+        max_new_tokens = _int_setting(profile, "max_new_tokens", 256)
+        token = _optional_environment(profile, "hf_token_env")
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as error:
             raise ImportError("Local profiles require 'transformers'.") from error
-        token_env = profile.settings.get("hf_token_env")
-        token = os.getenv(token_env) if isinstance(token_env, str) else None
         tokenizer = AutoTokenizer.from_pretrained(profile.model, token=token)
         model = AutoModelForCausalLM.from_pretrained(profile.model, token=token)
         return TransformersBackend(
             tokenizer=tokenizer,
             model=model,
-            max_new_tokens=int(profile.settings.get("max_new_tokens", 256)),
+            max_new_tokens=max_new_tokens,
             add_special_tokens=add_special_tokens,
         )
     raise ValueError(
@@ -200,7 +287,7 @@ def create_backend(profile: ModelProfile) -> ModelBackend:
     )
 
 
-# ── Parser builder ────────────────────────────────────────────────────────────
+# ── Parser builders ───────────────────────────────────────────────────────────
 
 
 def build_reference_semantic_parser(
@@ -212,7 +299,6 @@ def build_reference_semantic_parser(
     require_structured_output: bool = False,
 ) -> ReferenceSemanticParser:
     """Build a reference parser using the active YAML model profile."""
-
     profile = load_model_profile(config_path, profile_name=profile_name)
     if (
         profile.settings.get("role") == "student"
@@ -250,7 +336,7 @@ def build_distilled_semantic_parser(
         raise ValueError("Distilled parser requires a local student model profile")
     return DistilledSemanticParser.from_pretrained(
         model_dir=profile.model,
-        device=str(profile.settings.get("device", "auto")),
-        max_new_tokens=int(profile.settings.get("max_new_tokens", 3072)),
+        device=_str_setting(profile, "device", "auto"),
+        max_new_tokens=_int_setting(profile, "max_new_tokens", 3072),
         catalog=catalog,
     )

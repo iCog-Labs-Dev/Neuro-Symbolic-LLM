@@ -1,4 +1,4 @@
-"""Canonical teacher documents, factuality preservation and dataset isolation."""
+"""Teacher dataset generation, student-pair conversion, and split isolation."""
 
 import json
 
@@ -17,7 +17,8 @@ from parser.semantic.dataset import (
     structured_to_pairs,
     verify_split_overlap,
 )
-from tests.semantic_fixtures import pair, target
+from tests.semantic_fixtures import result as fixture_result
+from tests.semantic_fixtures import target
 
 
 def make_parser(payload=None):
@@ -31,18 +32,19 @@ def make_parser(payload=None):
     )
 
 
-def test_builder_preserves_exact_source_and_outputs_only_documents(tmp_path):
+def test_builder_preserves_exact_source_and_writes_parse_results(tmp_path):
     builder = SemanticDatasetBuilder(make_parser())
     accepted, rejected = builder.generate(["  Mira left.  ", "  "])
     assert len(accepted) == len(rejected) == 1
-    assert accepted[0].document.source_text == "  Mira left.  "
-    assert accepted[0].document.contract_version == "semantic-document-v1"
+    assert accepted[0].result.document.source_text == "  Mira left.  "
+    assert accepted[0].result.contract_version == "2.0.0"
     path = tmp_path / "nested" / "documents.jsonl"
     builder.write_jsonl(accepted, path)
     record = json.loads(path.read_text(encoding="utf-8"))
-    assert record["source_text"] == "  Mira left.  "
+    assert record["document"]["source_text"] == "  Mira left.  "
+    assert record["extraction"]["assertions"]
     assert "target" not in record
-    assert record["parser"]["provider"] == "fixture"
+    assert record["provenance"]["provider"] == "fixture"
     rejected_path = tmp_path / "rejected.jsonl"
     builder.write_rejected_jsonl(rejected, rejected_path)
     assert json.loads(rejected_path.read_text(encoding="utf-8"))["text"] == "  "
@@ -58,7 +60,7 @@ def test_builder_retains_each_factuality_without_asserted_only_filter(factuality
         ["Mira left."]
     )
     assert not rejected
-    assert documents[0].document.assertions[0].factuality == factuality
+    assert documents[0].result.extraction.assertions[0].factuality == factuality
 
 
 @pytest.mark.parametrize("option", ["include_metta", "asserted_only"])
@@ -67,7 +69,7 @@ def test_dataset_options_only_affect_derived_views(option):
         make_parser(), **{option: True}
     ).generate(["Mira left."])
     assert not rejected
-    assert records[0].document.assertions[0].factuality == "asserted"
+    assert records[0].result.extraction.assertions[0].factuality == "asserted"
     assert records[0].metta
 
 
@@ -85,7 +87,9 @@ def test_builder_preserves_metadata_through_later_pair_conversion(tmp_path):
     )
     assert pairs[0]["source_dataset"] == "pilot"
     assert pairs[0]["source_domain"] == "narrative"
-    assert pairs[0]["confidence"] == records[0].document.assertions[0].confidence
+    assert pairs[0]["confidence"] == (
+        records[0].result.extraction.assertions[0].confidence
+    )
 
 
 def test_invalid_model_output_is_quarantined():
@@ -100,25 +104,23 @@ def test_empty_export_creates_parent(tmp_path):
     path = tmp_path / "nested" / "empty.jsonl"
     SemanticDatasetBuilder.write_jsonl([], path)
     assert path.read_text(encoding="utf-8") == ""
+    assert path.with_name("empty.metadata.jsonl").read_text(encoding="utf-8") == ""
 
 
-def test_document_conversion_roundtrips_exactly(tmp_path):
+def test_parse_result_to_student_pair_roundtrips_exactly(tmp_path):
     catalog = load_ontology_catalog()
-    original_pair = pair()
-    _, _, document = validate_catalog_student_pair(original_pair, catalog=catalog)
+    original = fixture_result(catalog=catalog)
     source, output = tmp_path / "docs.jsonl", tmp_path / "pairs.jsonl"
-    source.write_text(document.canonical_json() + "\n", encoding="utf-8")
+    source.write_text(original.model_dump_json() + "\n", encoding="utf-8")
     pairs = structured_to_pairs(str(source), str(output))
     _, _, restored = validate_catalog_student_pair(pairs[0], catalog=catalog)
-    assert restored.canonical_json() == document.canonical_json()
+    assert restored == original
 
 
 @pytest.mark.parametrize(
     "record", [None, [], {"text": "Dog", "target": {"assertions": []}}]
 )
-def test_historical_or_malformed_records_do_not_silently_become_labels(
-    tmp_path, record
-):
+def test_non_parse_records_do_not_silently_become_labels(tmp_path, record):
     source, output = tmp_path / "source.jsonl", tmp_path / "pairs.jsonl"
     source.write_text(json.dumps(record), encoding="utf-8")
     with pytest.raises(ValueError, match="Invalid document"):
