@@ -21,6 +21,10 @@ def test_default_bundle_round_trips_with_miner_contract(tmp_path: Path) -> None:
     assert set(restored.signatures()) == set(catalog.relations)
     assert restored.ontology_versions == catalog.versions
     assert set(restored.types) == catalog.types | {"String"}
+    assert restored.bundle_version == "2"
+    assert "general-v1" in restored.ontology_versions
+    assert "discourse-v2" in restored.ontology_versions
+    assert "narrative-v2" in restored.ontology_versions
 
 
 def test_manifest_rejects_changed_module_version(tmp_path: Path) -> None:

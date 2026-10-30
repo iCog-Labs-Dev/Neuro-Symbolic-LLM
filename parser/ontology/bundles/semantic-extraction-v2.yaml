@@ -1,10 +1,10 @@
 bundle_id: semantic-extraction
-bundle_version: "1"
+bundle_version: "2"
 modules:
-  discourse: discourse-v1
+  discourse: discourse-v2
   general: general-v1
   lexical: lexical-v1
-  narrative: narrative-v1
+  narrative: narrative-v2
   program: program-v1
   proof: proof-v1
   upper: upper-v1

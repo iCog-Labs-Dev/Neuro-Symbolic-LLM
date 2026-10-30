@@ -302,7 +302,7 @@ def load_ontology_catalog(
 
 
 DEFAULT_BUNDLE_MANIFEST = (
-    Path(__file__).resolve().parent / "bundles" / "semantic-extraction-v1.yaml"
+    Path(__file__).resolve().parent / "bundles" / "semantic-extraction-v2.yaml"
 )
 
 

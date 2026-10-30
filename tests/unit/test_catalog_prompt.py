@@ -67,7 +67,7 @@ def test_prompt_uses_only_selected_ontology_modules() -> None:
         "Mira left despite the rain.", catalog=catalog
     )
 
-    assert "Ontology versions: discourse-v1, upper-v1" in prompt.text
+    assert "Ontology versions: discourse-v2, upper-v1" in prompt.text
     assert "Concession(statement: Clause, counter_statement: Clause)" in prompt.text
     assert "Kick(" not in prompt.text
     assert "lexical-v1" not in prompt.text

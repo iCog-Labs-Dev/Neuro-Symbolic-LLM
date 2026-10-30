@@ -106,7 +106,15 @@ depend on the hybrid miner.
 
 The relation vocabulary comes from the versioned ontology modules in
 [`ontology/`](ontology/), selected by the
-[bundle manifest](ontology/bundles/semantic-extraction-v1.yaml).
+[bundle manifest](ontology/bundles/semantic-extraction-v2.yaml).
+
+Bundle version 2 corrects the concession/expectation-defeat signatures from
+the Hybrid Pattern Mining paper, section 8.2 (printed pages 29–30): `Defeats`
+starts with a `Clause`, `DiscourseFocus` targets that clause, and `Content`
+accepts an expected `Proposition` as its first argument. The other modules,
+including `general-v1`, remain selected. Existing parser results and student
+checkpoints retain their recorded ontology versions; do not relabel old data
+as the new bundle or bypass checkpoint compatibility checks.
 [`general.yaml`](ontology/general.yaml) holds the general relations such as
 `LocatedIn`, `PartOf`, and `UsedFor`.
 

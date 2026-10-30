@@ -1,4 +1,4 @@
-version: "narrative-v1"
+version: "narrative-v2"
 relations:
   CreatesObligation:
     arity: 2
@@ -24,11 +24,11 @@ relations:
     arity: 2
     arguments:
       - name: container_or_obligation
-        type: Entity
+        type: Entity|Proposition
       - name: required_action
         type: Proposition|Event
     confidence_range: [0.0, 1.0]
-    extraction_instruction: "Extract the substantive requirement of an obligation or promise."
+    extraction_instruction: "Link an obligation, promise, or expected proposition to its content proposition or event. In an expectation-defeat frame, the first argument is the Proposition referenced by EvokesExpectation and Defeats."
   Discharges:
     arity: 2
     arguments:

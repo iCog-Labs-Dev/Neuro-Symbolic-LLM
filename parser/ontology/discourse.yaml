@@ -1,4 +1,4 @@
-version: "discourse-v1"
+version: "discourse-v2"
 relations:
   Concession:
     arity: 2
@@ -31,15 +31,15 @@ relations:
     arity: 2
     arguments:
       - name: outcome
-        type: Event
+        type: Clause
       - name: prior_expectation
         type: Proposition
     confidence_range: [0.0, 1.0]
-    extraction_instruction: "Extract when an outcome directly contradicts an evoked expectation."
+    extraction_instruction: "Link the source clause that defeats an expectation to that expected proposition. In a concession, reuse the counter_statement Clause from Concession; do not replace that clause with an event."
   DiscourseFocus:
     arity: 1
     arguments:
       - name: focal_item
-        type: Entity|Proposition
+        type: Clause
     confidence_range: [0.0, 1.0]
-    extraction_instruction: "Extract the primary subject of a discourse segment."
+    extraction_instruction: "Identify the source clause carrying the discourse focus. In the concession/expectation-defeat frame, this is the counter_statement Clause, not an entity or event mentioned inside it."

@@ -16,16 +16,16 @@ def test_loads_versioned_catalog_with_explicit_types() -> None:
 
     assert catalog.types == frozenset({"Entity", "Event", "Proposition", "Clause"})
     assert catalog.versions == (
-        "discourse-v1",
+        "discourse-v2",
         "general-v1",
         "lexical-v1",
-        "narrative-v1",
+        "narrative-v2",
         "program-v1",
         "proof-v1",
         "upper-v1",
     )
     concession = catalog.relation("Concession")
-    assert concession.ontology_version == "discourse-v1"
+    assert concession.ontology_version == "discourse-v2"
     assert concession.arity == 2
     assert [argument.allowed_types for argument in concession.arguments] == [
         ("Clause",),
@@ -37,13 +37,27 @@ def test_loads_versioned_catalog_with_explicit_types() -> None:
 def test_selects_only_requested_modules_and_records_their_versions() -> None:
     catalog = load_ontology_catalog(modules=("discourse", "upper"))
 
-    assert catalog.versions == ("discourse-v1", "upper-v1")
+    assert catalog.versions == ("discourse-v2", "upper-v1")
     assert catalog.signatures()["Concession"] == (
         frozenset({"Clause"}),
         frozenset({"Clause"}),
     )
     assert "Kick" not in catalog.relations
     assert "Fold" not in catalog.relations
+
+
+def test_paper_concession_frame_preserves_clause_and_content_types() -> None:
+    # Hybrid Pattern Mining, section 8.2, printed pages 29–30.
+    signatures = load_ontology_catalog().signatures()
+    assert signatures["Defeats"] == (
+        frozenset({"Clause"}),
+        frozenset({"Proposition"}),
+    )
+    assert signatures["DiscourseFocus"] == (frozenset({"Clause"}),)
+    assert signatures["Content"] == (
+        frozenset({"Entity", "Proposition"}),
+        frozenset({"Proposition", "Event"}),
+    )
 
 
 def test_requires_available_modules_and_declared_argument_types() -> None:

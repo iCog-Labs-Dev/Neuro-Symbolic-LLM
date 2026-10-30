@@ -49,7 +49,7 @@ def run_training(monkeypatch, tmp_path):
             "max_length": 32,
             "contract_version": SEMANTIC_CONTRACT_VERSION,
             "ontology_bundle_manifest": (
-                "parser/ontology/bundles/semantic-extraction-v1.yaml"
+                "parser/ontology/bundles/semantic-extraction-v2.yaml"
             ),
         },
         "training": {
@@ -180,7 +180,7 @@ def capture_training_splits(monkeypatch, tmp_path):
             "max_length": 32,
             "contract_version": SEMANTIC_CONTRACT_VERSION,
             "ontology_bundle_manifest": (
-                "parser/ontology/bundles/semantic-extraction-v1.yaml"
+                "parser/ontology/bundles/semantic-extraction-v2.yaml"
             ),
         },
         "training": {"seed": 42},

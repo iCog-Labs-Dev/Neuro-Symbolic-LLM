@@ -29,7 +29,7 @@ def add_catalog_arguments(arguments: argparse.ArgumentParser) -> None:
     ontology.add_argument(
         "--ontology-bundle",
         type=Path,
-        help="versioned ontology manifest (default: semantic-extraction-v1)",
+        help="versioned ontology manifest (default: semantic-extraction-v2)",
     )
     ontology.add_argument(
         "--ontology-module",
