@@ -32,6 +32,44 @@ def test_catalog_ollama_profile_is_explicit_and_legacy_profile_is_unchanged() ->
     assert "temperature" not in legacy.settings
     assert catalog.settings["think"] is False
     assert catalog.settings["temperature"] == 0.0
+    assert catalog.settings["validation_retries"] == 2
+    assert "validation_retries" not in legacy.settings
+
+
+def test_reference_factory_passes_validation_retry_budget(monkeypatch):
+    from parser.semantic import model_config
+
+    backend = object()
+    monkeypatch.setattr(
+        model_config,
+        "load_model_profile",
+        lambda *_, **__: _profile("test", validation_retries=1),
+    )
+    monkeypatch.setattr(model_config, "create_backend", lambda _: backend)
+    captured = {}
+    monkeypatch.setattr(
+        model_config,
+        "ReferenceSemanticParser",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    model_config.build_reference_semantic_parser()
+    assert captured["config"].validation_retries == 1
+    assert captured["backend"] is backend
+
+
+def test_invalid_retry_budget_fails_before_creating_backend(monkeypatch):
+    from parser.semantic import model_config
+
+    monkeypatch.setattr(
+        model_config,
+        "load_model_profile",
+        lambda *_, **__: _profile("test", validation_retries=True),
+    )
+    calls = []
+    monkeypatch.setattr(model_config, "create_backend", lambda _: calls.append(True))
+    with pytest.raises(ValueError, match="validation_retries"):
+        model_config.build_reference_semantic_parser()
+    assert calls == []
 
 
 def test_distilled_factory_uses_shipped_provider_budget_and_catalog(monkeypatch):

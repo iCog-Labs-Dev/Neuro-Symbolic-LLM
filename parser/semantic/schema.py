@@ -265,6 +265,7 @@ class SemanticRepair(SemanticSchemaModel):
         "pronoun_in_rule",
         "unresolved_pronoun",
         "rule_duplicate",
+        "validation_regeneration",
     ]
     detail: str = Field(pattern=_NOT_BLANK)
 

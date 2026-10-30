@@ -300,6 +300,10 @@ def build_reference_semantic_parser(
 ) -> ReferenceSemanticParser:
     """Build a reference parser using the active YAML model profile."""
     profile = load_model_profile(config_path, profile_name=profile_name)
+    parser_config = SemanticParserConfig(
+        model_name=profile.model,
+        validation_retries=profile.settings.get("validation_retries", 0),
+    )
     if (
         profile.settings.get("role") == "student"
         or (Path(profile.model) / "training_metadata.json").is_file()
@@ -312,7 +316,7 @@ def build_reference_semantic_parser(
         )
     return ReferenceSemanticParser(
         backend=create_backend(profile),
-        config=SemanticParserConfig(model_name=profile.model),
+        config=parser_config,
         catalog=catalog,
         model_revision=model_revision,
         require_structured_output=require_structured_output,

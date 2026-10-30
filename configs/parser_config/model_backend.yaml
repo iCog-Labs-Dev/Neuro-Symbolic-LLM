@@ -101,6 +101,7 @@ profiles:
     num_ctx: 24576
     think: false
     temperature: 0.0
+    validation_retries: 2
 
   transformers_local:
     # A locally downloaded Hugging Face model; no provider API key is required.

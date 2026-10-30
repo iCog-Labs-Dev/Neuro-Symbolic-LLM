@@ -37,7 +37,7 @@ flowchart TD
         pairs[("Student pairs JSONL<br/>source → extraction")]
 
         source --> teacher --> draft --> checked --> results --> pairs
-        checked -. invalid .-> rejected
+        checked -. invalid after retry budget .-> rejected
     end
 
     subgraph deployment["Deployment stage"]
@@ -68,6 +68,8 @@ flowchart TD
     catalog["Catalog validation<br/>predicates, signatures, types, confidence"]
     accepted[("Accepted results JSONL")]
     rejected[("Rejected JSONL<br/>line + reason")]
+    retry{"Validation retries<br/>remaining?"}
+    feedback["Latest validation error<br/>+ unchanged source and catalog"]
     pairs[("Student pairs JSONL")]
     metta["MeTTa view<br/>metta_renderer.py + atomese.py"]
     adapter["Miner adapter<br/>symbolic_pipeline"]
@@ -75,8 +77,12 @@ flowchart TD
 
     source --> prompt --> model --> clean --> normalize --> extraction
     extraction --> result --> repairs --> catalog --> accepted
-    extraction -. invalid .-> rejected
-    catalog -. invalid .-> rejected
+    normalize -. invalid .-> retry
+    extraction -. invalid .-> retry
+    result -. invalid quotes .-> retry
+    catalog -. invalid .-> retry
+    retry -- yes --> feedback --> model
+    retry -- no --> rejected
     accepted --> pairs
     accepted --> metta
     accepted --> adapter --> miner
@@ -85,6 +91,23 @@ flowchart TD
 The model writes only the extraction. Deterministic code adds document IDs,
 provenance, and character offsets, so the model never produces numbers it
 cannot see.
+
+### Bounded validation regeneration
+
+The `ollama_catalog` profile permits two validation retries: at most three
+generation calls per document. Each replacement draft passes the same JSON,
+normalization, source-quote, reference, repair and catalog checks. Feedback
+contains only the latest validation error, limited to 2,000 characters; the
+source text and decoding schema remain unchanged. An accepted replacement is
+recorded as `validation_regeneration` in `provenance.repairs`.
+
+Set `validation_retries: 0` in a reference-model profile to disable retries.
+Profiles without this setting and direct `SemanticParserConfig` construction
+default to zero. Provider/transport failures and reported output truncation
+are not retried by this policy. Exhausted validation attempts remain rejected.
+Student labels contain only the accepted extraction, never failed drafts or
+validation feedback. Regeneration is a recovery policy, not evidence that an
+accepted interpretation is semantically correct.
 
 ### Output contract
 
