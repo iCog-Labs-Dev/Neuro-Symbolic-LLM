@@ -9,7 +9,7 @@ description = "PC residual with symbolic head on frozen LLM"
 requires-python = ">=3.11"
 dependencies = [
     # FabricPC: pinned release — only upgrade deliberately
-    "fabricpc @ git+https://github.com/trueagi-io/FabricPC.git@v0.3.0",
+    "fabricpc @ git+https://github.com/trueagi-io/FabricPC.git@v0.6.0",
 
     # JAX ecosystem
     "jax>=0.4.30",

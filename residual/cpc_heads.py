@@ -13,10 +13,11 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from fabricpc.builder import Edge, TaskMap, graph
 from fabricpc.core.inference import InferenceSGD
+from fabricpc.core.topology import Edge
 from fabricpc.core.types import GraphParams, NodeParams
-from fabricpc.graph import initialize_graph_state
+from fabricpc.graph_assembly import TaskMap, graph
+from fabricpc.graph_initialization import initialize_graph_state
 from fabricpc.nodes import Linear
 
 CPCParams = dict[str, dict[str, jax.Array]]

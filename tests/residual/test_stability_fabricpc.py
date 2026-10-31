@@ -100,7 +100,7 @@ def test_jit_matches_eager() -> None:
 
 def test_the_graphs_are_fabricpc_nodes_with_the_expected_parameters() -> None:
     """Guards the node names and weight keys the module relies on."""
-    from fabricpc.graph import initialize_params
+    from fabricpc.graph_initialization import initialize_params
 
     anchor = fpc_energy._anchor_graph(D)
     assert isinstance(anchor.nodes["anch"], IdentityNode)

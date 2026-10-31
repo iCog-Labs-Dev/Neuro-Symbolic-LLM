@@ -27,11 +27,12 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from fabricpc.builder import Edge, TaskMap, graph
 from fabricpc.core.activations import IdentityActivation
 from fabricpc.core.initializers import NormalInitializer
+from fabricpc.core.topology import Edge
 from fabricpc.core.types import GraphParams, GraphStructure, NodeParams
-from fabricpc.graph import (
+from fabricpc.graph_assembly import TaskMap, graph
+from fabricpc.graph_initialization import (
     FeedforwardStateInit,
     initialize_graph_state,
     initialize_params,

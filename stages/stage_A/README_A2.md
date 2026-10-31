@@ -80,6 +80,8 @@ export JAX_PLATFORMS=cuda
 
 Use the dependencies declared by the checkout you are validating. After
 integration into `Base`, validate against that branch's dependency set.
+The A2 dependency pin is FabricPC v0.6.0, matching `Base`. Graph assembly uses
+`fabricpc.graph_assembly`; initialization uses `fabricpc.graph_initialization`.
 
 ## Run A2
 
