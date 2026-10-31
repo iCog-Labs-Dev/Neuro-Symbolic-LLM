@@ -34,6 +34,7 @@ from stages.stage_A.a2 import (
     MonitorConfig,
     StabLossConfig,
     a2_audit,
+    a2_diagnostics,
     a2_objective,
     adapter_params,
     apply_arm,
@@ -1057,6 +1058,49 @@ def test_every_arm_runs_through_the_objective(gpt2, input_ids) -> None:
         total, terms = run_objective(gpt2, adapter, cfg, params, input_ids)
         assert bool(jnp.isfinite(total)), arm
         assert ("hid" in terms) == cfg.uses_hidden_pred, arm
+
+
+@pytest.mark.parametrize("target", ["base_anchor", "corrected_teacher"])
+def test_diagnostics_follow_selected_target(gpt2, input_ids, target):
+    adapter = ResidualAdapter(ResidualConfig(rank=4, layers=LAYERS), gpt2.architecture)
+    cfg = make_cfg(hid=0.1, hidden_target=target)
+    bank = predictor_bank(cfg, adapter, SEQ)
+    params = with_random_b(init_a2_params(cfg, adapter, SEQ))
+    row = a2_diagnostics(gpt2, adapter, bank, cfg, params, [input_ids])
+    suffix = "_base" if target == "base_anchor" else ""
+    for name in ("pred_rel", "copy_rel"):
+        assert row[f"{name}_selected_mean"] == pytest.approx(
+            row[f"{name}{suffix}_mean"]
+        )
+        for layer in LAYERS:
+            assert row[f"{name}_selected_l{layer}"] == pytest.approx(
+                row[f"{name}{suffix}_l{layer}"]
+            )
+
+
+def test_internal_checkpoint_reporting_preserves_parameters(gpt2, input_ids):
+    from stages.stage_A.a2_reporting import internal_metrics
+
+    adapter = ResidualAdapter(ResidualConfig(rank=4, layers=LAYERS), gpt2.architecture)
+    cfg = make_cfg(hid=0.1, detach=False, cpc=0.1, stab=0.1)
+    params = with_random_b(init_a2_params(cfg, adapter, SEQ))
+    before = jax.tree_util.tree_map(lambda x: np.array(x, copy=True), params)
+    report = internal_metrics(gpt2, adapter, params, cfg, [input_ids])
+    assert report["representation_batches"] == 1.0
+    for layer in LAYERS:
+        assert report[f"residual_norm_ratio_l{layer}"] > 0
+        for name in ("read", "write"):
+            assert 0 <= report[f"redundancy_{name}_l{layer}"] <= 1
+    for name in ("hid", "cpc", "stab"):
+        assert 0 <= report[f"gradient_conflict_task_{name}"] <= 1.00001
+    assert all(np.isfinite(v) for v in report.values())
+    for original, current in zip(
+        jax.tree_util.tree_leaves(before),
+        jax.tree_util.tree_leaves(params),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(original, current)
+    assert gpt2.params_unchanged()
 
 
 # --- audit ------------------------------------------------------------------------------------

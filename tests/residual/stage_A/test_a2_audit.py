@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,19 @@ def test_gradient_routing_values_match_the_design(
     assert anch["adapter"] > 0 and anch["cpc"] == 0 and anch["hep"] == 0
     hep = c["grad_routing_stab_hep"].value
     assert hep["adapter"] == 0 and hep["hep"] > 0  # the HEP term trains only V
+
+
+@pytest.mark.parametrize("kind", ["dense", "lowrank"])
+def test_zero_alpha_highway_control_passes_audit(substrate, adapter, input_ids, kind):
+    cfg = full_cfg()
+    cfg = replace(
+        cfg, stab=replace(cfg.stab, hep=HEPConfig(kind=kind, rank=4, alpha=0.0))
+    )
+    checks = a2_audit(substrate, adapter, cfg, input_ids)
+    assert audit_ok(checks), format_audit(checks)
+    check = by_name(checks)
+    assert check["grad_finite_stab_hep"].ok
+    assert all(v == 0 for v in check["grad_routing_stab_hep"].value.values())
 
 
 def test_gradient_ratios_are_information_not_failures(

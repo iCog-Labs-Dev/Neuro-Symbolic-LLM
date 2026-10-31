@@ -73,7 +73,7 @@ def contrastive_future_loss(
     """
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 1:
         raise ValueError(f"offset must be an integer >= 1, got {offset!r}")
-    if not tau > 0:
+    if not math.isfinite(tau) or not tau > 0:
         raise ValueError(f"tau must be > 0, got {tau!r}")
     if anchors.shape != targets.shape:
         raise ValueError(
@@ -125,7 +125,7 @@ def contrastive_future_loss(
             "cpc_top1": zero,
             "cpc_pos_sim": zero,
             "cpc_neg_sim": zero,
-            "cpc_n_anchors": jnp.asarray(n, jnp.float32),
+            "cpc_n_anchors": zero,
             "cpc_valid": zero,
         }
 
@@ -175,6 +175,9 @@ def hidden_prediction_loss(
     source = source.astype(jnp.float32)
     if config.skip_first_token:
         pred, target, source = pred[:, 1:], target[:, 1:], source[:, 1:]
+    if pred.size == 0:
+        zero = jnp.sum(pred)  # finite empty sum, with a zero derivative
+        return dict.fromkeys(("loss", "mse", "rel", "copy_rel"), zero)
     mse = jnp.mean(jnp.square(pred - target))
     var = jnp.mean(jnp.var(target, axis=(0, 1))) + _VAR_FLOOR
     copy_mse = jnp.mean(jnp.square(jax.lax.stop_gradient(source) - target))
@@ -193,6 +196,7 @@ def collect_stability_metrics(
     adapter_params: AdapterParams,
     site_inputs: Mapping[int, jax.Array],
     corrected: Mapping[int, jax.Array] | None = None,
+    mask: jax.Array | None = None,
 ) -> dict[str, jax.Array]:
     """Collect A2 stability metrics without adding them to the loss."""
     return monitor.metrics(
@@ -200,6 +204,7 @@ def collect_stability_metrics(
         adapter_params,
         site_inputs,
         corrected=corrected,
+        mask=mask,
     )
 
 
@@ -275,7 +280,7 @@ def output_error(logits: jax.Array, labels: jax.Array) -> tuple[jax.Array, jax.A
 
 
 def hep_nudge(eps: jax.Array, v: Highway, alpha: float = 1.0) -> jax.Array:
-    """The nudge ``alpha * sg(eps) @ V`` injected into a hidden state, ``[..., d_i]``."""
+    """Projected error ``alpha * sg(eps) @ V``, ``[..., d_i]``; A2 does not inject it."""
     return alpha * apply_highway(v, jax.lax.stop_gradient(eps))
 
 
@@ -288,7 +293,10 @@ def hep_nudge_loss(
     mask: jax.Array | None = None,
     backend: str = "fabricpc",
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """HEP-nudge penalty ``L_hep-nudge``: the squared size of the injected nudge.
+    """Projected-error norm-only control; A2 applies no inference nudge.
+
+    Only trainable highway weights receive a gradient. A zero highway minimizes
+    this penalty, so reducing it does not demonstrate useful HEP learning.
 
     L = mean_{...,b,t} || alpha * sg(eps) @ V ||^2
     L = that / ( mean || sg(reference) ||^2 + eps )

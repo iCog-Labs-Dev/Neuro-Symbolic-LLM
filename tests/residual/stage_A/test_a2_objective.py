@@ -979,6 +979,25 @@ def test_runner_arm_and_seed_overrides(runner: Any) -> None:
         runner.parse_args(["--arm", "nope"])
 
 
+@pytest.mark.parametrize("training", ["batch_size: 1", "seq_len: 2"])
+def test_runner_rejects_inactive_cpc_before_loading_model(
+    runner, tmp_path, monkeypatch, training
+):
+    cfg = tmp_path / "invalid.yaml"
+    cfg.write_text(
+        "objective:\n  cpc: {weight: 0.1, offsets: [2]}\n"
+        f"training:\n  {training}\n"
+        "domains:\n  - {name: a, dataset: unused}\n"
+    )
+
+    def unexpected_model_load(*args, **kwargs):
+        pytest.fail("Invalid CPC settings must fail before loading a model")
+
+    monkeypatch.setattr(runner, "FrozenSubstrate", unexpected_model_load)
+    with pytest.raises(ValueError, match="CPC"):
+        runner.main(["--config", str(cfg)])
+
+
 def test_runner_predictor_and_stability_overrides(runner: Any) -> None:
     cfg = load_configs(SHIPPED, A2Config)
     args = runner.parse_args(
@@ -999,7 +1018,11 @@ def test_runner_predictor_and_stability_overrides(runner: Any) -> None:
 
 
 def test_runner_main_end_to_end(
-    runner: Any, gpt2: FrozenSubstrate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    runner: Any,
+    gpt2: FrozenSubstrate,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
     # No dataset download: the loader and the model constructor are stubbed.
     cfg_path = tmp_path / "cfg.yaml"
@@ -1047,3 +1070,30 @@ def test_runner_main_end_to_end(
     config = load_configs(run / "config.yaml", A2Config)
     assert config.objective.cpc.weight == 0.2
     assert config.objective.seed == config.training.seed == config.adapter.seed == 3
+    # Exercise the real CLI load/filter/strict-validate/evaluate path after training
+    # a combined hidden + CPC checkpoint. Patch only external model/data loading.
+    import stages.stage_base as stage_base
+
+    monkeypatch.setattr(stage_base, "load_token_blocks", lambda *a, **k: blocks)
+    checkpoint = run / "params" / "task_0_a.npz"
+    capsys.readouterr()
+    assert (
+        runner.main(
+            ["--config", str(run / "config.yaml"), "--eval-checkpoint", str(checkpoint)]
+        )
+        == 0
+    )
+    reloaded = json.loads(capsys.readouterr().out)
+    expected = evaluate(
+        gpt2,
+        ResidualAdapter(config.adapter, gpt2.architecture),
+        saved,
+        make_eval_set(blocks, BATCH, 1),
+    )
+    assert reloaded["a"] == pytest.approx(expected)
+    # A1's validator still rejects auxiliary keys.
+    with pytest.raises(ValueError, match="extra layers"):
+        stage_base.validate_checkpoint_params(
+            ResidualAdapter(config.adapter, gpt2.architecture), saved
+        )
+    assert gpt2.params_unchanged()

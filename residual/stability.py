@@ -26,6 +26,7 @@ step metric is exactly zero. A3's settling loop passes its real trajectory to th
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -51,7 +52,11 @@ class StabilityConfig:
             raise ValueError(
                 f"stability mode must be one of {STABILITY_MODES}, got {self.mode!r}"
             )
-        if not isinstance(self.delta, int | float) or not self.delta > 0:
+        if (
+            not isinstance(self.delta, int | float)
+            or not math.isfinite(self.delta)
+            or not self.delta > 0
+        ):
             raise ValueError(f"delta must be > 0, got {self.delta!r}")
         if self.layers is not None and (
             not isinstance(self.layers, list | tuple)
@@ -83,19 +88,26 @@ class StabilityConfig:
         return self.mode != "off"
 
 
-def _adjacent_stats(x: jax.Array) -> tuple[jax.Array, jax.Array]:
+def _adjacent_stats(
+    x: jax.Array, mask: jax.Array | None = None
+) -> tuple[jax.Array, jax.Array]:
     diff = x[:, 1:, :] - x[:, :-1, :]
     sq = jnp.sum(jnp.square(diff), axis=-1)  # [B, S-1]
+    if mask is not None:
+        if mask.shape != x.shape[:-1]:
+            raise ValueError(f"mask shape {mask.shape} must be {x.shape[:-1]}")
+        valid = mask[:, 1:].astype(bool) & mask[:, :-1].astype(bool)
+        return jnp.sum(jnp.where(valid, sq, 0.0)), jnp.sum(valid).astype(jnp.float32)
     return jnp.sum(sq), jnp.asarray(sq.size, dtype=jnp.float32)
 
 
 def residual_smoothness(
-    correction: jax.Array, inputs: jax.Array
+    correction: jax.Array, inputs: jax.Array, mask: jax.Array | None = None
 ) -> dict[str, jax.Array]:
     correction = jax.lax.stop_gradient(correction.astype(jnp.float32))
     inputs = jax.lax.stop_gradient(inputs.astype(jnp.float32))
-    r_sum, count = _adjacent_stats(correction)
-    h_sum, _ = _adjacent_stats(inputs)
+    r_sum, count = _adjacent_stats(correction, mask)
+    h_sum, _ = _adjacent_stats(inputs, mask)
     denom = jnp.maximum(count, 1.0)
     res, inp = r_sum / denom, h_sum / denom
     return {
@@ -121,7 +133,7 @@ def step_metrics(trajectory: jax.Array, delta: float = 1e-6) -> dict[str, jax.Ar
     diffs = z[1:] - z[:-1]  # [S, B, T, D]
     zero = jnp.zeros((), dtype=jnp.float32)
     if diffs.shape[0] == 0:
-        return {k: zero for k in STEP_KEYS}
+        return dict.fromkeys(STEP_KEYS, zero)
     norms = jnp.linalg.norm(diffs, axis=-1)  # [S, B, T]
     step_loss = jnp.sum(jnp.square(norms)) / n_tokens
     last = jnp.sum(norms[-1]) / n_tokens
@@ -165,6 +177,7 @@ class StabilityMonitor:
         adapter_params: AdapterParams,
         site_inputs: Mapping[int, jax.Array],
         corrected: Mapping[int, jax.Array] | None = None,
+        mask: jax.Array | None = None,
     ) -> dict[str, jax.Array]:
         """Metrics averaged over the sites; nothing here carries a gradient.
 
@@ -181,7 +194,7 @@ class StabilityMonitor:
                 if corrected is not None and i in corrected
                 else adapter.apply(adapter_params, h, i).astype(jnp.float32)
             )
-            row = residual_smoothness(out - h, h)
+            row = residual_smoothness(out - h, h, mask)
             row.update(step_metrics(out[None], self.config.delta))
             for key, value in row.items():
                 per_site.setdefault(key, []).append(value)

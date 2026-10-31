@@ -9,6 +9,7 @@ L_A2 = L_task + lambda_kl * KL(p_F0 || p_F0+R) + lambda_wd * ||phi||^2   (A1, un
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -78,8 +79,7 @@ class CPCConfig:
     heads: str = "fabricpc"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.weight, int | float) or self.weight < 0:
-            raise ValueError(f"weight must be a number >= 0, got {self.weight!r}")
+        _number("weight", self.weight)
         offsets = self.offsets
         if isinstance(offsets, int) and not isinstance(offsets, bool):
             offsets = (offsets,)
@@ -102,6 +102,7 @@ class CPCConfig:
             )
         if not isinstance(self.dim, int) or isinstance(self.dim, bool) or self.dim < 1:
             raise ValueError(f"dim must be an integer >= 1, got {self.dim!r}")
+        _number("tau", self.tau)
         if not self.tau > 0:
             raise ValueError(f"tau must be > 0, got {self.tau!r}")
         if self.positive not in POSITIVES:
@@ -117,8 +118,7 @@ class CPCConfig:
                 "max_anchors_per_seq must be an integer >= 1 or null, "
                 f"got {self.max_anchors_per_seq!r}"
             )
-        if not self.a_init_noise >= 0:
-            raise ValueError(f"a_init_noise must be >= 0, got {self.a_init_noise!r}")
+        _number("a_init_noise", self.a_init_noise)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CPCConfig:
@@ -257,8 +257,13 @@ def hidden_prediction_loss(
 
 
 def _number(name: str, value: Any) -> None:
-    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
-        raise ValueError(f"{name} must be a number >= 0, got {value!r}")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -398,12 +403,13 @@ class HiddenConfig:
         This anchors the predictor to the original frozen trajectory and
         requires an additional base forward (sets ``needs_base_targets``).
 
-    **Why ``corrected_teacher`` is the default:**  The paper's recommendation
-    for the A2 hidden-prediction auxiliary loss is Option B
-    (``corrected_teacher``).  Option A (``base_anchor``) is appropriate only
-    when the intended term is explicitly a hidden-state anchor rather than a
-    local predictor.  In both cases, the target is stop-gradiented and the
-    frozen base parameters remain frozen.
+    The auxiliary-loss review and October implementation clarification recommend
+    Option B for a transition surrogate. The main research plan v8, Section 7.4,
+    instead illustrates the clean-base next-layer target (Option A). Treat them
+    as separately named experiments. Both stop gradients through the teacher
+    and preserve frozen base parameters. A flexible predictor can fit the base
+    target without strictly bounding hidden-state drift; direct state anchoring
+    is a separate stability term.
 
     To switch to the base-anchor interpretation::
 
@@ -432,6 +438,7 @@ class HiddenConfig:
         if (
             isinstance(self.predictor_lr_mult, bool)
             or not isinstance(self.predictor_lr_mult, int | float)
+            or not math.isfinite(self.predictor_lr_mult)
             or not self.predictor_lr_mult > 0
         ):
             raise ValueError(
@@ -1064,6 +1071,7 @@ def _a2_objective(
                         for i in monitor.layers
                     },
                     corrected=corrected,
+                    mask=mask,
                 )
             )
         if config.cpc.enabled:
@@ -1243,6 +1251,10 @@ def a2_diagnostics(
             out[f"pred_rel_l{i}"] = on_teacher["rel"]
             out[f"copy_rel_l{i}"] = on_teacher["copy_rel"]
             out[f"pred_rel_base_l{i}"] = on_base["rel"]
+            out[f"copy_rel_base_l{i}"] = on_base["copy_rel"]
+            selected = on_base if config.hidden_target == "base_anchor" else on_teacher
+            out[f"pred_rel_selected_l{i}"] = selected["rel"]
+            out[f"copy_rel_selected_l{i}"] = selected["copy_rel"]
             out[f"teacher_shift_l{i}"] = shift["rel"]
         return out
 
@@ -1252,7 +1264,14 @@ def a2_diagnostics(
         for ids in eval_batches
     ]
     summary = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
-    for name in ("pred_rel", "copy_rel"):
+    for name in (
+        "pred_rel",
+        "copy_rel",
+        "pred_rel_base",
+        "copy_rel_base",
+        "pred_rel_selected",
+        "copy_rel_selected",
+    ):
         summary[f"{name}_mean"] = float(
             np.mean([summary[f"{name}_l{i}"] for i in bank.layers])
         )
@@ -1266,9 +1285,10 @@ ARM_DEFAULT_WEIGHTS = {"cpc": 0.05, "stab": 0.1, "hid": 0.1}
 ARMS = (
     "a1_mode",  # no auxiliary term: the A1 objective
     "stab_anch",  # anchor only
-    "stab_hep",  # anchor + trainable low-rank HEP highway
+    "stab_hep",  # compatibility alias for hep_norm_control
+    "hep_norm_control",  # explicit name for the legacy stab_hep norm-only control
     "stab_smooth",  # anchor + residual smoothness
-    "stab_all",  # all four: anchor, HEP nudge, residual smoothness, step(step inactive in A2)
+    "stab_all",  # anchor, highway norm control, residual smoothness, inactive step term
     "cpc_base",  # contrastive future, positive from the base state
     "cpc_corrected",  # contrastive future, positive from the corrected state
     "cpc_multi",  # contrastive future, offsets 1, 2, 4
@@ -1316,7 +1336,7 @@ def apply_arm(config: A2Config, arm: str) -> A2Config:
     cpc, stab, hid = off_cpc, off_stab, replace(config.hid, weight=0.0)
     if arm == "stab_anch":
         stab = anchor_on()
-    elif arm == "stab_hep":
+    elif arm in ("stab_hep", "hep_norm_control"):
         base = anchor_on()
         kind = config.stab.hep.kind if config.stab.hep.trainable else "lowrank"
         w_hep = config.stab.w_hep if config.stab.w_hep > 0 else 0.1
@@ -1539,16 +1559,24 @@ def a2_audit(
     if "stab_hep" in probe_terms:
         routed["stab_hep"] = (
             "stab_hep",
-            {"hep"} if config.stab.hep.trainable else set(),
+            (
+                {"hep"}
+                if config.stab.hep.trainable and config.stab.hep.alpha > 0
+                else set()
+            ),
         )
     norms: dict[str, dict[str, float]] = {}
     for label, (term, expected_groups) in routed.items():
         grad = jax.grad(lambda p, term=term: run(p)[1][term])(probe)
+        finite = all(
+            bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(grad)
+        )
+        add(f"grad_finite_{label}", finite, None, "all gradient leaves are finite")
         norms[label] = _group_norms(grad)
         got = {g for g, v in norms[label].items() if v > 0.0}
         add(
             f"grad_routing_{label}",
-            got == expected_groups,
+            finite and got == expected_groups,
             norms[label],
             f"gradient reaches {sorted(got)}, expected {sorted(expected_groups)}",
         )

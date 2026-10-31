@@ -12,7 +12,7 @@ import json
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,16 +21,23 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
+from frozenllm.substrate.memory import get_memory_status  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
 from residual.stability import (  # noqa: E402
     StabilityMonitor,
 )
-from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
+from stages.results import (  # noqa: E402
+    RunWriter,
+    default_run_name,
+    load_params,
+    run_metadata,
+)
 from stages.stage_A.a2 import (  # noqa: E402
     ARMS,
     A2Config,
     a2_audit,
     a2_diagnostics,
+    adapter_params,
     apply_arm,
     audit_to_dict,
     init_a2_params,
@@ -47,6 +54,7 @@ from stages.stage_base import (  # noqa: E402
     load_configs,
     load_token_blocks,
     make_eval_set,
+    resolve_split,
     run_sequential,
 )
 
@@ -100,6 +108,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stability-mode", choices=("off", "diagnostic"), default=None)
     parser.add_argument("--audit", action="store_true", default=False)
     parser.add_argument("--audit-only", action="store_true", default=False)
+    parser.add_argument(
+        "--report-internals",
+        action="store_true",
+        help="Include checkpoint internal metrics; requires --eval-checkpoint and the saved config.",
+    )
     return parser.parse_args(argv)
 
 
@@ -192,6 +205,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg = apply_overrides(load_configs(args.config, A2Config), args)
     train_cfg = cfg.training
     obj: A2Config = cfg.objective
+    if args.report_internals and args.eval_checkpoint is None:
+        raise ValueError("--report-internals requires --eval-checkpoint.")
+    if obj.cpc.enabled and args.eval_checkpoint is None:
+        if train_cfg.batch_size < 2:
+            raise ValueError(
+                "Enabled CPC requires batch_size >= 2 for cross-sequence negatives."
+            )
+        if max(obj.cpc.offsets) >= train_cfg.seq_len:
+            raise ValueError("Every CPC offset must be smaller than training.seq_len.")
+    if obj.stab.w_hep > 0 and obj.stab.enabled:
+        log.warning(
+            "HEP norm-only control: trains only the highway, can collapse it to zero, "
+            "and supplies no adapter gradient or inference nudge."
+        )
     log.info("adapter=%s", cfg.adapter)
     log.info("objective=%s", obj)
     log.info("training=%s", train_cfg)
@@ -242,10 +269,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info(
             "Evaluating checkpoint %s on split=%s", args.eval_checkpoint, args.split
         )
+        saved = load_params(args.eval_checkpoint)
         results = evaluate_checkpoint(
             substrate,
             adapter,
-            args.eval_checkpoint,
+            adapter_params(saved),
             cfg.domains,
             split=args.split,
             seq_len=train_cfg.seq_len,
@@ -253,7 +281,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             eval_batches=train_cfg.eval_batches,
             jit=train_cfg.jit,
         )
-        print(json.dumps(results, indent=2))
+        if args.report_internals:
+            from stages.stage_A.a2_reporting import internal_metrics
+
+            reports = {}
+            for d_cfg in cfg.domains:
+                blocks = load_token_blocks(
+                    substrate,
+                    d_cfg,
+                    resolve_split(d_cfg, args.split),
+                    train_cfg.seq_len,
+                )
+                batches = make_eval_set(
+                    blocks, train_cfg.batch_size, train_cfg.eval_batches
+                )
+                row = internal_metrics(substrate, adapter, saved, obj, batches)
+                if bank is not None:
+                    row.update(
+                        a2_diagnostics(
+                            substrate,
+                            adapter,
+                            bank,
+                            obj,
+                            saved,
+                            batches,
+                            jit=train_cfg.jit,
+                        )
+                    )
+                reports[d_cfg.name] = row
+            print(
+                json.dumps(
+                    {
+                        "evaluation": results,
+                        "internal_metrics": reports,
+                        "params_unchanged": substrate.params_unchanged(),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(json.dumps(results, indent=2))
         return 0
 
     # Load data before creating the run directory, so bad datasets fail fast.
@@ -329,6 +396,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "trainable_params_by_group": counts,
                 "frozen_params": n_frozen,
                 "arm": args.arm,
+                "hidden_target": obj.hidden_target,
+                "hidden_updates_adapter": obj.uses_hidden_pred and obj.hid_coupled,
+                "hep_semantics": "projected_error_norm_only_no_inference_nudge",
                 "seed": train_cfg.seed,
                 "epochs": {d.name: d.epochs for d in domains},
                 "jit": train_cfg.jit,
@@ -350,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         frozen = substrate.verify_frozen()
         summary["params_unchanged"] = frozen["params_unchanged"]
+        summary["device_memory"] = asdict(get_memory_status())
 
         final_diag = {}
         for domain in domains:

@@ -21,20 +21,19 @@ objective:
   seed: 0               # seed of the auxiliary heads / predictors / fixed-random highway
   hid:
     lambda_hid: 0.1      # local predictor/hidden prediction loss weight
-    # Target for L_hid: corrected_teacher (Option B) is the paper's
-    # recommendation for the A2 auxiliary loss — trains P_l around the
-    # corrected states visited by the adapter.  Use base_anchor (Option A)
-    # only when the term is meant as a hidden-state anchor to the original
-    # frozen trajectory.  See HiddenConfig docstring for details.
+    # corrected_teacher (Option B): recommended by the auxiliary-loss review
+    # and October implementation clarification for a transition surrogate.
+    # base_anchor (Option A): clean-base target illustrated by research plan v8
+    # Section 7.4. Report these as distinct experiments.
     hidden_target: corrected_teacher  # corrected_teacher (Option B) | base_anchor (Option A)
-    predictor_lr_mult: 1.0 # current sequential optimizer uses one shared LR
+    predictor_lr_mult: 1.0 # predictor LR = training.learning_rate * this multiplier
     hidden_norm: target_var  # target_var | none
     skip_first_token: true
     predictor:
       ff_dim: 256
       out_init_std: null
       predict_delta: false
-      detach_input: true
+      detach_input: true # predictor-only diagnostic; use hid_coupled to train the adapter
       layers: null
   # Contrastive future loss (InfoNCE on a q-projected code; heads are FabricPC nodes).
   cpc:

@@ -10,6 +10,8 @@ on:
     branches:
       - main
       - Base
+      - A2
+      - a2-final
 
 jobs:
 
@@ -84,8 +86,8 @@ jobs:
             echo "No unit tests found. Skipping."
           fi
 
-      - name: Run Stage A tests
-        run: pytest tests/residual/stage_A/ -v --tb=short
+      - name: Run residual tests (including all Stage A tests)
+        run: pytest tests/residual/ -v --tb=short
 
       - name: Run grammar integration tests
         run: |

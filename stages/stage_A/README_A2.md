@@ -58,9 +58,9 @@ input ids ─► frozen model ────────────────�
 
 **Contrastive future loss.** Code `c = q(h~_t)` (parameter-free LayerNorm, then a bias-free linear projection to `dim`), prediction `p = A_{l,k} c` (bias-free linear, initialised near identity), both L2-normalised. The positive is `q(h_{t+k})` under stop-gradient, taken from the base state (`positive: base`) or the corrected state (`positive: corrected`). Negatives are the positives of the **other sequences** in the batch. Anchors are subsampled by a deterministic stride (`max_anchors_per_seq`). Padding is masked: an anchor counts only if both `t` and `t+k` are real tokens and at least one real negative exists. Several offsets (`offsets: [1, 2, 4]`) each get their own predictor; the term is the mean over sites `(l, k)`.
 
-**Anchor.** A squared distance between the corrected and the base state, averaged over real tokens and sites. It is 0 at initialisation (`B = 0`) and pulls the adapter back toward the base model.
+**Base-state anchor.** A squared distance between the corrected and the clean-base state, averaged over real tokens and sites. It is 0 at initialisation (`B = 0`) and pulls the adapter back toward the base model. This BP regularizer measures hidden-state drift; it is different from anchoring a settled latent to its feedforward initializer.
 
-**HEP nudge.** The output error `ε_y` is a training-time-only signal that is projected into the hidden space by a "highway" matrix `V`. Because `ε_y` is under stop-gradient, this loss reaches **only `V`**, never the adapter. With a trainable highway (`dense`, `lowrank`) it trains `V`; with a fixed one (`fixed_random`) it has no gradient and is a **logged metric** (`hep_nudge_norm`, `hep_nudge_ratio`), so the config rejects `w_hep > 0` for fixed highways.
+**Projected-error norm control.** The output error `ε_y` is projected into hidden space by a highway matrix `V`, solely for training-time measurement. A2 never injects this projection into a latent or the logits path. Both the error and normalization reference are detached: the penalty trains **only `V`**, never the adapter. A zero highway minimizes it, so a decreasing norm provides no evidence of useful HEP learning. Use fixed-random projections as diagnostics (`w_hep: 0`), or the explicitly named `hep_norm_control` arm for the trainable norm-only control. `stab_hep` remains a compatibility alias. With matched data and initialization, this extra penalty leaves the anchor-only adapter trajectory unchanged under independent Adam updates.
 
 **Residual smoothness.** `R = h~ − h` is the correction at a site and `h` the hidden state the adapter receives. The loss is the squared difference of the correction between neighbouring tokens, divided by the same quantity for the input (`normalize: relative`, a scale-free ratio; below 1 means the correction is smoother than its input). The input's jitter is under stop-gradient, so the term only moves the adapter. It is 0 at initialisation. Pairs of tokens count only if both are real. The squared differences are FabricPC `IdentityNode` energies (`backend: fabricpc`) or plain arithmetic (`jax`); the two agree in value and gradient.
 
@@ -102,8 +102,8 @@ objective:                  # → A2Config
     weight: 0.1             # λ_stab; 0 switches the term off
     w_anch: 1.0
     w_hep: 0.0              # > 0 needs hep.kind: lowrank | dense
-    w_smooth: 0.1           # residual smoothness
-    w_step: 1.0             # settling-step loss (structurally inactive in A2 — L_step ≡ 0, no settling trajectory)
+    w_smooth: 0.0           # optional residual smoothness; enabled by the stab_smooth arm
+    w_step: 0.0             # structurally inactive in A2 (no settling trajectory)
     normalize: relative     # relative | none
     backend: fabricpc       # fabricpc | jax
     hep:                    # → HEPConfig
@@ -135,17 +135,19 @@ objective:                  # → A2Config
 | `stab.weight` (λ_stab) | 0.0 (YAML: 0.1) | |
 | `hid.lambda_hid` / `hid.weight` (λ_hid) | 0.0 (YAML: 0.1) | the error is target-variance normalised, so it is about 1 for a copy |
 | `stab.w_anch` / `stab.w_hep` | 1.0 / 0.0 | HEP needs a trainable highway |
-| `stab.w_smooth` / `stab.w_step` | 0.0 / 0.0 (YAML: 0.1 / 1.0) | `w_step` is **structurally inactive in A2**: L_step ≡ 0 (no settling trajectory). Included for A3 API compatibility and code-path coverage |
+| `stab.w_smooth` / `stab.w_step` | 0.0 / 0.0 | `w_step` is **structurally inactive in A2**: L_step ≡ 0 (no settling trajectory). Included for A3 API compatibility and code-path coverage |
 | `cpc.tau` | 0.1 | 0.05 – 0.2 |
 | `cpc.dim` | 32 | 32 or 64 |
 
 > **Hidden-target default rationale.**  The shipped default for
 > `hid.hidden_target` is `corrected_teacher` (Option B).  This is the
-> paper's recommendation for the A2 hidden-prediction auxiliary loss: it
+> recommendation in the auxiliary-loss review and the October implementation clarification: it
 > trains each predictor P_l as a local surrogate for the next frozen block
 > around the corrected states the adapter actually visits.
-> `base_anchor` (Option A) is supported but is appropriate only when the
-> intended term is explicitly an anchor to the original frozen trajectory.
+> The main research plan v8, Section 7.4, illustrates `base_anchor` (Option A),
+> using the clean-base next-block state. These are separate objectives and
+> should be reported as separate conditions. A flexible predictor fitting the
+> base target does not by itself bound hidden-state drift.
 > Both options apply stop-gradient to the target and keep frozen base
 > parameters frozen.
 
@@ -158,9 +160,9 @@ An arm chooses which terms run and their variant; `λ_kl`, `λ_wd`, data, optimi
 |---|---|
 | `a1_mode` | none: the A1 objective |
 | `stab_anch` | anchor only |
-| `stab_hep` | anchor + trainable low-rank HEP highway |
+| `hep_norm_control` (`stab_hep` alias) | anchor + trainable low-rank projected-error norm control; no adapter gradient from the norm penalty and no inference nudge |
 | `stab_smooth` | anchor + residual smoothness |
-| `stab_all` | all four stability losses (anchor, HEP nudge on a trainable low-rank highway, residual smoothness, step); **note:** `w_step` is structurally inactive in A2 (L_step ≡ 0) — it exercises the code path but has no training effect until A3 supplies a settling trajectory |
+| `stab_all` | base-state anchor, trainable highway norm-only control, residual smoothness, and the inactive step term; no inference nudge is applied and the step term has no training effect |
 | `cpc_base` | contrastive future, positive from the base state |
 | `cpc_corrected` | contrastive future, positive from the corrected state |
 | `cpc_multi` | contrastive future, offsets 1, 2, 4 |
@@ -220,7 +222,15 @@ Added to [`metrics/representation.py`](../../metrics/representation.py) (pure fu
 | `residual_redundancy(A, B)` | `{read, write}`: redundancy of the columns of `A` and the rows of `B` |
 | `gradient_conflict(g1, g2)` | `[−cos(g1, g2)]₊` of two gradient PyTrees |
 
-The post-hoc script that applies them to saved checkpoints is not written yet.
+The runner applies these metrics to a saved checkpoint with `--report-internals`:
+
+```bash
+python experiments/run_stage_a2.py --config runs/a2-full/config.yaml --eval-checkpoint runs/a2-full/params/task_2_scotus.npz --report-internals --split validation
+```
+
+Use the saved run config to reconstruct the same heads and architecture. The JSON contains causal task evaluation, per-layer residual size and read/write redundancy, task-versus-auxiliary adapter-gradient conflict on the first evaluation batch, and selected-target predictor/copy summaries. Representation statistics cover all requested evaluation batches. This works for an A1 control using `a1_mode`'s saved config as well. It measures gradients without applying an update.
+
+Predictor diagnostics retain `pred_rel_mean` / `copy_rel_mean` for the corrected teacher and add `pred_rel_selected_mean` / `copy_rel_selected_mean` matching `hid.hidden_target`. Both base and corrected per-layer values remain available.
 
 ## The audit (checkpoints you can inspect)
 
@@ -309,5 +319,8 @@ Guarantees enforced by tests:
 - **Mask source.** The A1 objective receives no attention mask, so the padding mask is `labels != -100`. Tokens whose label is ignored for the task loss are also left out of the contrastive and anchor terms. With no `labels`, every token counts.
 - **Where `h^base` comes from.** The adapted and base runs are separate forwards; the base states are the output of the unmodified model, not of the adapted model's earlier layers.
 - **Logged names.** The shared loop prefixes every term with `loss_`, so diagnostics appear as `loss_cpc_top1`.
+- **CPC without negatives.** Training rejects `batch_size < 2` when CPC is enabled. Masked batches without cross-sequence negatives return zero effective anchors and `cpc_valid: 0`; the loop warns once and records cumulative `cpc_skipped_batches` in every training event and results summary. The task and other active objectives still train on that batch.
+- **Memory budget.** CPC materializes an `N x N` similarity matrix, with `N = batch_size * sampled_positions` per offset. One float32 matrix uses `4*N*N` bytes (about 15.75 MiB for B=16, T=128, k=1), before logits, masks, gradients and model tensors. Reduce batch size, sequence length or the anchor cap before scaling. `results.json` records device memory statistics when the backend supplies them; CPU backends report unavailable rather than an invented peak. Step timings exclude the first tracing step.
+- **Empty inputs.** Next-token runs require `seq_len >= 2`. A standalone hidden-prediction reduction with no remaining tokens returns zero values and gradients. Nonfinite auxiliary weights, temperatures, gains and learning-rate multipliers are rejected before execution.
 - **Cost not measured.** FabricPC builds a small graph state on every head call; it has not been benchmarked against a plain matrix product, and `mean_step_time` per arm has not been recorded. `L_hid` adds one `[B·T, d] → ff_dim → d` MLP per site and intercepts the block after each site.
 - **Hyperparameters are uncalibrated.** A calibration of each term's gradient norm against the task gradient is planned, not written.

@@ -20,6 +20,7 @@ site, ``pred_layer_<l>``) so they can sit in the same dict as the adapter parame
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
@@ -72,7 +73,9 @@ class PredictorConfig:
             or self.ff_dim < 1
         ):
             raise ValueError(f"ff_dim must be an integer >= 1, got {self.ff_dim!r}")
-        if self.out_init_std is not None and not self.out_init_std > 0:
+        if self.out_init_std is not None and (
+            not math.isfinite(self.out_init_std) or not self.out_init_std > 0
+        ):
             raise ValueError(
                 f"out_init_std must be > 0 or null, got {self.out_init_std!r}"
             )
