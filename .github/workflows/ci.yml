@@ -84,8 +84,8 @@ jobs:
             echo "No unit tests found. Skipping."
           fi
 
-      - name: Run Stage A1 tests
-        run: pytest tests/residual/ -v --tb=short
+      - name: Run Stage A tests
+        run: pytest tests/residual/stage_A/ -v --tb=short
 
       - name: Run grammar integration tests
         run: |
