@@ -55,3 +55,5 @@ Thumbs.db
 
 # Experiment run artifacts (stages/results.py)
 runs/
+.local-tools/
+.review-notes/

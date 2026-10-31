@@ -7,6 +7,7 @@ function (``run_sequential``); stage-specific code lives in ``stages/stage_<X>/`
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -96,7 +97,9 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
         if self.epochs < 0:
             raise ValueError(f"epochs must be >= 0, got {self.epochs}")
-        if not self.learning_rate > 0:
+        if self.seq_len < 2:
+            raise ValueError("seq_len must be >= 2 for next-token training.")
+        if not math.isfinite(self.learning_rate) or not self.learning_rate > 0:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
         if not isinstance(self.jit, bool):
             raise ValueError(f"jit must be a boolean, got {self.jit!r}")
@@ -372,6 +375,8 @@ def run_sequential(
     objective_cfg: Any,
     training: TrainingConfig,
     writer: RunWriter,
+    *,
+    optimizer: optax.GradientTransformation | None = None,
 ) -> tuple[AdapterParams, dict[str, Any]]:
     if not domains:
         raise ValueError("At least one domain is required.")
@@ -402,7 +407,8 @@ def run_sequential(
     # after_task=-1: before training, where adapted equals base.
     init = eval_all(-1)
 
-    optimizer = optax.adam(training.learning_rate)
+    if optimizer is None:
+        optimizer = optax.adam(training.learning_rate)
     grad_fn = jax.value_and_grad(objective_fn, has_aux=True)
 
     def train_step(
@@ -427,6 +433,7 @@ def run_sequential(
     rows: list[dict[str, dict[str, float]]] = []
     step_times: list[float] = []
     global_step = tokens = 0
+    cpc_skipped_batches = 0
 
     for t, domain in enumerate(domains):
         if t > 0 and training.reset_optimizer:
@@ -483,6 +490,12 @@ def run_sequential(
                 step_times.append(step_time)
                 epoch_step_times.append(step_time)
                 scalars = {k: float(v) for k, v in terms.items()}
+                if scalars.get("cpc_valid", 1.0) == 0.0:
+                    cpc_skipped_batches += 1
+                    if cpc_skipped_batches == 1:
+                        log.warning(
+                            "CPC batch has no valid cross-sequence negatives; loss is inactive. Skipped batches are logged."
+                        )
                 epoch_scalars.append(scalars)
 
                 train_writer_metrics = {f"loss_{k}": v for k, v in scalars.items()}
@@ -500,6 +513,7 @@ def run_sequential(
                     global_step=global_step,
                     tokens=tokens,
                     step_time=step_time,
+                    cpc_skipped_batches=cpc_skipped_batches,
                     # Prefixed so the "task" term does not clash with the task index.
                     **train_writer_metrics,
                 )
@@ -593,6 +607,7 @@ def run_sequential(
         epochs={d.name: d.epochs for d in domains},
         steps=global_step,
         tokens=tokens,
+        cpc_skipped_batches=cpc_skipped_batches,
         # Exclude the first step, which includes tracing.
         mean_step_time=float(np.mean(step_times[1:])) if len(step_times) > 1 else None,
     )

@@ -1,0 +1,42 @@
+# Small real-checkpoint integration run, for CPU or GPU. Not a research benchmark.
+adapter:
+  rank: 2
+  layers: [5]
+  seed: 0
+objective:
+  hid:
+    lambda_hid: 0.01
+    hidden_target: corrected_teacher
+    predictor:
+      ff_dim: 8
+      detach_input: false
+  cpc:
+    weight: 0.01
+    dim: 4
+    max_anchors_per_seq: 4
+  stab:
+    weight: 0.01
+    w_anch: 1.0
+    hep:
+      kind: fixed_random
+      rank: 2
+  monitor:
+    mode: diagnostic
+training:
+  model: gpt2
+  seq_len: 8
+  batch_size: 2
+  epochs: 1
+  eval_batches: 1
+  learning_rate: 0.001
+  log_every: 1
+  output_dir: runs
+  jit: true
+domains:
+  - name: wikitext
+    dataset: Salesforce/wikitext
+    dataset_config: wikitext-2-raw-v1
+    train_split: 'train[:8]'
+    eval_split: 'validation[:8]'
+    test_split: 'test[:8]'
+    separator: "\n\n"

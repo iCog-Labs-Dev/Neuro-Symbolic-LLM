@@ -1,0 +1,100 @@
+# Stage A2: the A1 hidden-state residual adapter + PC-inspired auxiliary losses.
+# Backprop only (no settling). Keys mirror ResidualConfig / A2Config / TrainingConfig /
+# DomainConfig; unknown keys are rejected. See stages/stage_A/a2.py.
+#
+# L = L_task + lambda_kl*KL + lambda_wd*||phi||^2
+#   + lambda_cp*L_cpc + lambda_stab*(w_anch*L_zanch + w_hep*L_hep)
+#   + lambda_hid*L_local_predictor/hidden_prediction
+# Set a weight to 0 to switch its term (and its heads) off
+adapter:
+  rank: 16              # LoRA-equivalent rank matching paper Sec 12.2 (r=16)
+  activation: identity  # Linear residual adapter matching standard LoRA (BA) parameterization
+  alpha: 16             # LoRA scaling parameter: scale = alpha / rank = 1.0
+  init_std: null        # Default Gaussian 1/sqrt(d) for A, zeros for B (zero residual init)
+  late_start: null      # Targets late blocks (L//2, L-2], paper Sec 7.2 & 12.2 (L_sym = L/4)
+  late_end: null
+  layers: null
+  seed: 0
+objective:
+  lambda_kl: 0.0        # Same meaning as in A1
+  lambda_wd: 0.0
+  seed: 0               # seed of the auxiliary heads / predictors / fixed-random highway
+  hid:
+    lambda_hid: 0.1      # local predictor/hidden prediction loss weight
+    # corrected_teacher (Option B): recommended by the auxiliary-loss review
+    # and October implementation clarification for a transition surrogate.
+    # base_anchor (Option A): clean-base target illustrated by research plan v8
+    # Section 7.4. Report these as distinct experiments.
+    hidden_target: corrected_teacher  # corrected_teacher (Option B) | base_anchor (Option A)
+    predictor_lr_mult: 1.0 # predictor LR = training.learning_rate * this multiplier
+    hidden_norm: target_var  # target_var | none
+    skip_first_token: true
+    predictor:
+      ff_dim: 256
+      out_init_std: null
+      predict_delta: false
+      detach_input: true # predictor-only diagnostic; use hid_coupled to train the adapter
+      layers: null
+  # Contrastive future loss (InfoNCE on a q-projected code; heads are FabricPC nodes).
+  cpc:
+    weight: 0.05        # lambda_cp; first runs: small
+    offsets: [1]        # future offsets k (paper: 1, 2, 4); one predictor per offset
+    dim: 32             # width m of the CPC code (32 or 64)
+    tau: 0.1            # temperature (0.05 - 0.2)
+    positive: base      # base | corrected: the positive's source (stop-gradient)
+    max_anchors_per_seq: 256
+    a_init_noise: 0.01
+    heads: fabricpc     # fabricpc | jax (reference)
+  # Stability: w_anch * L_zanch (anchor to the base state) + w_hep * L_hep-nudge.
+  stab:
+    weight: 0.1         # lambda_stab
+    w_anch: 1.0
+    w_hep: 0.0          # > 0 needs hep.kind: lowrank (or dense) = a trainable highway
+    normalize: relative # relative | none
+    backend: fabricpc   # fabricpc | jax (reference)
+    hep:
+      kind: fixed_random  # null | dense | lowrank | fixed_random (tied: not wired yet)
+      rank: 16
+      alpha: 1.0
+
+  monitor:
+    mode: diagnostic    # off | diagnostic
+    layers: null        # null: every adapted layer
+    delta: 1.0e-6
+training:
+  model: gpt2           # 124M base transformer (Experiment A-small, paper Sec 17.1)
+  seq_len: 128          # Fixed sequence block length
+  batch_size: 16        # Balanced batch size ensuring memory headroom (paper App F) and stability on smaller domains
+  epochs: 3             # Standard adapter fine-tuning baseline (1-3 epochs)
+  learning_rate: 1.0e-3 # Standard Adam learning rate for rank-16 adapters
+  eval_batches: 8       # Fixed evaluation sample size
+  log_every: 10         # Metric logging interval
+  seed: 0               # Global training seed
+  reset_optimizer: true # Fresh Adam moments per domain to isolate sequential domain transfer
+  output_dir: runs
+  jit: true             # JAX XLA JIT compilation for static execution graph and kernel fusion
+# Three related legal domains (LexGLUE) trained in order: shared legal language,
+domains:
+  - name: eurlex
+    dataset: coastalcph/lex_glue
+    dataset_config: eurlex
+    train_split: "train[:5000]"
+    eval_split: "validation[:500]"
+    test_split: "test[:500]"
+    separator: "\n\n"
+
+  - name: ledgar
+    dataset: coastalcph/lex_glue
+    dataset_config: ledgar
+    train_split: "train[:20000]"
+    eval_split: "validation[:2000]"
+    test_split: "test[:2000]"
+    separator: "\n\n"
+
+  - name: scotus
+    dataset: coastalcph/lex_glue
+    dataset_config: scotus
+    train_split: "train[:500]"
+    eval_split: "validation[:200]"
+    test_split: "test[:200]"
+    separator: "\n\n"
