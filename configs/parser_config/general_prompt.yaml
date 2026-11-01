@@ -54,7 +54,13 @@ system_prompt: |
     canonical content, and supporting source evidence.
   - Do not create entities from background context alone.
   - Do not create duplicate entities for the same semantic occurrence.
-
+  - Distinguish event-denoting expressions from ordinary entities.
+  - When a noun denotes an occurrence or event, represent it
+    using entity_type="Event" where appropriate.
+  - In causal relationships, both cause and effect arguments
+    must reference Event or Proposition entities.
+  - Do not represent an event as Entity merely because it
+   is expressed through a noun phrase.
   ### Entity reference consistency
 
   Every assertion argument must reference an entity ID declared
@@ -278,6 +284,89 @@ system_prompt: |
   - Preserve the same variable across antecedents and consequents.
   - Preserve restricting nouns and properties.
   - Do not broaden the meaning of the rule.
+  - Relative clauses that restrict a quantified noun phrase
+    must be preserved as restrictions in the universal rule.
+  - For example, in "Every student who studies passes the exam",
+    studying is an antecedent restriction on the student variable.
+  - Do not generate a standalone Requires assertion merely
+    because a relative clause restricts a noun.
+  - Preserve the same universal variable throughout the rule.
+  - Do not duplicate rule conditions as standalone assertions.
+  ### Universal rule example
+
+  Source:
+    All red things are nice.
+
+  Expected structure:
+
+    entities: []
+
+    assertions: []
+
+    rules:
+      - scope: universal
+        variables:
+          - id: $x
+            entity_type: Entity
+
+        antecedents:
+          - predicate: Evaluation
+            relation: be_red
+            arguments:
+              - entity_id: $x
+                role: theme
+            fallback: true
+            polarity: positive
+            factuality: hypothetical
+            modality: none
+            confidence: 0.95
+            evidence:
+              - text: All red things are nice.
+                occurrence: 0
+            alternatives: []
+
+        consequents:
+          - predicate: Evaluation
+            relation: be_nice
+            arguments:
+              - entity_id: $x
+                role: theme
+            fallback: true
+            polarity: positive
+            factuality: hypothetical
+            modality: none
+            confidence: 0.95
+            evidence:
+              - text: All red things are nice.
+                occurrence: 0
+            alternatives: []
+
+        evidence:
+          - text: All red things are nice.
+            occurrence: 0
+
+  CRITICAL:
+
+  - Universal variables must be declared in rules.variables.
+  - Use $x, not x, as the variable ID.
+  - Never declare a rule variable as a SemanticEntity.
+  - Every variable reference must match its declaration exactly.
+  - Do not leave variables empty in a universal rule.
+  - Do not convert a universal rule into a specific rule.
+  - Use the canonical base form of the property or relation.
+  - Do not add be_ to adjectival relations.
+  ### Entity reference example
+
+  Source:
+    If the alarm rings, Alice will leave.
+
+  Declare every explicit entity:
+
+    - alarm
+    - alice
+
+  Reference these exact IDs in the rule literals.
+  Do not use an undeclared noun or shortened entity ID.
 
   General rule requirements:
 
@@ -292,6 +381,22 @@ system_prompt: |
   - Do not duplicate rule literals as standalone assertions.
   - Do not interpret logical implication as causation.
   - Do not invent temporal relationships between conditions and outcomes.
+
+  ### Rule and standalone assertion separation
+
+  When an event or relation is represented inside a conditional
+  or universal rule, do not also emit it as a standalone assertion.
+
+  - Keep rule antecedents and consequents inside their rule.
+  - Do not create incomplete standalone copies of rule literals.
+  - Do not emit standalone assertions with empty arguments
+    merely because their participants are already represented
+    inside the corresponding rule.
+  - Preserve the complete participants and semantic roles
+    inside every rule literal.
+  - If an event is independently asserted outside the
+    conditional scope, represent it separately only when
+    the source explicitly supports that interpretation.
 
   ## 9. NUMERIC, TEMPORAL, AND SPATIAL INFORMATION
 

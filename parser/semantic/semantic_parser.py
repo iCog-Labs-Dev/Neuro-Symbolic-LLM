@@ -411,6 +411,106 @@ class _BaseSemanticParser:
                     f"for {argument.entity_id!r}"
                 )
 
+    def _build_extraction_output_schema(self) -> dict[str, Any]:
+        """Build a generation schema with predicate- and rule-specific constraints."""
+
+        schema = SemanticExtraction.model_json_schema()
+        assertion_schema = schema["$defs"]["SemanticAssertion"]
+
+        # Every assertion must explicitly provide its predicate contract fields.
+        assertion_required = set(assertion_schema["required"])
+        assertion_required.update({"relation", "fallback"})
+        assertion_schema["required"] = sorted(assertion_required)
+
+        catalog_predicates = sorted(
+            predicate
+            for predicate in self._catalog.relations
+            if predicate != "Evaluation"
+        )
+
+        evaluation_branch = {
+            "type": "object",
+            "properties": {
+                "predicate": {"const": "Evaluation"},
+                "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z][a-z0-9_]*$",
+                },
+                "fallback": {"const": True},
+            },
+            "required": ["predicate", "relation", "fallback"],
+        }
+
+        assertion_branches = [evaluation_branch]
+
+        if catalog_predicates:
+            assertion_branches.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "predicate": {"enum": catalog_predicates},
+                        "relation": {"type": "null"},
+                        "fallback": {"const": False},
+                    },
+                    "required": ["predicate", "relation", "fallback"],
+                }
+            )
+
+        assertion_schema["allOf"] = [{"anyOf": assertion_branches}]
+
+        # Inline rule-literal schemas instead of relying on a nested $ref
+        # combined with allOf. This makes the hypothetical constraint explicit
+        # at the antecedent/consequent item level for Ollama's JSON decoder.
+        rule_schema = schema["$defs"]["SemanticRule"]
+        # Require variables to be explicitly provided for every rule.
+        # Universal rules must provide at least one variable.
+        # Specific rules must explicitly provide an empty list.
+        rule_required = set(rule_schema["required"])
+        rule_required.add("variables")
+        rule_schema["required"] = sorted(rule_required)
+        for field in ("antecedents", "consequents"):
+            item_schema = {
+                **assertion_schema,
+                "properties": {
+                    **assertion_schema["properties"],
+                    "factuality": {
+                        "type": "string",
+                        "const": "hypothetical",
+                    },
+                },
+                "required": sorted(
+                    set(assertion_schema["required"]) | {"arguments", "factuality"}
+                ),
+            }
+
+            rule_schema["properties"][field]["items"] = item_schema
+
+        # Universal rules require at least one variable; specific rules
+        # must not declare universal variables.
+        rule_schema["allOf"] = [
+            {
+                "anyOf": [
+                    {
+                        "properties": {
+                            "scope": {"const": "universal"},
+                            "variables": {"minItems": 1},
+                        },
+                        "required": ["scope", "variables"],
+                    },
+                    {
+                        "properties": {
+                            "scope": {"const": "specific"},
+                            "variables": {"maxItems": 0},
+                        },
+                        "required": ["scope", "variables"],
+                    },
+                ]
+            }
+        ]
+
+        return schema
+
     @staticmethod
     def repair_rule_duplication(
         result: SemanticParseResult,
@@ -608,7 +708,13 @@ class _BaseSemanticParser:
             document.source_text, catalog=catalog, context=document.context
         )
         cleaned = self._generate_json_text(
-            prompt.text, output_schema=SemanticExtraction.model_json_schema()
+            prompt.text, output_schema=self._build_extraction_output_schema()
+        )
+        print(
+            "\n--- GENERAL EXTRACTION RAW OUTPUT ---\n",
+            cleaned,
+            "\n------------------------------------\n",
+            file=sys.stderr,
         )
         if not cleaned:
             raise SemanticParseError("The model returned an empty response")
@@ -636,12 +742,60 @@ class _BaseSemanticParser:
 
         return route, prompt.version
 
+    @staticmethod
+    def _validate_discourse_payload(
+        discourse: DiscourseExtraction,
+    ) -> None:
+        """Validate discourse entity references and expectation propositions."""
+
+        entities = {entity.id: entity for entity in discourse.entities}
+
+        for assertion in discourse.assertions:
+            for argument in assertion.arguments:
+                if argument.entity_id not in entities:
+                    raise SemanticParseError(
+                        f"{assertion.predicate} references undeclared entity "
+                        f"{argument.entity_id!r}"
+                    )
+
+            expected_roles = {
+                "EvokesExpectation": "expected_result",
+                "Defeats": "prior_expectation",
+            }
+
+            expected_role = expected_roles.get(assertion.predicate)
+
+            if expected_role is None:
+                continue
+
+            matching = [
+                argument
+                for argument in assertion.arguments
+                if argument.role == expected_role
+            ]
+
+            if len(matching) != 1:
+                raise SemanticParseError(
+                    f"{assertion.predicate} must contain exactly one "
+                    f"{expected_role!r} argument"
+                )
+
+            proposition_id = matching[0].entity_id
+            proposition = entities[proposition_id]
+
+            if proposition.entity_type != "Proposition":
+                raise SemanticParseError(
+                    f"{assertion.predicate} {expected_role!r} must reference "
+                    f"a Proposition, got {proposition.entity_type!r} "
+                    f"for {proposition_id!r}"
+                )
+
     def generate_discourse_payload(
         self,
         document: SourceDocument,
         general: SemanticExtraction,
     ) -> tuple[DiscourseExtraction, str]:
-        """Generate discourse relations using validated general semantics."""
+        """Generate and validate discourse semantics, retrying once on invalid output."""
 
         prompt = build_discourse_prompt(
             document.source_text,
@@ -657,17 +811,52 @@ class _BaseSemanticParser:
             catalog=self._catalog,
         )
 
-        raw = self._generate_json_text(
-            prompt.text,
-            output_schema=DiscourseExtraction.model_json_schema(),
-        )
+        output_schema = DiscourseExtraction.model_json_schema()
+        generation_prompt = prompt.text
+        last_error: Exception | None = None
 
-        try:
-            discourse = DiscourseExtraction.model_validate_json(raw)
-        except ValidationError as error:
-            raise SemanticParseError("Invalid discourse extraction") from error
+        for attempt in range(2):
+            raw = self._generate_json_text(
+                generation_prompt,
+                output_schema=output_schema,
+            )
 
-        return discourse, prompt.version
+            try:
+                discourse = DiscourseExtraction.model_validate_json(raw)
+
+                self._validate_discourse_payload(discourse)
+
+                return discourse, prompt.version
+
+            except (ValidationError, SemanticParseError) as error:
+                last_error = error
+
+                if attempt == 0:
+                    generation_prompt = (
+                        prompt.text
+                        + "\n\n"
+                        + "CORRECTION REQUIRED:\n"
+                        + f"Your previous response failed validation: {error}\n\n"
+                        + "Return a complete corrected DiscourseExtraction JSON.\n"
+                        + "Every assertion argument must reference an entity "
+                        "declared in the entities array.\n"
+                        + "EvokesExpectation.expected_result must reference "
+                        "a declared Proposition.\n"
+                        + "Defeats.prior_expectation must reference "
+                        "a declared Proposition.\n"
+                        + "For an implicit expectation, declare its Proposition "
+                        "with origin='implicit', mention=null, nonempty "
+                        "canonical content, and supporting source evidence.\n"
+                        + "If the expectation is not sufficiently supported, "
+                        "omit EvokesExpectation and Defeats rather than "
+                        "inventing a proposition.\n"
+                        + "Reuse the same proposition ID when both relations "
+                        "refer to the same expectation.\n"
+                    )
+
+        raise SemanticParseError(
+            f"Discourse extraction failed validation after one retry: {last_error}"
+        ) from last_error
 
     @staticmethod
     def merge_discourse(

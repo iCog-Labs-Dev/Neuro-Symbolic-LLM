@@ -60,6 +60,114 @@ system_prompt: |
   - Include referenced general entities in the discourse
     entities list so the intermediate extraction is self-contained.
 
+  ### CRITICAL: Complete entity declarations
+
+  The entities array must declare EVERY entity referenced by
+  any discourse assertion.
+
+  Before returning the extraction:
+
+  1. Collect every entity_id used in every assertion argument.
+  2. Check whether its ID exists in the general extraction.
+  3. If it exists, include its exact original entity definition
+     in the discourse entities array.
+  4. If it does not exist, determine whether it is a newly
+     identified clause or a contextually supported implicit
+     proposition.
+  5. Declare every newly identified clause with:
+     - A unique document-local ID.
+     - entity_type="Clause".
+     - origin="explicit".
+     - An exact source-grounded mention.
+     - content=null.
+     - evidence=[].
+  6. Declare every implicit expectation as a Proposition with
+     origin="implicit", mention=null, canonical content,
+     and source-grounded evidence.
+  7. Never reference an entity that has not been declared.
+
+  Do not assume that a clause exists in the general extraction
+  merely because the source contains that clause.
+
+  Do not assume that referencing clause_a or clause_b makes
+  those entities automatically available.
+
+  ### Example: General extraction does not contain clause entities
+
+  Source:
+    If the alarm rings, Alice will leave,
+    but Bob will remain.
+
+  General extraction entities:
+    - alarm
+    - alice
+    - bob
+
+  The discourse extraction must declare the missing clauses:
+
+    entities:
+      - id: clause_a
+        kind: null
+        entity_type: Clause
+        origin: explicit
+        mention:
+          text: If the alarm rings, Alice will leave
+          occurrence: 0
+        content: null
+        evidence: []
+
+      - id: clause_b
+        kind: null
+        entity_type: Clause
+        origin: explicit
+        mention:
+          text: but Bob will remain
+          occurrence: 0
+        content: null
+        evidence: []
+
+      - id: alarm
+        kind: null
+        entity_type: Entity
+        origin: explicit
+        mention:
+          text: alarm
+          occurrence: 0
+        content: null
+        evidence: []
+
+      - id: alice
+        kind: null
+        entity_type: Entity
+        origin: explicit
+        mention:
+          text: Alice
+          occurrence: 0
+        content: null
+        evidence: []
+
+      - id: bob
+        kind: null
+        entity_type: Entity
+        origin: explicit
+        mention:
+          text: Bob
+          occurrence: 0
+        content: null
+        evidence: []
+
+  Assertions may reference clause_a and clause_b only after
+  both clauses have been declared.
+
+  Reuse existing IDs and definitions exactly.
+  Do not invent alternative IDs for existing entities.
+  Do not omit an entity because it was already extracted
+  by the general parser.
+
+  FINAL CHECK:
+    Every assertion argument must resolve to exactly one
+    entity declared in the discourse entities array.
+
   ## 4. DISCOURSE RELATIONS
 
   ### Concession
@@ -71,7 +179,18 @@ system_prompt: |
   Arguments:
     statement: Clause
     counter_statement: Clause
-
+  - Do not classify every sentence containing "although"
+    or "but" as Concession.
+  - Require an acknowledged statement and a countering
+    expectation or discourse direction.
+  - Do not infer an implicit expectation merely because
+    two outcomes differ.
+  - Use Concession when one statement acknowledges a point
+    that is countered by another statement.
+  - A defeated expectation is not required in every
+    Concession, but there must be a genuine concessive
+    relationship.
+  - Do not infer Concession merely because two outcomes differ.
   Do not extract Concession merely because two clauses
   describe different facts.
 
@@ -84,6 +203,20 @@ system_prompt: |
     item1: Clause|Entity|Proposition
     item2: Clause|Entity|Proposition
 
+  - When two clauses describe opposing actions or outcomes
+    involving different participants, prefer Contrast.
+  - A conditional statement followed by an opposing outcome
+    does not automatically constitute Concession.
+  - The connective "but" can indicate Contrast without
+    necessarily introducing a defeated expectation.
+  - Use Contrast when two clauses describe opposing,
+    different, or directly compared outcomes.
+  - Coordinated clauses joined by "but" often express Contrast.
+  - Different participants performing opposing actions
+    can indicate Contrast.
+  - Contrast does not require an implicit expectation.
+  - Do not automatically classify every occurrence of "but"
+    as Concession.
   Contrast does not necessarily involve a defeated expectation.
 
   ### EvokesExpectation
@@ -529,6 +662,44 @@ system_prompt: |
           - text: More importantly, the second experiment was reproducible.
             occurrence: 0
         alternatives: []
+
+  ### Example: Conditional rule combined with contrast
+
+  Source:
+    If the alarm rings, Alice will leave,
+    but Bob will remain.
+
+  General extraction already represents:
+    - The conditional relationship.
+    - The alarm-ringing antecedent.
+    - Alice leaving.
+    - Bob remaining.
+
+  Discourse extraction must not recreate or replace
+  the conditional rules.
+
+  Expected discourse interpretation:
+
+    entities:
+      - clause_a
+      - clause_b
+
+    assertions:
+      - predicate: Contrast
+        arguments:
+          - entity_id: clause_a
+            role: item1
+          - entity_id: clause_b
+            role: item2
+
+  Important:
+    - "If" introduces conditional scope.
+    - "But" introduces contrast between outcomes.
+    - Do not classify this example as Concession
+      merely because it contains opposing outcomes.
+    - Do not generate EvokesExpectation or Defeats
+      without a separately supported expectation.
+    - Preserve all general rules during merging.
 
   ## 9. INPUT
 
