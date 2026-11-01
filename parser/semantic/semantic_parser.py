@@ -24,10 +24,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from parser.grammar.atomese import LinkAtom
 from parser.ontology.catalog import OntologyCatalog, load_ontology_catalog
 from parser.semantic.backends import ModelBackend, OutputTruncatedError
-from parser.semantic.catalog_prompt import build_catalog_document_prompt
-from parser.semantic.metta_renderer import (
-    MettaRenderError,
+from parser.semantic.catalog_prompt import (
+    build_catalog_document_prompt,
+    build_discourse_prompt,
+    build_router_prompt,
 )
+from parser.semantic.metta_renderer import MettaRenderError
 from parser.semantic.metta_renderer import (
     render_metta as render_semantic_result,
 )
@@ -40,6 +42,8 @@ from parser.semantic.normalization import (
 )
 from parser.semantic.output_cleanup import clean_model_output
 from parser.semantic.schema import (
+    DiscourseExtraction,
+    ParserRoute,
     SemanticAssertion,
     SemanticExtraction,
     SemanticParseProvenance,
@@ -82,6 +86,7 @@ class SemanticParserConfig:
     """Configuration shared by both semantic parser roles."""
 
     model_name: str
+    enable_routing: bool = True
 
     def __post_init__(self) -> None:
         if not self.model_name.strip():
@@ -114,7 +119,7 @@ class _BaseSemanticParser:
         model_revision: str | None = None,
         require_structured_output: bool = False,
     ) -> None:
-        """Create a parser with either backend or a loaded model."""
+        """Create a parser with either backend or loaded model."""
         self._backend = backend
         self._config = config
         self._model = model
@@ -139,11 +144,17 @@ class _BaseSemanticParser:
     def prompt_version(self) -> str:
         """Return the active prompt identity without invoking the model."""
         catalog = self._catalog
-        return build_catalog_document_prompt("prompt identity", catalog=catalog).version
+        return build_catalog_document_prompt(
+            "prompt identity",
+            catalog=catalog,
+        ).version
 
     @staticmethod
     def build_prompt(
-        sentence: str, context: str = "", *, catalog: OntologyCatalog | None = None
+        sentence: str,
+        context: str = "",
+        *,
+        catalog: OntologyCatalog | None = None,
     ) -> str:
         """Build the same catalog-constrained prompt used for document labels."""
         if not sentence.strip():
@@ -179,10 +190,23 @@ class _BaseSemanticParser:
         repaired = result.model_copy(deep=True)
         repairs: list[SemanticRepair] = []
         for assertion in _iter_all_assertions(repaired):
+            if assertion.predicate == "Evaluation":
+                if not assertion.fallback:
+                    repairs.append(
+                        SemanticRepair(
+                            kind="predicate_contract",
+                            detail="set fallback=true on Evaluation",
+                        )
+                    )
+                    assertion.fallback = True
+                continue
+
             if assertion.predicate not in self._catalog.relations:
                 continue
+
             if assertion.relation is None and not assertion.fallback:
                 continue
+
             repairs.append(
                 SemanticRepair(
                     kind="predicate_contract",
@@ -592,6 +616,120 @@ class _BaseSemanticParser:
             raise SemanticParseError("Model output must be a JSON object")
         return payload, prompt.version
 
+    def route_document(self, document: SourceDocument) -> tuple[ParserRoute, str]:
+        """Decide whether a discourse pass is needed."""
+        prompt = build_router_prompt(document.source_text)
+
+        raw = self._generate_json_text(
+            prompt.text,
+            output_schema=ParserRoute.model_json_schema(),
+        )
+
+        try:
+            route = ParserRoute.model_validate_json(raw)
+        except ValidationError as error:
+            raise SemanticParseError("Invalid router response") from error
+
+        return route, prompt.version
+
+    def generate_discourse_payload(
+        self,
+        document: SourceDocument,
+        general: SemanticExtraction,
+    ) -> tuple[DiscourseExtraction, str]:
+        """Generate discourse relations using validated general semantics."""
+
+        prompt = build_discourse_prompt(
+            document.source_text,
+            clause_context=json.dumps(
+                [
+                    entity.model_dump(mode="json")
+                    for entity in general.entities
+                    if entity.entity_type == "Clause"
+                ],
+                ensure_ascii=False,
+            ),
+            general_semantics=general.model_dump_json(),
+            catalog=self._catalog,
+        )
+
+        raw = self._generate_json_text(
+            prompt.text,
+            output_schema=DiscourseExtraction.model_json_schema(),
+        )
+
+        try:
+            discourse = DiscourseExtraction.model_validate_json(raw)
+        except ValidationError as error:
+            raise SemanticParseError("Invalid discourse extraction") from error
+
+        return discourse, prompt.version
+
+    @staticmethod
+    def merge_discourse(
+        general: SemanticExtraction,
+        discourse: DiscourseExtraction,
+    ) -> SemanticExtraction:
+        """Merge discourse semantics without duplicating general assertions."""
+
+        entities = {entity.id: entity for entity in general.entities}
+
+        for entity in discourse.entities:
+            previous = entities.get(entity.id)
+
+            if previous is not None and previous != entity:
+                raise SemanticParseError(
+                    f"Discourse entity {entity.id!r} conflicts "
+                    "with general extraction"
+                )
+
+            entities[entity.id] = entity
+
+        known = set(entities)
+        print("\n--- DISCOURSE MERGER DEBUG ---")
+        print("General entity IDs:", sorted(entity.id for entity in general.entities))
+        print(
+            "Discourse entity IDs:", sorted(entity.id for entity in discourse.entities)
+        )
+        print(
+            "Discourse predicates:",
+            [assertion.predicate for assertion in discourse.assertions],
+        )
+        print("------------------------------\n")
+        for assertion in discourse.assertions:
+            for argument in assertion.arguments:
+                if argument.entity_id not in known:
+                    raise SemanticParseError(
+                        "Discourse assertion references unknown entity "
+                        f"{argument.entity_id!r}"
+                    )
+
+        def key(assertion: SemanticAssertion) -> tuple:
+            return (
+                assertion.predicate,
+                assertion.relation,
+                tuple((arg.entity_id, arg.role) for arg in assertion.arguments),
+                assertion.polarity,
+                assertion.factuality,
+                assertion.modality,
+            )
+
+        assertions = list(general.assertions)
+        seen = {key(assertion) for assertion in assertions}
+
+        for assertion in discourse.assertions:
+            signature = key(assertion)
+
+            if signature not in seen:
+                assertions.append(assertion)
+                seen.add(signature)
+
+        return SemanticExtraction(
+            entities=list(entities.values()),
+            assertions=assertions,
+            rules=general.rules,
+        )
+
     def parse_document(
         self,
         document: SourceDocument,
@@ -622,6 +760,50 @@ class _BaseSemanticParser:
             result = self._apply_repairs(result)
             self.validate_predicates(result)
             self.validate_arguments(result)
+
+            if self._config.enable_routing:
+                route, router_version = self.route_document(document)
+
+                prompt_versions = [
+                    router_version,
+                    prompt_version,
+                ]
+
+                if route.run_discourse:
+                    discourse, discourse_version = self.generate_discourse_payload(
+                        document,
+                        result.extraction,
+                    )
+
+                    merged = self.merge_discourse(
+                        result.extraction,
+                        discourse,
+                    )
+
+                    prompt_versions.append(discourse_version)
+
+                    result = SemanticParseResult(
+                        document=document,
+                        provenance=result.provenance.model_copy(
+                            update={"prompt_version": "|".join(prompt_versions)}
+                        ),
+                        extraction=merged,
+                    )
+
+                    validate_against_catalog(
+                        result,
+                        self._catalog,
+                    )
+
+                else:
+                    result = result.model_copy(
+                        update={
+                            "provenance": result.provenance.model_copy(
+                                update={"prompt_version": "|".join(prompt_versions)}
+                            )
+                        }
+                    )
+
         except (
             SemanticNormalizationError,
             SemanticParseError,
