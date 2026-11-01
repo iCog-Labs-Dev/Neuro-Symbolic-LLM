@@ -51,17 +51,61 @@ class SourceQuote(SemanticSchemaModel):
 
 
 class SemanticEntity(SemanticSchemaModel):
-    """An entity mentioned in the source text, identified once and reused.
+    """A document-local semantic entity, explicitly mentioned or implicitly
+    extracted as a proposition.
 
-    ``id`` links every assertion and rule about the same thing. ``entity_type``
-    is the ontology type checked against predicate slots (``Entity``); ``kind``
-    is the lemma of the noun that names it (``supplier``).
+    ``id`` links every assertion and rule about the same thing.
+    ``entity_type`` is the ontology type checked against predicate slots.
+    ``kind`` is the lemma of the noun or verb that names the entity.
+
+    Explicit entities have a source-grounded ``mention``.
+    Implicit entities are currently restricted to propositions. They have
+    canonical semantic ``content`` and supporting source ``evidence``,
+    but no fabricated source mention.
+
+    The confidence of an implicit proposition is represented by the
+    assertion that introduces or evokes it.
     """
 
     id: str = Field(pattern=_SNAKE_CASE)
     kind: str | None = Field(default=None, pattern=_SNAKE_CASE)
     entity_type: str = Field(pattern=_NO_WHITESPACE)
-    mention: SourceQuote
+
+    origin: Literal["explicit", "implicit"] = "explicit"
+
+    mention: SourceQuote | None = None
+    content: str | None = None
+    evidence: list[SourceQuote] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> SemanticEntity:
+        """Validate source grounding according to entity origin."""
+
+        if self.origin == "explicit":
+            if self.mention is None:
+                raise ValueError("Explicit entities require a source mention")
+
+            if self.content is not None or self.evidence:
+                raise ValueError(
+                    "Explicit entities cannot use implicit content/evidence fields"
+                )
+
+        elif self.origin == "implicit":
+            if self.entity_type != "Proposition":
+                raise ValueError("Only implicit propositions are supported")
+
+            if not self.content or not self.content.strip():
+                raise ValueError("Implicit propositions require semantic content")
+
+            if not self.evidence:
+                raise ValueError("Implicit propositions require supporting evidence")
+
+            if self.mention is not None:
+                raise ValueError(
+                    "Implicit propositions cannot have a fabricated mention"
+                )
+
+        return self
 
 
 class SemanticArgument(SemanticSchemaModel):
@@ -222,6 +266,46 @@ class SemanticExtraction(SemanticSchemaModel):
         return self
 
 
+class DiscourseExtraction(SemanticSchemaModel):
+    """The entities and discourse assertions extracted from one document.
+
+    Unlike SemanticExtraction, this intermediate result may be empty when
+    no discourse relationship is identified.
+
+    Existing clause, event, and entity IDs are preserved. Referenced
+    entities are included so the intermediate result is self-contained.
+    The merger reconciles these entities with the general extraction,
+    rejecting conflicting definitions of an existing ID.
+
+    Implicit propositions are represented as SemanticEntity instances
+    with origin="implicit", canonical content, and supporting evidence.
+    """
+
+    entities: list[SemanticEntity] = Field(default_factory=list)
+    assertions: list[SemanticAssertion] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_discourse_extraction(self) -> DiscourseExtraction:
+        """Validate unique IDs.
+
+        References to general extraction entities are resolved
+        during merging, when both entity namespaces are available.
+        """
+        entity_ids = [entity.id for entity in self.entities]
+
+        if len(entity_ids) != len(set(entity_ids)):
+            raise ValueError("Discourse entity IDs must be unique")
+
+        return self
+
+
+class ParserRoute(SemanticSchemaModel):
+    """Validated router decision; general extraction is mandatory."""
+
+    run_general: Literal[True] = True
+    run_discourse: bool = False
+
+
 def _require_known_arguments(assertion: SemanticAssertion, allowed: set[str]) -> None:
     """Reject arguments that do not point to a declared entity or variable."""
 
@@ -316,17 +400,23 @@ class SemanticParseResult(SemanticSchemaModel):
 
     @model_validator(mode="after")
     def validate_quotes(self) -> SemanticParseResult:
-        """Ensure every quote resolves inside the source text."""
+        """Ensure all explicit mentions and supporting evidence
+        resolve inside the original source text.
+        """
+        quotes: list[SourceQuote] = []
 
-        quotes: list[SourceQuote] = [
-            entity.mention for entity in self.extraction.entities
-        ]
+        for entity in self.extraction.entities:
+            if entity.mention is not None:
+                quotes.append(entity.mention)
+
+            quotes.extend(entity.evidence)
 
         for assertion in self.extraction.assertions:
             quotes.extend(assertion.evidence)
 
         for rule in self.extraction.rules:
             quotes.extend(rule.evidence)
+
             for literal in rule.antecedents + rule.consequents:
                 quotes.extend(literal.evidence)
 
