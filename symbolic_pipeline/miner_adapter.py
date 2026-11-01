@@ -104,11 +104,16 @@ class _SemanticDocumentBuilder:
         return identifier
 
     def add_entities(self) -> None:
-        """Copy the entities written by the model."""
+        """Copy entities with explicit source mentions."""
 
         for entity in self.result.extraction.entities:
+            if entity.mention is None:
+                continue
+
             self._record_entity(
-                entity.id, entity.entity_type, self._span(entity.mention)
+                entity.id,
+                entity.entity_type,
+                self._span(entity.mention),
             )
 
     def add_fact(
@@ -238,8 +243,13 @@ class _SemanticDocumentBuilder:
                 )
 
         for entity in extraction.entities:
-            if entity.kind is None or entity.id not in confidences:
+            if (
+                entity.kind is None
+                or entity.id not in confidences
+                or entity.mention is None
+            ):
                 continue
+
             self.assertions.append(
                 MinerAssertion(
                     predicate=_PROVISIONAL,
