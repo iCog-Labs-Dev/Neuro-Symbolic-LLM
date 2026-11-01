@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 from pydantic import ValidationError
 
-from Residual.symbolic_head.contracts import (
+from residual.symbolic_head.contracts import (
     PatternRecord,
     PatternRecordError,
     validate_q1_pattern_record,

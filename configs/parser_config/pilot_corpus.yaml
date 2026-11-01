@@ -1,0 +1,69 @@
+seed: 42
+
+min_chars: 20
+max_chars: 600
+
+sources:
+  - name: magpie
+    domain: idioms
+    kind: hf_field
+    dataset: parquet
+    data_files:
+      train: "https://huggingface.co/datasets/gsarti/magpie/resolve/refs%2Fconvert%2Fparquet/magpie/train/0000.parquet"
+    split: train
+    field: sentence
+    count: 150
+    streaming: false
+
+  - name: contractnli
+    domain: legal_conditional
+    kind: hf_list_field
+    dataset: reuben256/contract-nli
+    split: train
+    field: evidence_texts
+    count: 150
+    streaming: false
+
+  - name: fineweb
+    domain: general_language
+    kind: hf_field
+    dataset: HuggingFaceFW/fineweb
+    split: train
+    field: text
+    count: 250
+    streaming: true
+    sentence_split: true
+    max_scan: 5000
+
+  - name: gsm8k
+    domain: quantitative
+    kind: hf_field
+    dataset: openai/gsm8k
+    config: main
+    split: train
+    field: question
+    count: 150
+    streaming: false
+    sentence_split: true
+    drop_questions: true
+
+  - name: proofwriter
+    domain: logical_conditional
+    kind: hf_field
+    dataset: rlhf-and-friends/proofwriter
+    config: OWA
+    split: train
+    field: theory_text
+    count: 150
+    streaming: false
+    sentence_split: true
+
+  - name: universal_dependencies_en_ewt
+    domain: general_syntax
+    kind: hf_field
+    dataset: universal-dependencies/universal_dependencies
+    config: en_ewt
+    split: train
+    field: text
+    count: 150
+    streaming: false

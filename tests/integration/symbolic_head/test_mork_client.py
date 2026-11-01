@@ -11,7 +11,7 @@ import concurrent.futures
 import numpy as np
 import pytest
 
-from Residual.symbolic_head.mork_client import (
+from residual.symbolic_head.mork_client import (
     DockerMorkClient,
     get_mork_client,
     template_record_sexpr,

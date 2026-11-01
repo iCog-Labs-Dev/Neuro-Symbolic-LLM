@@ -1,11 +1,19 @@
-"""Shared prompt contract for student training and inference."""
+"""One prompt builder for document-target student training and inference."""
 
-STUDENT_PROMPT = "Extract triples from this sentence as JSON:\nSentence: {text}\nJSON:"
+from __future__ import annotations
+
+from parser.ontology.catalog import OntologyCatalog, load_ontology_catalog
+from parser.semantic.catalog_prompt import build_catalog_document_prompt
+
+STUDENT_PROMPT = "catalog-document"
 
 
-def build_student_prompt(sentence: str, context: str = "") -> str:
-    """Keep sentence-only prompts compatible with existing training data."""
-    prompt = STUDENT_PROMPT.format(text=sentence.strip())
-    if context.strip():
-        return f"Context: {context.strip()}\n{prompt}"
-    return prompt
+def build_student_prompt(
+    sentence: str, context: str = "", *, catalog: OntologyCatalog | None = None
+) -> str:
+    """Use the same extraction guidance, examples and schema as the teacher."""
+    return build_catalog_document_prompt(
+        sentence,
+        catalog=catalog if catalog is not None else load_ontology_catalog(),
+        context=context,
+    ).text

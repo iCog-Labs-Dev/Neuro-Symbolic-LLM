@@ -52,3 +52,4 @@ repos:
           - types-pyyaml
           - types-redis
           - pydantic>=2.6.0
+          - hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.0

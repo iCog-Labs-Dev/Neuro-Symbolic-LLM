@@ -2,8 +2,10 @@
 
 The complete MeTTa Atomese data model.
 
-Predicate and arity definitions are loaded from the shared semantic predicate
-schema. This module remains responsible for parsing and structural validation.
+The vocabulary is the grammar in ``configs/parser_config/atomese_grammar.yaml``
+(Evaluation, List, Not, Obligation, Permission, and the operators) plus every
+relation in the ontology catalog with its arity. This module is responsible for
+parsing and structural validation.
 
 What lives here:
   - Atom data classes (SymbolAtom, LinkAtom)
@@ -13,9 +15,6 @@ What lives here:
   - match_template():      does this ground atom match this template?
   - generalize():          produce a template from a ground atom
   - canonical():           normalize a string for deduplication
-
-The closed vocabulary and its structural arities live in
-``configs/parser_config/predicate_schema.yaml``.
 """
 
 from __future__ import annotations
@@ -26,40 +25,46 @@ from pathlib import Path
 
 import yaml
 
+from parser.ontology.catalog import load_ontology_catalog
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
-_PREDICATE_SCHEMA_PATH = (
+_GRAMMAR_PATH = (
     Path(__file__).resolve().parents[2]
     / "configs"
     / "parser_config"
-    / "predicate_schema.yaml"
+    / "atomese_grammar.yaml"
 )
 
 
 def _load_atomese_predicates() -> (
     tuple[dict[str, int], dict[str, tuple[int, int | None]]]
 ):
-    """Load the shared predicate vocabulary and its Atomese-level arities."""
-    with _PREDICATE_SCHEMA_PATH.open("r", encoding="utf-8") as file:
+    """Load the grammar words and the catalog relations with their arities.
+
+    A relation name may not reuse a grammar word, so ``(Not x)`` always has
+    one meaning.
+    """
+    with _GRAMMAR_PATH.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
     if not isinstance(config, dict):
-        raise ValueError("Predicate schema must be a YAML mapping")
+        raise ValueError("Atomese grammar must be a YAML mapping")
 
-    semantic = config.get("predicates")
-    structural = config.get("structural_predicates")
-    operators = config.get("operators", {})
-    if not isinstance(operators, dict):
-        raise ValueError("Predicate schema 'operators' must be a mapping")
-    if not isinstance(semantic, dict) or not isinstance(structural, dict):
+    structural = config.get("structural")
+    operators = config.get("operators")
+    if not isinstance(structural, dict) or not isinstance(operators, dict):
         raise ValueError(
-            "Predicate schema must define 'predicates' and "
-            "'structural_predicates' mappings"
+            "Atomese grammar must define 'structural' and 'operators' mappings"
         )
+    relations = {
+        name: {"arity": relation.arity}
+        for name, relation in load_ontology_catalog().relations.items()
+    }
 
     duplicates = (
-        (semantic.keys() & structural.keys())
-        | (semantic.keys() & operators.keys())
-        | (structural.keys() & operators.keys())
+        (structural.keys() & operators.keys())
+        | (structural.keys() & relations.keys())
+        | (operators.keys() & relations.keys())
     )
     if duplicates:
         names = ", ".join(sorted(duplicates))
@@ -67,12 +72,12 @@ def _load_atomese_predicates() -> (
 
     fixed: dict[str, int] = {}
     variable: dict[str, tuple[int, int | None]] = {}
-    for name, definition in {**semantic, **structural, **operators}.items():
+    for name, definition in {**structural, **operators, **relations}.items():
         if not isinstance(name, str) or not isinstance(definition, dict):
             raise ValueError("Every Atomese predicate requires a mapping")
 
-        atomese_arity = definition.get("atomese_arity")
-        if atomese_arity is None and definition.get("variable_arity") is not True:
+        atomese_arity = None
+        if definition.get("variable_arity") is not True:
             atomese_arity = definition.get("arity")
         if atomese_arity is not None:
             if (
@@ -89,7 +94,7 @@ def _load_atomese_predicates() -> (
         if (
             not isinstance(minimum, int)
             or isinstance(minimum, bool)
-            or minimum < 1
+            or minimum < 0
             or (
                 maximum is not None
                 and (
@@ -108,7 +113,7 @@ def _load_atomese_predicates() -> (
 ARITY, VARIABLE_ARITY = _load_atomese_predicates()
 PREDICATES = frozenset(ARITY | VARIABLE_ARITY)
 
-VARIABLE_RE = re.compile(r"^\$[A-Z][A-Z0-9_]*$")
+VARIABLE_RE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
 CONCEPT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 VAR_NAMES = ["$X", "$Y", "$Z", "$W", "$V", "$U"]
 
@@ -246,7 +251,7 @@ def validate_metta_string(s: str) -> tuple[bool, str]:
     error_message is empty string when is_valid is True.
 
     Used by:
-      - Residual/symbolic_head/mork_client.py to validate/insert payloads
+      - tier2_mork/store.py        to validate /insert payloads
       - mork/tier3_worker.py       to validate parser output before writing
       - parser/grammar/mask.py     automaton state decisions
 

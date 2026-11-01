@@ -13,13 +13,13 @@ import argparse
 import json
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 import yaml
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_scheduler
 
-from parser.grammar.atomese import validate_metta_string
 from parser.semantic.dataset import (
     StudentBatchCollator,
     StudentDataset,
@@ -27,34 +27,37 @@ from parser.semantic.dataset import (
     validate_student_pair,
     verify_split_overlap,
 )
-from parser.semantic.metta_renderer import render_metta
-from parser.semantic.schema import SemanticParseResult
-from parser.student.student_prompt import STUDENT_PROMPT, build_student_prompt
+from parser.student.student_prompt import STUDENT_PROMPT
+
+if TYPE_CHECKING:
+    from parser.ontology.catalog import OntologyCatalog
 
 # ── Load config ───────────────────────────────────────────────────────────────
 
 
 def load_config(config_path: str = "configs/parser_config/student_config.yaml") -> dict:
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)  # type: ignore[no-any-return]
 
 
 # ── Load training data ────────────────────────────────────────────────────────
 
 
-def load_pairs(train_file: str) -> list[dict]:
+def load_pairs(
+    train_file: str, *, catalog: OntologyCatalog | None = None
+) -> list[dict]:
     train_path = Path(train_file)
     if not train_path.exists():
         raise FileNotFoundError(f"Training data not found: {train_file}")
 
     pairs = []
-    with open(train_path) as f:
+    with open(train_path, encoding="utf-8") as f:
         for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if line:
                 try:
                     pair = json.loads(line)
-                    validate_student_pair(pair)
+                    validate_student_pair(pair, catalog=catalog)
                 except ValueError as error:
                     raise ValueError(
                         f"Invalid pair at {train_path}:{line_number}: {error}"
@@ -62,6 +65,14 @@ def load_pairs(train_file: str) -> list[dict]:
                 pairs.append(pair)
     print(f"  Loaded {len(pairs)} pairs from {train_file}")
     return pairs
+
+
+def _catalog_training_prompt_version(catalog: OntologyCatalog) -> str:
+    from parser.semantic.catalog_prompt import build_catalog_document_prompt
+
+    return build_catalog_document_prompt(
+        "Training provenance.", catalog=catalog
+    ).version
 
 
 # ── LoRA setup ────────────────────────────────────────────────────────────────
@@ -99,7 +110,9 @@ def save_model(model, tokenizer, output_dir: str, metadata: dict) -> None:
     model.save_pretrained(output_path)
     tokenizer.save_pretrained(output_path)
 
-    with open(output_path / "training_metadata.json", "w") as meta_file:
+    with open(
+        output_path / "training_metadata.json", "w", encoding="utf-8"
+    ) as meta_file:
         json.dump(metadata, meta_file, indent=2)
 
     print(f"\n  Model saved to: {output_dir}")
@@ -118,99 +131,28 @@ def save_model(model, tokenizer, output_dir: str, metadata: dict) -> None:
 def evaluate(
     model_dir: str,
     test_sentences: list[str] | None = None,
-    max_tokens: int = 256,
+    max_tokens: int = 3072,
 ) -> None:
-    if test_sentences is None:
-        test_sentences = [
-            "Dogs are animals.",
-            "Rain causes flooding.",
-            "John likes pizza.",
-            "Birds can fly.",
-            "The dog has fur.",
-            "Mary is happy.",
-            "The cup is on the table.",
-            "Cats are mammals.",
-            "Children need education.",
-            "The heart is part of the body.",
-        ]
+    """Generate and validate predictions for explicitly supplied sources."""
+    from parser.semantic.semantic_parser import DistilledSemanticParser
 
-    print("\n" + "=" * 70)
-    print("EVALUATING STUDENT MODEL")
-    print(
-        "Syntax checks only: no expected labels supplied; semantic accuracy is not measured."
-    )
-    print("=" * 70)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Preserve the saved precision on BF16-capable CUDA devices. Use float32
-    # elsewhere so a BF16 checkpoint does not force unsupported operations.
-    supports_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    if not supports_bf16:
-        print("  Using float32 for evaluation: BF16-capable CUDA is unavailable")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        torch_dtype="auto" if supports_bf16 else torch.float32,
-        device_map="auto",
-    )
-    model.eval()
-
-    valid_json = 0
-    valid_metta = 0
-
-    for sentence in test_sentences:
-        prompt = build_student_prompt(sentence)
-        enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(
-            model.device
+    if not test_sentences:
+        raise ValueError(
+            "Supply explicit evaluation sources; no synthetic default benchmark"
         )
-
-        with torch.no_grad():
-            out_ids = model.generate(
-                **enc,
-                max_new_tokens=max_tokens,
-                num_beams=4,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-        prompt_len = enc["input_ids"].shape[1]
-        new_ids = out_ids[0][prompt_len:]
-        json_output = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
-
+    parser = DistilledSemanticParser.from_pretrained(
+        model_dir, max_new_tokens=max_tokens
+    )
+    valid = 0
+    for sentence in test_sentences:
         try:
-            data = json.loads(json_output)
-            valid_json += 1
-            status = "JSON OK"
-
-            try:
-                result = SemanticParseResult.model_validate(data)
-                expressions = render_metta(result)
-                all_valid = True
-                for expr in expressions:
-                    ok, _ = validate_metta_string(expr)
-                    if not ok:
-                        all_valid = False
-                        break
-                if all_valid:
-                    valid_metta += 1
-                    status = "JSON + MeTTa OK"
-                else:
-                    status = "JSON OK, MeTTa FAIL"
-            except Exception as e:
-                status = f"JSON OK, Render FAIL: {str(e)[:30]}"
-        except json.JSONDecodeError:
-            status = "JSON FAIL"
-
-        print(f"  [{status}] '{sentence[:40]:40s}' -> {json_output[:60]}...")
-
-    print(
-        f"\nValid JSON: {valid_json}/{len(test_sentences)} ({100 * valid_json / len(test_sentences):.0f}%)"
-    )
-    print(
-        f"Valid MeTTa: {valid_metta}/{len(test_sentences)} ({100 * valid_metta / len(test_sentences):.0f}%)"
-    )
+            result = parser.parse(sentence)
+            print(result.model_dump_json())
+            valid += 1
+        except (ValueError, RuntimeError) as error:
+            print(f"Rejected prediction: {error}")
+    print(f"Validated documents: {valid}/{len(test_sentences)}")
+    print("No expected labels supplied; semantic accuracy was not measured.")
 
 
 # ── Main training ─────────────────────────────────────────────────────────────
@@ -224,10 +166,25 @@ def train(
     val_file: str | None = None,
 ) -> str:
     config = load_config(config_path)
+    from parser.ontology.catalog import load_manifest_catalog
+    from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION
+
+    contract_version = config["data"].get("contract_version")
+    if contract_version != SEMANTIC_CONTRACT_VERSION:
+        raise ValueError(
+            f"Student training requires contract version {SEMANTIC_CONTRACT_VERSION}"
+        )
+    manifest = config["data"].get("ontology_bundle_manifest")
+    if not isinstance(manifest, str) or not manifest.strip():
+        raise ValueError("Document training requires ontology_bundle_manifest")
+    catalog, _ = load_manifest_catalog(Path(manifest))
+    training_prompt_version = _catalog_training_prompt_version(catalog)
 
     base_model = config["student"]["base_model"]
     val_split = config["data"]["val_split"]
     max_length = config["data"]["max_length"]
+    if max_length == "auto":
+        max_length = None
     train_cfg = config["training"]
     lora_cfg = config.get("lora", {})
 
@@ -260,14 +217,22 @@ def train(
 
     # Step 1: Load training pairs
     print("\nSTEP 1: Loading training data")
-    all_pairs = load_pairs(train_file)
+    all_pairs = (
+        load_pairs(train_file, catalog=catalog)
+        if catalog is not None
+        else load_pairs(train_file)
+    )
 
     if len(all_pairs) == 0:
         raise ValueError(f"No valid pairs found in {train_file}")
 
     if val_file is not None:
         train_pairs = all_pairs
-        val_pairs = load_pairs(val_file)
+        val_pairs = (
+            load_pairs(val_file, catalog=catalog)
+            if catalog is not None
+            else load_pairs(val_file)
+        )
     else:
         train_pairs, val_pairs, _ = split_pairs(
             all_pairs,
@@ -288,9 +253,19 @@ def train(
 
     # Step 3: Build datasets
     print("\nSTEP 3: Building datasets")
-    train_dataset = StudentDataset(train_pairs, tokenizer, max_length)
-    val_dataset = StudentDataset(val_pairs, tokenizer, max_length)
+    train_dataset = StudentDataset(train_pairs, tokenizer, max_length, catalog=catalog)
+    val_dataset = StudentDataset(val_pairs, tokenizer, max_length, catalog=catalog)
     print(f"  Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+    required_length = max(
+        getattr(dataset, "required_max_length", 0)
+        for dataset in (train_dataset, val_dataset)
+    )
+    context_limit = getattr(tokenizer, "model_max_length", None)
+    if isinstance(context_limit, int) and required_length > context_limit:
+        raise ValueError(
+            f"Document pairs need {required_length} tokens; tokenizer context limit is {context_limit}"
+        )
+    print(f"  Longest complete prompt and label: {required_length} tokens")
 
     if not train_dataset:
         raise ValueError(
@@ -461,6 +436,9 @@ def train(
         "n_val": len(val_dataset),
         "config": config,
         "prompt_format": STUDENT_PROMPT,
+        "target_contract_version": contract_version,
+        "ontology_versions": list(catalog.versions),
+        "prompt_version": training_prompt_version,
         "epochs": train_cfg["epochs"],
         "batch_size": train_cfg["batch_size"],
         "learning_rate": train_cfg["learning_rate"],
@@ -482,11 +460,12 @@ def main():
     parser.add_argument("--output-dir")
     parser.add_argument("--method", choices=["lora", "full"], default="full")
     parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--model-dir", default="models/distil_parser")
+    parser.add_argument("--test-sentence", action="append")
+    parser.add_argument("--model-dir", default="models/semantic_document_parser")
     args = parser.parse_args()
 
     if args.eval_only:
-        evaluate(args.model_dir)
+        evaluate(args.model_dir, args.test_sentence)
     else:
         train(
             train_file=args.train_file,

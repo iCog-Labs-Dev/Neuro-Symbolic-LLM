@@ -1,10 +1,14 @@
 """Student batches preserve complete targets and mask only prompt/padding."""
 
+import pytest
 import torch
 from torch.utils.data import DataLoader
 
+from parser.ontology.catalog import load_ontology_catalog
+from parser.semantic.catalog_student import validate_catalog_student_pair
 from parser.semantic.dataset import StudentBatchCollator, StudentDataset
 from parser.student.student_prompt import build_student_prompt
+from tests.semantic_fixtures import pair as canonical_pair
 
 
 class CharacterTokenizer:
@@ -17,17 +21,26 @@ class CharacterTokenizer:
 def test_variable_length_batch_preserves_targets():
     tokenizer = CharacterTokenizer()
     pairs = [
-        {"input": "Dog.", "label": '{"assertions": []}'},
-        {"input": "A longer sentence.", "label": '{"assertions": [1, 2]}'},
+        canonical_pair("Mira left."),
+        canonical_pair("Mira departed earlier."),
     ]
-    dataset = StudentDataset(pairs, tokenizer, max_length=512)
+    max_length = max(
+        len(build_student_prompt(pair["input"]))
+        + len(validate_catalog_student_pair(pair, catalog=load_ontology_catalog())[1])
+        + 1
+        for pair in pairs
+    )
+    dataset = StudentDataset(pairs, tokenizer, max_length=max_length)
     batch = next(
         iter(DataLoader(dataset, batch_size=2, collate_fn=StudentBatchCollator(0)))
     )
     assert batch["input_ids"].shape[0] == 2
     for index, pair in enumerate(pairs):
         prompt_length = len(build_student_prompt(pair["input"]))
-        expected = tokenizer(pair["label"])["input_ids"] + [1]
+        _, label, _ = validate_catalog_student_pair(
+            pair, catalog=load_ontology_catalog()
+        )
+        expected = tokenizer(label)["input_ids"] + [1]
         labels = batch["labels"][index]
         assert labels[labels != -100].tolist() == expected
         assert torch.all(labels[:prompt_length] == -100)
@@ -39,24 +52,24 @@ def test_variable_length_batch_preserves_targets():
 
 def test_oversized_target_is_rejected_instead_of_truncated():
     tokenizer = CharacterTokenizer()
-    pair = {"input": "Dog.", "label": '{"assertions": []}'}
-    length = len(build_student_prompt(pair["input"])) + len(pair["label"]) + 1
+    pair = canonical_pair()
+    _, label, _ = validate_catalog_student_pair(pair, catalog=load_ontology_catalog())
+    length = len(build_student_prompt(pair["input"])) + len(label) + 1
     assert len(StudentDataset([pair], tokenizer, max_length=length)) == 1
-    dataset = StudentDataset([pair], tokenizer, max_length=length - 1)
-    assert len(dataset) == 0
-    assert dataset.oversized == 1
+    with pytest.raises(ValueError, match="never truncated"):
+        StudentDataset([pair], tokenizer, max_length=length - 1)
 
 
-def test_malformed_record_shapes_are_skipped(capsys):
-    pairs = [
-        None,
-        [],
-        42,
-        {"input": None, "label": "{}"},
-        {"input": "Dog", "label": None},
-        {"input": "Dog", "label": "null"},
-        {"input": "Dog", "label": "{}"},
-    ]
-    dataset = StudentDataset(pairs, CharacterTokenizer(), max_length=512)
-    assert len(dataset) == 1
-    assert "Skipped 6 invalid examples" in capsys.readouterr().out
+def test_automatic_length_measures_complete_examples():
+    records = [canonical_pair("Mira left."), canonical_pair("Mira left much earlier.")]
+    dataset = StudentDataset(records, CharacterTokenizer())
+    assert len(dataset) == 2
+    assert dataset.required_max_length == max(
+        len(dataset[index]["input_ids"]) for index in range(len(dataset))
+    )
+
+
+@pytest.mark.parametrize("invalid", [None, [], 42, {"input": "Dog", "label": "{}"}])
+def test_malformed_or_historical_record_is_rejected(invalid):
+    with pytest.raises(ValueError):
+        StudentDataset([invalid], CharacterTokenizer())

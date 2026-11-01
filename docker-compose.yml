@@ -1,4 +1,36 @@
 services:
+  app:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    image: neuro-symbolic-llm:latest
+    working_dir: /app
+    volumes:
+      - .:/app
+      - nsllm-hf-cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
+    command: bash
+
+  test:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    image: neuro-symbolic-llm:latest
+    working_dir: /app
+    volumes:
+      - .:/app
+      - nsllm-hf-cache:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
+    command: pytest
+
   mork-server:
     build:
       context: .
@@ -34,3 +66,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
+
+volumes:
+  nsllm-hf-cache:
+    name: nsllm-hf-cache

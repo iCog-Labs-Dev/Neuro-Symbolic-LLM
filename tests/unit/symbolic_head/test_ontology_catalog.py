@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from Residual.symbolic_head.contracts import (
+from residual.symbolic_head.contracts import (
     OntologyCatalogError,
     load_ontology_catalog,
 )

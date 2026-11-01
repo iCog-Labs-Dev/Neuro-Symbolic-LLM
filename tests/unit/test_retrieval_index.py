@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 
-from Residual.symbolic_head.contracts.template_record import TemplateRecord
-from Residual.symbolic_head.mork_client import DockerMorkClient
-from Residual.symbolic_head.retrieval import (
+from residual.symbolic_head.contracts.template_record import TemplateRecord
+from residual.symbolic_head.mork_client import DockerMorkClient
+from residual.symbolic_head.retrieval import (
     FaissTemplateIndex,
     load_retrieval_config,
 )
-from Residual.symbolic_head.retrieval import faiss_index as index_module
+from residual.symbolic_head.retrieval import faiss_index as index_module
 
 
 def _records() -> list[TemplateRecord]:

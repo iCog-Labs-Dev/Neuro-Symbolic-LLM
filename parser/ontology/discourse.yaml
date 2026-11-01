@@ -1,4 +1,4 @@
-version: "discourse-v1"
+version: "discourse-v2"
 relations:
   Concession:
     arity: 2
@@ -7,7 +7,7 @@ relations:
         type: Clause
       - name: counter_statement
         type: Clause
-    confidence_range: [0.4, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Extract when a valid point is acknowledged despite going against the main thrust."
   Contrast:
     arity: 2
@@ -16,7 +16,7 @@ relations:
         type: Entity|Proposition
       - name: item2
         type: Entity|Proposition
-    confidence_range: [0.5, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Extract when two items are presented as dissimilar."
   EvokesExpectation:
     arity: 2
@@ -25,21 +25,21 @@ relations:
         type: Clause
       - name: expected_result
         type: Proposition
-    confidence_range: [0.3, 1.0]
+    confidence_range: [0.0, 1.0]
     extraction_instruction: "Extract when an event sets up a strong predictive expectation of a subsequent event."
   Defeats:
     arity: 2
     arguments:
       - name: outcome
-        type: Event
+        type: Clause
       - name: prior_expectation
         type: Proposition
-    confidence_range: [0.6, 1.0]
-    extraction_instruction: "Extract when an outcome directly contradicts an evoked expectation."
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: "Link the source clause that defeats an expectation to that expected proposition. In a concession, reuse the counter_statement Clause from Concession; do not replace that clause with an event."
   DiscourseFocus:
     arity: 1
     arguments:
       - name: focal_item
-        type: Entity|Proposition
-    confidence_range: [0.8, 1.0]
-    extraction_instruction: "Extract the primary subject of a discourse segment."
+        type: Clause
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: "Identify the source clause carrying the discourse focus. In the concession/expectation-defeat frame, this is the counter_statement Clause, not an entity or event mentioned inside it."

@@ -1,0 +1,51 @@
+# Hidden-state residual adapter (not weight-level LoRA). See stages/stage_A/README.md.
+# Keys mirror ResidualConfig / A1Config / TrainingConfig / DomainConfig; unknown keys are rejected.
+adapter:
+  rank: 16              # LoRA-equivalent rank matching paper Sec 12.2 (r=16)
+  activation: identity  # Linear residual adapter matching standard LoRA (BA) parameterization
+  alpha: 16             # LoRA scaling parameter: scale = alpha / rank = 1.0
+  init_std: null        # Default Gaussian 1/sqrt(d) for A, zeros for B (zero residual init)
+  late_start: null      # Targets late blocks (L//2, L-2], paper Sec 7.2 & 12.2 (L_sym = L/4)
+  late_end: null
+  layers: null
+  seed: 0
+objective:
+  lambda_kl: 0.0        # Stage A1 unconstrained baseline: evaluates base drift post-hoc
+  lambda_wd: 0.0        # L2 parameter regularization weight
+training:
+  model: gpt2           # 124M base transformer (Experiment A-small, paper Sec 17.1)
+  seq_len: 128          # Fixed sequence block length
+  batch_size: 16        # Balanced batch size ensuring memory headroom (paper App F) and stability on smaller domains
+  epochs: 3             # Standard adapter fine-tuning baseline (1-3 epochs)
+  learning_rate: 1.0e-3 # Standard Adam learning rate for rank-16 adapters
+  eval_batches: 8       # Fixed evaluation sample size
+  log_every: 10         # Metric logging interval
+  seed: 0               # Global training seed
+  reset_optimizer: true # Fresh Adam moments per domain to isolate sequential domain transfer
+  output_dir: runs
+  jit: true             # JAX XLA JIT compilation for static execution graph and kernel fusion
+# Three related legal domains (LexGLUE) trained in order: shared legal language,
+domains:
+  - name: eurlex
+    dataset: coastalcph/lex_glue
+    dataset_config: eurlex
+    train_split: "train[:5000]"
+    eval_split: "validation[:500]"
+    test_split: "test[:500]"
+    separator: "\n\n"
+
+  - name: ledgar
+    dataset: coastalcph/lex_glue
+    dataset_config: ledgar
+    train_split: "train[:20000]"
+    eval_split: "validation[:2000]"
+    test_split: "test[:2000]"
+    separator: "\n\n"
+
+  - name: scotus
+    dataset: coastalcph/lex_glue
+    dataset_config: scotus
+    train_split: "train[:500]"
+    eval_split: "validation[:200]"
+    test_split: "test[:200]"
+    separator: "\n\n"
