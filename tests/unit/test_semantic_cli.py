@@ -21,7 +21,17 @@ def backend(monkeypatch):
 
     def generate(*, prompt, model):
         calls.append(prompt)
+
+        if '"run_general"' in prompt and '"run_discourse"' in prompt:
+            return json.dumps(
+                {
+                    "run_general": True,
+                    "run_discourse": False,
+                }
+            )
+
         source = prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
+
         return json.dumps(target(source))
 
     monkeypatch.setattr(
@@ -40,14 +50,14 @@ def test_parse_defaults_to_current_parse_result_json(backend, capsys):
     assert result["contract_version"] == SEMANTIC_CONTRACT_VERSION
     assert result["document"]["source_text"] == "Mira left."
     assert result["extraction"]["assertions"][0]["predicate"] == "Event"
-    assert len(backend) == 1
+    assert len(backend) == 2
 
 
 def test_parse_metta_is_a_derived_view(backend, capsys):
     assert cli.main(["parse", "Mira left.", "--format", "metta"]) == 0
 
     assert capsys.readouterr().out.strip() == "(Event e1)"
-    assert len(backend) == 1
+    assert len(backend) == 2
 
 
 @pytest.mark.parametrize("command", ["build-dataset", "export-documents"])

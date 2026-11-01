@@ -252,7 +252,11 @@ class _BaseSemanticParser:
         pronouns = {
             entity.id: entity.mention.text.casefold()
             for entity in extraction.entities
-            if entity.kind is None and entity.mention.text.casefold() in _PRONOUNS
+            if (
+                entity.kind is None
+                and entity.mention is not None
+                and entity.mention.text.casefold() in _PRONOUNS
+            )
         }
 
         def binds(part: SemanticAssertion, entity_id: str) -> bool:

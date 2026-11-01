@@ -85,19 +85,34 @@ def test_pair_preserves_original_parser_provenance() -> None:
     assert result.provenance.parser_version == "catalog-semantic-parser-v3"
 
 
-def test_pair_rejects_changed_guidance_with_stale_recorded_version(monkeypatch) -> None:
+def test_pair_rejects_changed_guidance_with_stale_recorded_version(
+    monkeypatch,
+) -> None:
     from parser.semantic import catalog_prompt
 
     pair = _pair()
-    original = catalog_prompt.load_shared_extraction_guidance
+
+    original = catalog_prompt._load_prompt_config
+
+    def modified_loader(path, label):
+        version, system_prompt = original(path, label)
+
+        if path == catalog_prompt._GENERAL_PROMPT_PATH:
+            system_prompt += "\nChanged role guidance."
+
+        return version, system_prompt
+
     monkeypatch.setattr(
         catalog_prompt,
-        "load_shared_extraction_guidance",
-        lambda: original() + "\nChanged role guidance.",
+        "_load_prompt_config",
+        modified_loader,
     )
 
     with pytest.raises(ValueError, match="prompt version"):
-        validate_catalog_student_pair(pair, catalog=load_ontology_catalog())
+        validate_catalog_student_pair(
+            pair,
+            catalog=load_ontology_catalog(),
+        )
 
 
 def test_checkpoint_requires_matching_contract_prompt_and_ontology(

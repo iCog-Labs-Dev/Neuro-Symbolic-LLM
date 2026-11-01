@@ -48,7 +48,10 @@ def _teacher(
     backend = FakeBackend(output, error=error)
     parser = ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
     return parser, backend
@@ -140,7 +143,10 @@ def _specific_rule_payload(source: str, *, duplicate_antecedent: bool = False):
 
 def test_parser_config_rejects_empty_model_name() -> None:
     with pytest.raises(ValueError, match="model_name cannot be empty"):
-        SemanticParserConfig(model_name="   ")
+        SemanticParserConfig(
+            model_name="   ",
+            enable_routing=False,
+        )
 
 
 def test_prompt_contains_source_context_and_selected_catalog() -> None:
@@ -152,7 +158,7 @@ def test_prompt_contains_source_context_and_selected_catalog() -> None:
     assert "Ontology versions: upper-v1" in prompt.text
     assert "<reference_context>\nEarlier event.\n</reference_context>" in prompt.text
     assert "<source_text>\nMira left.\n</source_text>" in prompt.text
-    assert "<worked_example>" in prompt.text
+    assert prompt.version.startswith("general-v3+sha256.")
     assert prompt.version == parser.prompt_version
 
 
@@ -304,6 +310,10 @@ def distilled_student(monkeypatch, tmp_path):
     )
     parser = DistilledSemanticParser.from_pretrained(
         str(tmp_path), max_new_tokens=42, num_beams=2
+    )
+    parser._config = SemanticParserConfig(
+        model_name=parser.model_name,
+        enable_routing=False,
     )
     return parser, tokenizer, model
 

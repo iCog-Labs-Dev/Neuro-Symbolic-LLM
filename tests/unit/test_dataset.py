@@ -28,7 +28,10 @@ def make_parser(payload=None):
 
     return ReferenceSemanticParser(
         backend=CallableBackend(generate, provider_name="fixture"),
-        config=SemanticParserConfig(model_name="fixture"),
+        config=SemanticParserConfig(
+            model_name="fixture",
+            enable_routing=False,
+        ),
     )
 
 

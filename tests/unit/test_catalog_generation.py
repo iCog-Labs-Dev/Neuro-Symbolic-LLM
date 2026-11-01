@@ -37,7 +37,10 @@ def _parser(
     )
     return ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
 
@@ -46,9 +49,9 @@ def test_parser_exposes_current_prompt_without_generation() -> None:
     parser = _parser('{"entities": [], "assertions": [], "rules": []}')
     prompt = ReferenceSemanticParser.build_prompt("Alice opened the door.")
 
-    assert parser.prompt_version.startswith("catalog-document-v15+sha256.")
-    assert "<worked_example>" in prompt
-    assert "Shared source interpretation rules:" in prompt
+    assert parser.prompt_version.startswith("general-v3+sha256.")
+    assert "You are a general semantic parser." in prompt
+    assert "<source_text>\nAlice opened the door.\n</source_text>" in prompt
 
 
 def test_instance_prompt_and_generation_use_the_selected_catalog() -> None:
@@ -57,7 +60,10 @@ def test_instance_prompt_and_generation_use_the_selected_catalog() -> None:
     backend = RecordingBackend(json.dumps(target(source)))
     parser = ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="review"),
+        config=SemanticParserConfig(
+            model_name="review",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
 

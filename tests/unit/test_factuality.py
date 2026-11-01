@@ -24,7 +24,10 @@ def _parse_payload(source_text: str, payload: dict[str, Any]) -> SemanticParseRe
     """Run a fixed structured answer through the current reference parser."""
     parser = ReferenceSemanticParser(
         backend=CallableBackend(lambda **_: json.dumps(payload), provider_name="test"),
-        config=SemanticParserConfig(model_name="fixture"),
+        config=SemanticParserConfig(
+            model_name="fixture",
+            enable_routing=False,
+        ),
     )
     return parser.parse_document(
         SourceDocument(
