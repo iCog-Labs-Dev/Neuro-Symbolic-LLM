@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -52,8 +53,34 @@ def _answer(*, prompt: str, model: str) -> str:
 def _parser(generate=_answer, catalog=None, model_name="teacher-model"):
     return ReferenceSemanticParser(
         backend=CallableBackend(generate, provider_name="test-provider"),
-        config=SemanticParserConfig(model_name=model_name),
+        config=SemanticParserConfig(
+            model_name=model_name,
+            enable_routing=False,
+        ),
         catalog=catalog,
+    )
+
+
+@pytest.fixture(autouse=True)
+def disable_routing_for_export_tests(monkeypatch):
+    """Keep export tests focused on exporting, not router generation."""
+
+    original_builder = catalog_document_cli.build_reference_semantic_parser
+
+    def build_parser(*args, **kwargs):
+        parser = original_builder(*args, **kwargs)
+
+        parser._config = replace(
+            parser._config,
+            enable_routing=False,
+        )
+
+        return parser
+
+    monkeypatch.setattr(
+        catalog_document_cli,
+        "build_reference_semantic_parser",
+        build_parser,
     )
 
 

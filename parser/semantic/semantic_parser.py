@@ -419,7 +419,16 @@ class _BaseSemanticParser:
 
         # Every assertion must explicitly provide its predicate contract fields.
         assertion_required = set(assertion_schema["required"])
-        assertion_required.update({"relation", "fallback"})
+        assertion_required.update(
+            {
+                "relation",
+                "fallback",
+                "arguments",
+                "polarity",
+                "factuality",
+                "modality",
+            }
+        )
         assertion_schema["required"] = sorted(assertion_required)
 
         catalog_predicates = sorted(

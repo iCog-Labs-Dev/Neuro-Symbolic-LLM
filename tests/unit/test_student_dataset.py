@@ -1,7 +1,6 @@
 """Student batches preserve complete targets and mask only prompt/padding."""
 
 import pytest
-import torch
 from torch.utils.data import DataLoader
 
 from parser.ontology.catalog import load_ontology_catalog
@@ -41,13 +40,23 @@ def test_variable_length_batch_preserves_targets():
             pair, catalog=load_ontology_catalog()
         )
         expected = tokenizer(label)["input_ids"] + [1]
-        labels = batch["labels"][index]
-        assert labels[labels != -100].tolist() == expected
-        assert torch.all(labels[:prompt_length] == -100)
+        labels = batch["labels"][index].tolist()
+
+        actual_targets = [value for value in labels if value != -100]
+
+        assert actual_targets == expected
+
+        assert all(value == -100 for value in labels[:prompt_length])
+
         length = len(dataset[index]["input_ids"])
-        assert torch.all(labels[length:] == -100)
-        assert torch.all(batch["attention_mask"][index, length:] == 0)
-        assert torch.all(batch["input_ids"][index, length:] == 0)
+
+        assert all(value == -100 for value in labels[length:])
+
+        attention_mask = batch["attention_mask"][index].tolist()
+        input_ids = batch["input_ids"][index].tolist()
+
+        assert all(value == 0 for value in attention_mask[length:])
+        assert all(value == 0 for value in input_ids[length:])
 
 
 def test_oversized_target_is_rejected_instead_of_truncated():

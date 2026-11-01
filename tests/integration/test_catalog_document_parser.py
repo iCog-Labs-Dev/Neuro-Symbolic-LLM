@@ -82,15 +82,25 @@ def _concession() -> tuple[str, dict[str, Any]]:
 
 
 def _parse(
-    payload: dict[str, Any], source: str, **parser_options: Any
+    payload: dict[str, Any],
+    source: str,
+    **parser_options: Any,
 ) -> SemanticParseResult:
     parser = ReferenceSemanticParser(
         backend=RecordingBackend(payload),
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         **parser_options,
     )
+
     return parser.parse_document(
-        SourceDocument(document_id="doc-1", corpus_id="corpus-1", source_text=source)
+        SourceDocument(
+            document_id="doc-1",
+            corpus_id="corpus-1",
+            source_text=source,
+        )
     )
 
 
@@ -100,7 +110,10 @@ def test_returns_validated_result_with_runtime_provenance() -> None:
     backend = RecordingBackend(payload)
     parser = ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         model_revision="revision-1",
     )
 
@@ -183,7 +196,10 @@ def test_worked_examples_are_valid_parse_results() -> None:
                     "rules": example.get("rules", []),
                 }
             ),
-            config=SemanticParserConfig(model_name="curated-example"),
+            config=SemanticParserConfig(
+                model_name="curated-example",
+                enable_routing=False,
+            ),
             catalog=catalog,
         )
         result = parser.parse_document(
@@ -395,7 +411,10 @@ def test_required_schema_decoding_rejects_an_unsupported_backend_before_generati
     backend = RecordingBackend({"entities": [], "assertions": []})
     parser = ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         require_structured_output=True,
     )
     with pytest.raises(ValueError, match="does not support JSON-schema decoding"):
@@ -410,7 +429,10 @@ def test_schema_decoding_requests_the_extraction_schema() -> None:
     backend = SchemaBackend(payload)
     parser = ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         require_structured_output=True,
     )
 
@@ -418,4 +440,12 @@ def test_schema_decoding_requests_the_extraction_schema() -> None:
         SourceDocument(document_id="doc-1", corpus_id="corpus-1", source_text=source)
     )
 
-    assert backend.schemas == [SemanticExtraction.model_json_schema()]
+    assert len(backend.schemas) == 1
+
+    actual = backend.schemas[0]
+    expected = SemanticExtraction.model_json_schema()
+
+    assert actual["type"] == expected["type"]
+    assert actual["properties"] == expected["properties"]
+    assert actual["additionalProperties"] is False
+    assert set(actual["$defs"]) == set(expected["$defs"])

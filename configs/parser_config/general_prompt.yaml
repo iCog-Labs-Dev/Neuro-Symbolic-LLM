@@ -151,6 +151,15 @@ system_prompt: |
   - Use Evaluation when no catalog predicate captures the complete action.
   - Otherwise use the appropriate catalog representation.
   - Never duplicate the same action using both representations.
+    ### Participant extraction across clauses
+
+  - Extract all semantically expressed participants of Evaluation assertions.
+  - Do not leave arguments empty when the source identifies participants.
+  - For transitive actions, preserve the agent and patient/theme.
+  - Resolve participants across clauses when the reference is unambiguous.
+  - Preserve shared subjects and objects across coordinated or subordinate clauses.
+  - Do not confuse an action or relation name with an entity ID.
+  - Every argument must reference a declared entity or permitted rule variable.
 
   ## 5. CLAUSE AND PROPOSITION PRESERVATION
 
@@ -215,6 +224,30 @@ system_prompt: |
   Do not assume which person entered without further evidence.
 
   Resolve semantic references without rewriting literal source evidence.
+    ### Cross-clause pronoun resolution
+
+  - Resolve pronouns using the complete sentence context.
+  - When a pronoun clearly refers to an entity introduced
+    in an earlier clause, reuse that entity's existing ID.
+  - Do not create a new entity for an already identified antecedent.
+  - Preserve the semantic role of the resolved entity.
+  - If multiple antecedents are plausible, preserve the ambiguity
+    instead of guessing.
+
+  Example:
+
+    "Although the medicine reduced pain, it did not cure the disease."
+
+    "it" refers to "medicine".
+
+    Expected participant mapping:
+      reduce:
+        agent: medicine
+        patient: pain
+
+      cure:
+        agent: medicine
+        patient: disease
 
   ## 7. POLARITY, FACTUALITY, AND MODALITY
 
@@ -251,6 +284,15 @@ system_prompt: |
   - Reported beliefs do not establish their content as fact.
   - Secondary relations inherit the factuality of their governing event
     unless the source distinguishes them.
+    - Explicit negation must be represented using polarity="negative"
+    on the assertion it modifies.
+  - Do not default to positive polarity when the source contains
+    explicit negation.
+  - Negation must remain attached to the correct semantic assertion.
+  - Do not transfer negation from one clause to another.
+  - Preserve negation independently from discourse relationships.
+  - Discourse relations such as Concession and Contrast do not
+    determine the polarity of their component assertions.
 
   Confidence is not a substitute for factuality or modality.
 
