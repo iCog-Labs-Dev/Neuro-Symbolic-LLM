@@ -1,0 +1,54 @@
+# Stage A3: true predictive-coding latent residual on FabricPC 0.6.0 (a frozen LM).
+# Same layout as a1_lora_baseline.yaml; unknown sections and keys are rejected.
+adapter:                # -> ResidualConfig: layers, rank, activation and scale are shared with A1
+  rank: 16              # latent size r, equal to A1's rank for a fair comparison
+  activation: identity
+  alpha: 16             # scale = alpha / rank = 1.0
+  init_std: null        # unused by A3 (its init stds live under objective)
+  late_start: null      # null -> late blocks (L//2, L-2], the same blocks as A1
+  late_end: null
+  layers: null
+  seed: 0
+objective:              # -> A3Config
+  infer_steps: 2        # K; the plan sweeps {1, 2, 4, 8} (or use --K 1 2 4)
+  eta_z: 0.1            # per-token inference step; stable only below 2 / lambda_max
+  sigma2: 1.0           # spring precision = 1 / sigma^2
+  lambda_kl: 0.0        # KL trust-region weight; 0 = off, as in A1
+  predictor_init_std: 0.001   # small: z^(0) starts near 0, so the model starts near the base
+  projection_init_std: 0.1    # must be nonzero, or grad_z E vanishes
+training:
+  model: gpt2
+  seq_len: 128
+  batch_size: 16        # one step costs about K + 4 forward/backward passes; use 2-4 for smoke runs
+  epochs: 3
+  learning_rate: 1.0e-3
+  eval_batches: 8
+  log_every: 10
+  seed: 0
+  reset_optimizer: true
+  output_dir: runs
+  jit: true
+domains:                # identical to A1, so results are directly comparable
+  - name: eurlex
+    dataset: coastalcph/lex_glue
+    dataset_config: eurlex
+    train_split: "train[:5000]"
+    eval_split: "validation[:500]"
+    test_split: "test[:500]"
+    separator: "\n\n"
+
+  - name: ledgar
+    dataset: coastalcph/lex_glue
+    dataset_config: ledgar
+    train_split: "train[:20000]"
+    eval_split: "validation[:2000]"
+    test_split: "test[:2000]"
+    separator: "\n\n"
+
+  - name: scotus
+    dataset: coastalcph/lex_glue
+    dataset_config: scotus
+    train_split: "train[:500]"
+    eval_split: "validation[:200]"
+    test_split: "test[:200]"
+    separator: "\n\n"
