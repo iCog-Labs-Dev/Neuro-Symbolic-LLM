@@ -1,4 +1,4 @@
-"""Tests for the canonical Hybrid Miner section 6.1 pattern record."""
+"""Canonical pattern-record validation and serialization."""
 
 from copy import deepcopy
 
