@@ -46,8 +46,7 @@ def test_selects_only_requested_modules_and_records_their_versions() -> None:
     assert "Fold" not in catalog.relations
 
 
-def test_paper_concession_frame_preserves_clause_and_content_types() -> None:
-    # Hybrid Pattern Mining, section 8.2, printed pages 29–30.
+def test_concession_frame_preserves_clause_and_content_types() -> None:
     signatures = load_ontology_catalog().signatures()
     assert signatures["Defeats"] == (
         frozenset({"Clause"}),

@@ -1,4 +1,4 @@
-"""Tests for the paper-aligned modular ontology catalog."""
+"""Modular ontology signatures, version identities and schema validation."""
 
 from pathlib import Path
 
@@ -9,7 +9,7 @@ from residual.symbolic_head.contracts import (
     load_ontology_catalog,
 )
 
-_PAPER_RELATIONS = {
+_CORE_RELATIONS = {
     "Entity",
     "Event",
     "Proposition",
@@ -51,10 +51,10 @@ def _write_catalog(path: Path, body: str) -> None:
     path.write_text(body.strip() + "\n", encoding="utf-8")
 
 
-def test_loads_complete_appendix_a3_catalog() -> None:
+def test_loads_complete_modular_catalog() -> None:
     catalog = load_ontology_catalog()
 
-    assert catalog.relations.keys() >= _PAPER_RELATIONS
+    assert catalog.relations.keys() >= _CORE_RELATIONS
     assert catalog.versions == (
         "discourse-v1",
         "lexical-v1",

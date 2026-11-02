@@ -1,4 +1,4 @@
-"""Compose the shared semantic-document prompt from reviewed extraction guidance."""
+"""Build catalog-constrained semantic extraction prompts."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ _EXTRACTION_CONFIG_PATH = _PROMPT_CONFIG_PATH.with_name("parser_prompt.yaml")
 
 
 def load_shared_extraction_guidance() -> str:
-    """Read target-neutral interpretation rules shared with the existing parser."""
+    """Read target-neutral extraction instructions from parser_prompt.yaml."""
     raw = yaml.safe_load(_EXTRACTION_CONFIG_PATH.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or not isinstance(raw.get("parser"), dict):
         raise ValueError("Parser prompt configuration requires a parser mapping")
@@ -143,8 +143,7 @@ def build_catalog_document_prompt(
         .replace("{worked_examples}", _worked_examples(catalog))
     )
     guidance = guidance.rstrip()
-    # Source text varies per record; the extraction instructions must not vary
-    # silently between annotation, training, and checkpoint inference.
+    # Fingerprint source-independent guidance shared by training and inference.
     fingerprint = sha256(guidance.encode("utf-8")).hexdigest()
     return CatalogDocumentPrompt(
         version=f"{version}+sha256.{fingerprint}",
