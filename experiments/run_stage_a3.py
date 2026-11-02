@@ -36,7 +36,7 @@ from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from metrics.performance import perplexity, training_step_time  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
 from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
-from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
+from stages.stage_A.a3 import A3Config, A3Model  # noqa: E402
 from stages.stage_base import (  # noqa: E402
     Domain,
     RunConfig,
@@ -53,7 +53,7 @@ from stages.stage_base import (  # noqa: E402
     summarize,
 )
 
-DEFAULT_CONFIG = REPO_ROOT / "configs" / "stage_A" / "a3_true_pc.yaml"
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "stage_A" / "a3_hybrid_pc.yaml"
 
 log = logging.getLogger("stage_a3")
 

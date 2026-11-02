@@ -33,8 +33,8 @@ from fabricpc.graph_initialization.state_initializer import (  # noqa: E402
 from fabricpc.training.trainer import build_clamps  # noqa: E402
 
 from frozenllm.substrate import identity_modify  # noqa: E402
-from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
-from stages.stage_A.a3_tail import make_frozen_tail, residual_modify  # noqa: E402
+from stages.stage_A.a3 import A3Config, A3Model  # noqa: E402
+from stages.stage_A.a3.a3_tail import make_frozen_tail, residual_modify  # noqa: E402
 from tests.frozenllm.conftest import (  # noqa: E402
     BATCH,
     NUM_TOKENS,
