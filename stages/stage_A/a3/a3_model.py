@@ -79,19 +79,17 @@ def _validate_layers(layers: Any, num_layers: int) -> tuple[int, ...]:
 
 
 @dataclass(frozen=True)
-class A3Config:
-    infer_steps: int = 2
-    eta_z: float = 0.1
-    sigma2: float = 1.0
-    lambda_kl: float = 0.0
-    predictor_init_std: float = 0.001
-    projection_init_std: float = 0.1
+class A3HybridConfig:
+    infer_steps: int
+    eta_z: float
+    sigma2: float
+    lambda_kl: float
+    predictor_init_std: float
+    projection_init_std: float
 
     def __post_init__(self) -> None:
         if not _is_int(self.infer_steps) or self.infer_steps < 0:
-            raise ValueError(
-                f"infer_steps must be an integer >= 0, got {self.infer_steps!r}"
-            )
+            raise ValueError("infer_steps must be an integer >= 0")
 
         for name in (
             "eta_z",
@@ -104,7 +102,7 @@ class A3Config:
         _require_nonnegative("lambda_kl", self.lambda_kl)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> A3Config:
+    def from_dict(cls, data: Mapping[str, Any]) -> A3HybridConfig:
         return cls(**checked_kwargs(cls, data))
 
 
@@ -118,13 +116,14 @@ class A3Model:
         seq_len: int,
         scale: float = 1.0,
         activation: str = "identity",
-        config: A3Config | None = None,
+        config: A3HybridConfig,
     ) -> None:
-        cfg = A3Config() if config is None else config
+        if not isinstance(config, A3HybridConfig):
+            raise TypeError(
+                f"config must be an A3HybridConfig, got {type(config).__name__}"
+            )
 
-        if not isinstance(cfg, A3Config):
-            raise TypeError(f"config must be an A3Config, got {type(cfg).__name__}")
-
+        cfg = config
         arch = substrate.architecture
 
         if (
@@ -444,4 +443,4 @@ class A3Model:
         return logits, base_logits
 
 
-__all__ = ["A3Config", "A3Model"]
+__all__ = ["A3HybridConfig", "A3Model"]

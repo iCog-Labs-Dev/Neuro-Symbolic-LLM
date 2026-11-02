@@ -151,21 +151,35 @@ class RunConfig:
         }
 
 
-def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
+def load_configs(
+    path: Path,
+    objective_cls: type[Any],
+    objective_section: str = "objective",
+) -> RunConfig:
+    if objective_section not in {"objective", "a3_hybrid"}:
+        raise ValueError(f"Unsupported objective section: {objective_section}")
+
     raw = yaml.safe_load(path.read_text()) or {}
-    unknown = sorted(set(raw) - set(SECTIONS))
+
+    allowed_sections = (set(SECTIONS) - {"objective"}) | {objective_section}
+    unknown = sorted(set(raw) - allowed_sections)
+
     if unknown:
         raise ValueError(f"Unknown config sections in {path}: {unknown}.")
+
     domains_raw = raw.get("domains")
     if not isinstance(domains_raw, list) or not domains_raw:
         raise ValueError(f"{path}: 'domains' must be a non-empty list of domains.")
+
     domains = tuple(DomainConfig.from_dict(d) for d in domains_raw)
     names = [d.name for d in domains]
+
     if len(set(names)) != len(names):
         raise ValueError(f"{path}: domain names must be unique, got {names}.")
+
     return RunConfig(
         adapter=ResidualConfig.from_dict(raw.get("adapter") or {}),
-        objective=objective_cls.from_dict(raw.get("objective") or {}),
+        objective=objective_cls.from_dict(raw.get(objective_section) or {}),
         training=TrainingConfig.from_dict(raw.get("training") or {}),
         domains=domains,
     )
