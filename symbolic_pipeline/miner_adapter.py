@@ -7,6 +7,7 @@ records. Each SemanticParseResult becomes one SemanticDocument:
   one fact for each participant role;
 - the consequents of a specific rule become hypothetical facts that are
   conditional on a Clause entity covering its antecedents;
+- universal catalog rules retain typed, signed literals in the rule collection;
 - each entity kind becomes a provisional kind fact;
 - content the miner contract cannot express raises MinerAdapterError.
 """
@@ -19,10 +20,13 @@ from typing import Final
 from hybrid_miner.contracts.semantic_document import (
     EntityRecord,
     ParserProvenance,
+    RuleLiteral,
+    RuleVariable,
     SemanticDocument,
     SourceSpan,
 )
 from hybrid_miner.contracts.semantic_document import SemanticAssertion as MinerAssertion
+from hybrid_miner.contracts.semantic_document import SemanticRule as MinerRule
 from pydantic import ValidationError
 
 from parser.semantic.schema import (
@@ -55,10 +59,11 @@ def to_semantic_document(result: SemanticParseResult) -> SemanticDocument:
         for assertion in result.extraction.assertions:
             builder.add_assertion(assertion)
 
-        for rule in result.extraction.rules:
+        for index, rule in enumerate(result.extraction.rules):
             if rule.scope == "universal":
-                raise MinerAdapterError("Universal rules are not supported yet")
-            builder.add_specific_rule(rule)
+                builder.add_universal_rule(rule, index)
+            else:
+                builder.add_specific_rule(rule)
 
         builder.add_kind_facts()
         return builder.build()
@@ -77,6 +82,7 @@ class _SemanticDocumentBuilder:
     result: SemanticParseResult
     entities: list[EntityRecord] = field(default_factory=list)
     assertions: list[MinerAssertion] = field(default_factory=list)
+    rules: list[MinerRule] = field(default_factory=list)
     entity_types: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
 
@@ -223,6 +229,57 @@ class _SemanticDocumentBuilder:
         for part in rule.consequents:
             self.add_assertion(part, conditional_on=clause)
 
+    def add_universal_rule(self, rule: SemanticRule, index: int) -> None:
+        """Preserve a range-restricted implication without asserting its clauses."""
+
+        types = self.entity_types | {
+            variable.id: variable.entity_type for variable in rule.variables
+        }
+
+        def literal(source: SemanticAssertion) -> RuleLiteral:
+            if source.factuality != "hypothetical":
+                raise MinerAdapterError("Universal rule literals must be hypothetical")
+            if source.predicate == "Evaluation":
+                raise MinerAdapterError(
+                    "Universal Evaluation literals require an explicit rule encoding; "
+                    "event reification must not introduce unbound consequent variables"
+                )
+            if source.modality != "none":
+                raise MinerAdapterError(
+                    "Universal rule literal modality has no encoding in the miner "
+                    "rule contract; refusing to discard it"
+                )
+            if source.fallback or source.relation is not None:
+                raise MinerAdapterError(
+                    "Universal catalog literals must not carry fallback or relation"
+                )
+            arguments = tuple(argument.entity_id for argument in source.arguments)
+            return RuleLiteral(
+                predicate=source.predicate,
+                arguments=arguments,
+                argument_types=tuple(types[argument] for argument in arguments),
+                polarity=source.polarity,
+                status=_STATUS,
+                factuality="hypothetical",
+                confidence=source.confidence,
+                source_spans=tuple(self._span(quote) for quote in source.evidence),
+                alternatives=tuple(dict.fromkeys(source.alternatives)),
+            )
+
+        self.rules.append(
+            MinerRule(
+                id=f"rule-{index}",
+                status=_STATUS,
+                variables=tuple(
+                    RuleVariable(id=variable.id, type=variable.entity_type)
+                    for variable in rule.variables
+                ),
+                antecedents=tuple(literal(part) for part in rule.antecedents),
+                consequents=tuple(literal(part) for part in rule.consequents),
+                source_spans=tuple(self._span(quote) for quote in rule.evidence),
+            )
+        )
+
     def add_kind_facts(self) -> None:
         """Add one kind fact per entity that has a kind and is used by a fact."""
 
@@ -272,4 +329,5 @@ class _SemanticDocumentBuilder:
             ),
             entities=tuple(self.entities),
             assertions=tuple(self.assertions),
+            rules=tuple(self.rules),
         )
