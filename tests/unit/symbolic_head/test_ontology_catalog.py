@@ -42,8 +42,6 @@ _CORE_RELATIONS = {
     "Lambda",
     "Map",
     "Fold",
-    "AliasOf",
-    "PipelineRole",
 }
 
 
@@ -56,15 +54,20 @@ def test_loads_complete_modular_catalog() -> None:
 
     assert catalog.relations.keys() >= _CORE_RELATIONS
     assert catalog.versions == (
-        "discourse-v1",
+        "discourse-v2",
+        "general-v1",
         "lexical-v1",
-        "narrative-v1",
+        "narrative-v2",
         "program-v1",
         "proof-v1",
         "upper-v1",
     )
     assert catalog.relation("Concession").arguments[0].allowed_types == ("Clause",)
     assert catalog.relation("Concession").arguments[1].allowed_types == ("Clause",)
+    assert catalog.relation("Defeats").arguments[0].allowed_types == ("Clause",)
+    assert catalog.relation("Defeats").arguments[1].allowed_types == ("Proposition",)
+    assert "AliasOf" not in catalog.relations
+    assert "PipelineRole" not in catalog.relations
     assert catalog.relation("Kick").arity == 3
     assert catalog.relation("Fold").arity == 3
 
@@ -122,6 +125,58 @@ relations:
     )
 
     with pytest.raises(OntologyCatalogError, match=r"unknown types \['MissingType'\]"):
+        load_ontology_catalog(tmp_path)
+
+
+def test_accepts_declared_types_matching_unary_relations(tmp_path: Path) -> None:
+    _write_catalog(
+        tmp_path / "upper.yaml",
+        """
+version: upper-v1
+types: [Entity]
+relations:
+  Entity:
+    arity: 1
+    arguments:
+      - {name: entity, type: Entity}
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: Extract an entity.
+""",
+    )
+
+    catalog = load_ontology_catalog(tmp_path)
+
+    assert catalog.relation("Entity").arguments[0].allowed_types == ("Entity",)
+
+
+@pytest.mark.parametrize(
+    "declared_types, argument_type, message",
+    [
+        ("[Missing]", "Entity", "must have a unary relation"),
+        ("[Entity]", "String", "must accept its own type"),
+        ("[Entity, Entity]", "Entity", "duplicate type names"),
+        ("Entity", "Entity", "list of non-empty names"),
+    ],
+)
+def test_rejects_invalid_type_declarations(
+    tmp_path: Path, declared_types: str, argument_type: str, message: str
+) -> None:
+    _write_catalog(
+        tmp_path / "upper.yaml",
+        f"""
+version: upper-v1
+types: {declared_types}
+relations:
+  Entity:
+    arity: 1
+    arguments:
+      - {{name: entity, type: {argument_type}}}
+    confidence_range: [0.8, 1.0]
+    extraction_instruction: Extract an entity.
+""",
+    )
+
+    with pytest.raises(OntologyCatalogError, match=message):
         load_ontology_catalog(tmp_path)
 
 

@@ -12,6 +12,7 @@ import yaml
 
 _PRIMITIVE_TYPES = frozenset({"String"})
 _DOCUMENT_FIELDS = frozenset({"version", "relations"})
+_OPTIONAL_DOCUMENT_FIELDS = frozenset({"types"})
 _RELATION_FIELDS = frozenset(
     {"arity", "arguments", "confidence_range", "extraction_instruction"}
 )
@@ -84,6 +85,17 @@ def _require_exact_fields(
         raise OntologyCatalogError(
             f"{context} fields mismatch: missing={missing}, unknown={unknown}"
         )
+
+
+def _parse_declared_types(value: Any, context: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise OntologyCatalogError(f"{context} must be a list of non-empty names")
+    names = tuple(item.strip() for item in value)
+    if len(set(names)) != len(names):
+        raise OntologyCatalogError(f"{context} contains duplicate type names")
+    return names
 
 
 def _parse_argument(value: Any, context: str) -> ArgumentSpec:
@@ -177,6 +189,7 @@ def load_ontology_catalog(directory: Path | None = None) -> OntologyCatalog:
         )
 
     versions: list[str] = []
+    declared_type_names: set[str] = set()
     relations: dict[str, RelationSpec] = {}
     for path in paths:
         try:
@@ -186,7 +199,13 @@ def load_ontology_catalog(directory: Path | None = None) -> OntologyCatalog:
                 f"Cannot load ontology file {path}: {error}"
             ) from error
         raw = _require_mapping(document, path.name)
-        _require_exact_fields(raw, _DOCUMENT_FIELDS, path.name)
+        unknown_fields = frozenset(raw) - _DOCUMENT_FIELDS - _OPTIONAL_DOCUMENT_FIELDS
+        missing_fields = _DOCUMENT_FIELDS - frozenset(raw)
+        if missing_fields or unknown_fields:
+            raise OntologyCatalogError(
+                f"{path.name} fields mismatch: missing={sorted(missing_fields)}, "
+                f"unknown={sorted(unknown_fields)}"
+            )
 
         version = raw["version"]
         if not isinstance(version, str) or not version.strip():
@@ -196,6 +215,14 @@ def load_ontology_catalog(directory: Path | None = None) -> OntologyCatalog:
         if version in versions:
             raise OntologyCatalogError(f"Duplicate ontology version {version!r}")
         versions.append(version)
+
+        module_types = _parse_declared_types(raw.get("types", []), f"{path.name}.types")
+        duplicate_types = declared_type_names.intersection(module_types)
+        if duplicate_types:
+            raise OntologyCatalogError(
+                f"Duplicate declared types {sorted(duplicate_types)}"
+            )
+        declared_type_names.update(module_types)
 
         raw_relations = _require_mapping(raw["relations"], f"{path.name}.relations")
         if not raw_relations:
@@ -213,10 +240,20 @@ def load_ontology_catalog(directory: Path | None = None) -> OntologyCatalog:
                 version=version,
             )
 
-    declared_types = {
+    inferred_types = {
         name for name, relation in relations.items() if relation.arity == 1
     }
-    allowed_types = declared_types | _PRIMITIVE_TYPES
+    for type_name in declared_type_names:
+        relation = relations.get(type_name)
+        if relation is None or relation.arity != 1:
+            raise OntologyCatalogError(
+                f"Declared type {type_name!r} must have a unary relation"
+            )
+        if relation.arguments[0].allowed_types != (type_name,):
+            raise OntologyCatalogError(
+                f"Declared type {type_name!r} must accept its own type"
+            )
+    allowed_types = (declared_type_names or inferred_types) | _PRIMITIVE_TYPES
     for relation in relations.values():
         for argument in relation.arguments:
             unknown = set(argument.allowed_types) - allowed_types
