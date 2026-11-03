@@ -466,6 +466,20 @@ def run_one(
             writer,
             energy_curve=args.energy_curve,
         )
+        writer.save_checkpoint(
+            "a3hybrid_final",
+            model.adapter_params(params),
+            global_step=summary["steps"],
+            stage="A3",
+            model=train_cfg.model,
+            adapted_layers=list(adapter.layers),
+            rank=cfg.adapter.rank,
+            scale=adapter.scale,
+            infer_steps=objective.infer_steps,
+            final=True,
+        )
+
+        log.info("Final A3 Hybrid adapter saved: a3hybrid_final")
 
         frozen = substrate.verify_frozen()
 
@@ -582,7 +596,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
 
-    base_name = args.run_name or default_run_name("a3")
+    base_name = args.run_name or default_run_name("a3hybrid")
     ks = args.K or [cfg.objective.infer_steps]
 
     status = 0
