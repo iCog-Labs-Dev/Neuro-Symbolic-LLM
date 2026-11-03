@@ -1,9 +1,14 @@
-"""auxiliary losses on residual-corrected hidden states."""
+"""Feedforward A2 losses. No settling states or label-conditioned query updates.
+
+Targets are always detached. Query detachment controls column gradients only;
+it does not make a noncausal query safe. Callers must supply causal forward states.
+"""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import jax
@@ -11,14 +16,8 @@ import jax.numpy as jnp
 
 from residual import AdapterParams, ResidualAdapter
 from residual.cpc_heads import predict_future, project
-from residual.fpc_energy import anchor_sq_distance, check_backend, highway_sq_norm
-from residual.hep import Highway, apply_highway
-from residual.stability import (
-    STEP_KEYS,
-    StabilityMonitor,
-    residual_smoothness,
-    step_metrics,
-)
+from residual.fpc_energy import anchor_sq_distance, check_backend
+from residual.stability import StabilityMonitor
 
 _VAR_FLOOR = 1e-6
 A2_LOSS_KEYS = ("task", "kl", "wd", "hid")
@@ -26,7 +25,6 @@ STABILITY_METRIC_KEYS = (
     "res_smooth",
     "input_smooth",
     "res_vs_input",
-    *STEP_KEYS,
 )
 
 _NEG = -1e30
@@ -60,6 +58,7 @@ def contrastive_future_loss(
     max_anchors_per_seq: int | None = None,
     mask: jax.Array | None = None,
     backend: str = "fabricpc",
+    cpc_detach_query: bool = True,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """InfoNCE between the predicted future code and the true future code.
 
@@ -98,6 +97,8 @@ def contrastive_future_loss(
 
     # [S, B, T, d]: leading axes folded together.
     anchors = anchors.reshape(steps, batch, seq_len, -1)
+    if cpc_detach_query:
+        anchors = jax.lax.stop_gradient(anchors)
     targets = jax.lax.stop_gradient(targets.reshape(steps, batch, seq_len, -1))
 
     z = _l2_normalize(
@@ -169,18 +170,29 @@ def contrastive_future_loss(
 
 
 def hidden_prediction_loss(
-    pred: jax.Array, target: jax.Array, source: jax.Array, config: Any
+    pred: jax.Array,
+    target: jax.Array,
+    source: jax.Array,
+    config: Any,
+    mask: jax.Array | None = None,
 ) -> dict[str, jax.Array]:
+    """Single hidden-prediction implementation, including valid-token normalization."""
+    if mask is None:
+        mask = jnp.ones(target.shape[:-1], dtype=bool)
     target = jax.lax.stop_gradient(target.astype(jnp.float32))
     source = source.astype(jnp.float32)
     if config.skip_first_token:
         pred, target, source = pred[:, 1:], target[:, 1:], source[:, 1:]
-    if pred.size == 0:
-        zero = jnp.sum(pred)  # finite empty sum, with a zero derivative
-        return dict.fromkeys(("loss", "mse", "rel", "copy_rel"), zero)
-    mse = jnp.mean(jnp.square(pred - target))
-    var = jnp.mean(jnp.var(target, axis=(0, 1))) + _VAR_FLOOR
-    copy_mse = jnp.mean(jnp.square(jax.lax.stop_gradient(source) - target))
+        mask = mask[:, 1:]
+    sq = jnp.square(pred - target)
+    copy_sq = jnp.square(jax.lax.stop_gradient(source) - target)
+    w = mask.astype(jnp.float32)[..., None]  # [B, S, 1]
+    n = jnp.maximum(jnp.sum(w), 1.0)
+    d = target.shape[-1]
+    mse = jnp.sum(w * sq) / (n * d)
+    copy_mse = jnp.sum(w * copy_sq) / (n * d)
+    mean = jnp.sum(w * target, axis=(0, 1)) / n  # [D]
+    var = jnp.mean(jnp.sum(w * jnp.square(target - mean), axis=(0, 1)) / n) + _VAR_FLOOR
     rel = mse / var
     return {
         "loss": rel if config.hidden_norm == "target_var" else mse,
@@ -199,16 +211,18 @@ def collect_stability_metrics(
     mask: jax.Array | None = None,
 ) -> dict[str, jax.Array]:
     """Collect A2 stability metrics without adding them to the loss."""
-    return monitor.metrics(
-        adapter,
-        adapter_params,
-        site_inputs,
-        corrected=corrected,
-        mask=mask,
+    return dict(
+        monitor.metrics(
+            adapter,
+            adapter_params,
+            site_inputs,
+            corrected=corrected,
+            mask=mask,
+        )
     )
 
 
-# --- stability: anchor loss and HEP nudge
+# Direct clean-base regularization; no inference trajectory is involved.
 
 
 def _masked_mean(x: jax.Array, mask: jax.Array | None) -> jax.Array:
@@ -220,34 +234,40 @@ def _masked_mean(x: jax.Array, mask: jax.Array | None) -> jax.Array:
 
 
 def anchor_loss(
-    z: jax.Array,
-    z_anchor: jax.Array,
+    corrected: jax.Array,
+    base_state: jax.Array,
     *,
     normalize: str = "relative",
     mask: jax.Array | None = None,
     backend: str = "fabricpc",
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Anchor loss ``L_zanch``: keep the state ``z`` close to its feed-forward anchor.
+    """Direct A2 base-state anchor: corrected state versus clean-base state.
 
-    L = mean_{...,b,t} || z - sg(z_anchor) ||^2        (``normalize="none"``)
-    L = that / ( mean || sg(z_anchor) ||^2 + eps )     (``normalize="relative"``)
+    Here ``corrected`` is the residual-corrected state and ``base_state`` is the clean
+    frozen-model state. Neither is a settled latent. A3 has a separate anchor.
+
+    L = mean_{...,b,t} || corrected - sg(base_state) ||^2        (``normalize="none"``)
+    L = that / ( mean || sg(base_state) ||^2 + eps )     (``normalize="relative"``)
     """
     if normalize not in ("relative", "none"):
         raise ValueError(f"normalize must be 'relative' or 'none', got {normalize!r}")
     check_backend(backend)
-    if z.ndim < 3:
-        raise ValueError(f"expected [..., B, T, d], got shape {z.shape}")
-    if z_anchor.ndim > z.ndim or z_anchor.shape != z.shape[z.ndim - z_anchor.ndim :]:
+    if corrected.ndim < 3:
+        raise ValueError(f"expected [..., B, T, d], got shape {corrected.shape}")
+    if (
+        base_state.ndim > corrected.ndim
+        or base_state.shape != corrected.shape[corrected.ndim - base_state.ndim :]
+    ):
         raise ValueError(
-            f"z_anchor {z_anchor.shape} must equal z {z.shape} or its trailing axes"
+            f"base_state {base_state.shape} must equal corrected {corrected.shape} or its trailing axes"
         )
-    z = z.astype(jnp.float32)
-    anchor = jax.lax.stop_gradient(z_anchor.astype(jnp.float32))
+    corrected = corrected.astype(jnp.float32)
+    anchor = jax.lax.stop_gradient(base_state.astype(jnp.float32))
 
     if backend == "fabricpc":
-        sq = anchor_sq_distance(z, anchor)  # [..., B, T]
+        sq = anchor_sq_distance(corrected, anchor)  # [..., B, T]
     else:
-        sq = jnp.sum(jnp.square(z - anchor), axis=-1)
+        sq = jnp.sum(jnp.square(corrected - anchor), axis=-1)
     anchor_sq = jnp.broadcast_to(jnp.sum(jnp.square(anchor), axis=-1), sq.shape)
     mean_sq = _masked_mean(sq, mask)
     mean_anchor_sq = _masked_mean(anchor_sq, mask)
@@ -261,84 +281,79 @@ def anchor_loss(
     return loss, metrics
 
 
-def output_error(logits: jax.Array, labels: jax.Array) -> tuple[jax.Array, jax.Array]:
-    """Output error ``eps_y = softmax(logits) - onehot(next token)``."""
-    if logits.ndim != 3 or labels.ndim != 2 or logits.shape[:2] != labels.shape:
-        raise ValueError(
-            f"expected logits [B, T, V] and labels [B, T], got {logits.shape}, {labels.shape}"
-        )
-    p = jax.nn.softmax(
-        jax.lax.stop_gradient(logits[:, :-1]).astype(jnp.float32), axis=-1
-    )
-    target = labels[:, 1:]
-    mask = target != -100
-    onehot = jax.nn.one_hot(
-        jnp.where(mask, target, 0), logits.shape[-1], dtype=jnp.float32
-    )
-    eps = (p - onehot) * mask[..., None]
-    return eps, mask
+NORMALIZATIONS = ("relative", "none")
 
 
-def hep_nudge(eps: jax.Array, v: Highway, alpha: float = 1.0) -> jax.Array:
-    """Projected error ``alpha * sg(eps) @ V``, ``[..., d_i]``; A2 does not inject it."""
-    return alpha * apply_highway(v, jax.lax.stop_gradient(eps))
+def _sq_norm(x: jax.Array, backend: str) -> jax.Array:
+    """``||x||^2`` per token, ``[..., B, T]``; on ``"fabricpc"`` the energy of an
+    ``IdentityNode`` whose target is clamped to 0 (so ``x`` carries the gradient)."""
+    if backend == "fabricpc":
+        return anchor_sq_distance(x, jnp.zeros_like(x))
+    return jnp.sum(jnp.square(x), axis=-1)
 
 
-def hep_nudge_loss(
-    eps: jax.Array,
-    v: Highway,
-    alpha: float = 1.0,
+def residual_smoothness_loss(
+    correction: jax.Array,
+    inputs: jax.Array,
     *,
-    reference: jax.Array | None = None,
+    normalize: str = "relative",
     mask: jax.Array | None = None,
     backend: str = "fabricpc",
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Projected-error norm-only control; A2 applies no inference nudge.
+    """Residual-smoothness loss ``L_res-smooth``: neighbouring tokens get similar corrections.
 
-    Only trainable highway weights receive a gradient. A zero highway minimizes
-    this penalty, so reducing it does not demonstrate useful HEP learning.
+    L = mean_{b, t>1} || R(h_t) - R(h_{t-1}) ||^2                         (``"none"``)
+    L = that / ( mean_{b, t>1} || sg(h_t - h_{t-1}) ||^2 + eps )          (``"relative"``)
 
-    L = mean_{...,b,t} || alpha * sg(eps) @ V ||^2
-    L = that / ( mean || sg(reference) ||^2 + eps )
     """
-    if eps.ndim < 3:
-        raise ValueError(f"expected eps [..., B, T, d_y], got shape {eps.shape}")
-    if not alpha >= 0:
-        raise ValueError(f"alpha must be >= 0, got {alpha!r}")
+    if normalize not in NORMALIZATIONS:
+        raise ValueError(f"normalize must be 'relative' or 'none', got {normalize!r}")
     check_backend(backend)
-    if reference is not None and reference.shape[:-1] != eps.shape[:-1]:
+    if correction.ndim < 3 or correction.shape != inputs.shape:
         raise ValueError(
-            f"reference {reference.shape} must match the nudge positions {eps.shape[:-1]}"
+            f"correction and inputs must share a shape [..., B, T, d], got "
+            f"{correction.shape} and {inputs.shape}"
         )
-    if backend == "fabricpc":
-        # ||alpha * sg(eps) @ V||^2 = ||(alpha * sg(eps)) @ V||^2
-        sq = highway_sq_norm(alpha * jax.lax.stop_gradient(eps), v)  # [..., B, T]
-    else:
-        sq = jnp.sum(jnp.square(hep_nudge(eps, v, alpha)), axis=-1)
-    mean_sq = _masked_mean(sq, mask)
-    metrics = {
-        "hep_nudge_norm": _masked_mean(jnp.sqrt(sq + _EPS) - jnp.sqrt(_EPS), mask)
-    }
-    loss = mean_sq
-    if reference is not None:
-        ref = jax.lax.stop_gradient(reference.astype(jnp.float32))
-        ref_sq = _masked_mean(jnp.sum(jnp.square(ref), axis=-1), mask)
-        loss = mean_sq / (ref_sq + _EPS)
-        metrics["hep_nudge_ratio"] = jnp.sqrt(mean_sq / (ref_sq + _EPS))
-    return loss, metrics
+    r = correction.astype(jnp.float32)
+    h = jax.lax.stop_gradient(inputs.astype(jnp.float32))
+    if r.shape[-2] < 2:
+        zero = jnp.zeros((), jnp.float32) + 0.0 * jnp.sum(r)
+        return zero, {"smooth_res": zero, "smooth_ratio": zero}
+    pair = None if mask is None else (mask[..., 1:] & mask[..., :-1])
+    res = _masked_mean(_sq_norm(r[..., 1:, :] - r[..., :-1, :], backend), pair)
+    inp = _masked_mean(_sq_norm(h[..., 1:, :] - h[..., :-1, :], backend), pair)
+    ratio = res / (inp + _EPS)
+    loss = ratio if normalize == "relative" else res
+    return loss, {"smooth_res": res, "smooth_ratio": ratio}
 
 
-__all__ = [
-    "A2_LOSS_KEYS",
-    "anchor_loss",
-    "anchor_positions",
-    "contrastive_future_loss",
-    "collect_stability_metrics",
-    "hep_nudge",
-    "hep_nudge_loss",
-    "hidden_prediction_loss",
-    "output_error",
-    "residual_smoothness",
-    "STABILITY_METRIC_KEYS",
-    "step_metrics",
-]
+@dataclass(frozen=True)
+class DetachConfig:
+    """First-run gradient controls; targets are unconditionally detached."""
+
+    hid_detach_input: bool = True
+    cpc_detach_query: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("hid_detach_input", "cpc_detach_query"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+
+
+def hidden_prediction_term(bank, params, layer, source, target, config, mask=None):
+    """Detach before the predictor, preserving gradients on its trainable weights."""
+    pred = bank.predict(params, layer, source, detach_input=config.hid_detach_input)
+    return hidden_prediction_loss(pred, target, source, config, mask=mask)
+
+
+def drift_metrics(corrected, base, mask=None):
+    """Measurement only: direct corrected-to-clean-base drift at each site."""
+    parts = []
+    metrics = {}
+    for layer, value in corrected.items():
+        delta = jax.lax.stop_gradient(value - base[layer]).astype(jnp.float32)
+        distance = _masked_mean(jnp.linalg.norm(delta, axis=-1), mask)
+        metrics[f"drift_l{layer}"] = distance
+        parts.append(distance)
+    metrics["drift_mean"] = jnp.mean(jnp.stack(parts))
+    return metrics

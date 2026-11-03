@@ -4,12 +4,13 @@ adapter:
   layers: [5]
   seed: 0
 objective:
+  hid_detach_input: true
+  cpc_detach_query: true
   hid:
     lambda_hid: 0.01
     hidden_target: corrected_teacher
     predictor:
       ff_dim: 8
-      detach_input: false
   cpc:
     weight: 0.01
     dim: 4
@@ -17,9 +18,6 @@ objective:
   stab:
     weight: 0.01
     w_anch: 1.0
-    hep:
-      kind: fixed_random
-      rank: 2
   monitor:
     mode: diagnostic
 training:

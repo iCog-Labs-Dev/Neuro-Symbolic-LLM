@@ -13,11 +13,10 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from fabricpc.core.inference import InferenceSGD
 from fabricpc.core.topology import Edge
 from fabricpc.core.types import GraphParams, NodeParams
 from fabricpc.graph_assembly import TaskMap, graph
-from fabricpc.graph_initialization import initialize_graph_state
+from fabricpc.graph_initialization import FeedforwardStateInit, initialize_graph_state
 from fabricpc.nodes import Linear
 
 CPCParams = dict[str, dict[str, jax.Array]]
@@ -113,7 +112,8 @@ def _linear_head(src: str, dst: str, d_in: int, d_out: int) -> Any:
         nodes=[source, head],
         edges=[Edge(source=source, target=head.slot("in"))],
         task_map=TaskMap(x=source, y=head),
-        inference=InferenceSGD(eta_infer=0.0, infer_steps=0),
+        inference=None,
+        graph_state_initializer=FeedforwardStateInit(),
     )
 
 

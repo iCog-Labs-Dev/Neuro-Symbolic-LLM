@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -22,7 +23,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from frozenllm.substrate.memory import get_memory_status  # noqa: E402
-from residual import ResidualAdapter  # noqa: E402
 from residual.stability import (  # noqa: E402
     StabilityMonitor,
 )
@@ -49,13 +49,18 @@ from stages.stage_A.a2 import (  # noqa: E402
 from stages.stage_base import (  # noqa: E402
     Domain,
     RunConfig,
-    evaluate,
+    apply_run_overrides,
+    configure_logging,
     evaluate_checkpoint,
+    initialize_stage,
     load_configs,
     load_token_blocks,
+    log_final_summary,
     make_eval_set,
+    prepare_domain,
     resolve_split,
     run_sequential,
+    test_domain,
 )
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "stage_A" / "a2_pc_inspired.yaml"
@@ -95,13 +100,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--ff-dim", type=int, default=None)
     parser.add_argument(
+        "--hid-detach-input",
         "--detach-input",
+        dest="detach_input",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Stop L_hidden-pred gradients into the adapter.",
     )
     parser.add_argument(
         "--predict-delta", action=argparse.BooleanOptionalAction, default=None
+    )
+    parser.add_argument(
+        "--cpc-detach-query",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Detach the causal CPC input from column parameters (default: true).",
     )
     parser.add_argument("--predictor-lr-mult", type=float, default=None)
     # Stability
@@ -117,6 +130,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
+    cfg = apply_run_overrides(cfg, args)
     adapter, training, domains = cfg.adapter, cfg.training, cfg.domains
     obj: A2Config = cfg.objective
     if args.arm is not None:
@@ -129,16 +143,6 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
             seed=args.seed,
             hid=replace(obj.hid, predictor=replace(obj.predictor, seed=args.seed)),
         )
-    if args.rank is not None:
-        adapter = replace(adapter, rank=args.rank)
-    if args.model is not None:
-        training = replace(training, model=args.model)
-    if args.output_dir is not None:
-        training = replace(training, output_dir=args.output_dir)
-    if args.no_jit:
-        training = replace(training, jit=False)
-    if args.eval_batches is not None:
-        training = replace(training, eval_batches=args.eval_batches)
     obj = replace(
         obj,
         lambda_kl=args.lambda_kl if args.lambda_kl is not None else obj.lambda_kl,
@@ -154,12 +158,6 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
             ),
         ),
     )
-    if args.epochs is not None:
-        if args.epochs < 0:
-            raise ValueError(f"epochs must be >= 0, got {args.epochs}")
-        training = replace(training, epochs=args.epochs)
-        domains = tuple(replace(d, epochs=args.epochs) for d in domains)
-
     hid = {
         k: v
         for k, v in {
@@ -187,6 +185,14 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
     }
     obj = replace(
         obj,
+        hid_detach_input=(
+            obj.hid_detach_input if args.detach_input is None else args.detach_input
+        ),
+        cpc_detach_query=(
+            obj.cpc_detach_query
+            if args.cpc_detach_query is None
+            else args.cpc_detach_query
+        ),
         hid=replace(
             obj.hid,
             **hid,
@@ -200,7 +206,8 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    start_time = time.time()
+    configure_logging(level=logging.INFO)
     args = parse_args(argv)
     cfg = apply_overrides(load_configs(args.config, A2Config), args)
     train_cfg = cfg.training
@@ -214,11 +221,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if max(obj.cpc.offsets) >= train_cfg.seq_len:
             raise ValueError("Every CPC offset must be smaller than training.seq_len.")
-    if obj.stab.w_hep > 0 and obj.stab.enabled:
-        log.warning(
-            "HEP norm-only control: trains only the highway, can collapse it to zero, "
-            "and supplies no adapter gradient or inference nudge."
-        )
     log.info("adapter=%s", cfg.adapter)
     log.info("objective=%s", obj)
     log.info("training=%s", train_cfg)
@@ -226,11 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     substrate = FrozenSubstrate(train_cfg.model)
     arch = substrate.architecture
-    max_pos = arch.max_position_embeddings
-    if max_pos is not None and train_cfg.seq_len > max_pos:
-        raise ValueError(f"seq_len={train_cfg.seq_len} exceeds {max_pos} positions.")
-
-    adapter = ResidualAdapter(cfg.adapter, arch)
+    adapter = initialize_stage(substrate, cfg)
     bank = (
         predictor_bank(obj, adapter, train_cfg.seq_len)
         if obj.uses_hidden_pred
@@ -259,11 +257,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         n_pred,
         n_frozen,
     )
-
-    frozen = substrate.verify_frozen()
-    if not frozen["params_unchanged"]:
-        log.error("Substrate not frozen before training: %s", frozen)
-        return 1
 
     if args.eval_checkpoint is not None:
         log.info(
@@ -323,31 +316,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(results, indent=2))
         return 0
 
-    # Load data before creating the run directory, so bad datasets fail fast.
-    domains = []
-    for d_cfg in cfg.domains:
-        train_blocks = load_token_blocks(
-            substrate, d_cfg, d_cfg.train_split, train_cfg.seq_len
-        )
-        eval_blocks = load_token_blocks(
-            substrate, d_cfg, d_cfg.eval_split, train_cfg.seq_len
-        )
-        domains.append(
-            Domain(
-                name=d_cfg.name,
-                train_blocks=train_blocks,
-                eval_set=make_eval_set(
-                    eval_blocks, train_cfg.batch_size, train_cfg.eval_batches
-                ),
-                epochs=train_cfg.epochs if d_cfg.epochs is None else d_cfg.epochs,
-            )
-        )
-        log.info(
-            "domain=%s train_blocks=%d eval_batches=%d",
-            d_cfg.name,
-            len(train_blocks),
-            len(domains[-1].eval_set),
-        )
+    # Shared data preparation; fail before creating a run directory.
+    domains = [prepare_domain(substrate, d, train_cfg) for d in cfg.domains]
 
     audit_data = None
     if args.audit or args.audit_only:
@@ -398,7 +368,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "arm": args.arm,
                 "hidden_target": obj.hidden_target,
                 "hidden_updates_adapter": obj.uses_hidden_pred and obj.hid_coupled,
-                "hep_semantics": "projected_error_norm_only_no_inference_nudge",
+                "hid_detach_input": obj.hid_detach_input,
+                "cpc_detach_query": obj.cpc_detach_query,
                 "seed": train_cfg.seed,
                 "epochs": {d.name: d.epochs for d in domains},
                 "jit": train_cfg.jit,
@@ -436,26 +407,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "final": final_diag,
         }
 
-        # Final test-set evaluation across domains for paper-table results
-        test_results = {}
-        for d_cfg in cfg.domains:
-            test_blocks = load_token_blocks(
-                substrate, d_cfg, d_cfg.test_split, train_cfg.seq_len
-            )
-            test_set = make_eval_set(
-                test_blocks, train_cfg.batch_size, train_cfg.eval_batches
-            )
-            test_results[d_cfg.name] = evaluate(
-                substrate, adapter, params, test_set, jit=train_cfg.jit
-            )
-            writer.log("test", domain=d_cfg.name, **test_results[d_cfg.name])
+        test_results = {
+            d.name: test_domain(substrate, adapter, params, d, train_cfg, writer=writer)
+            for d in cfg.domains
+        }
         summary["test"] = test_results
         writer.write_json("results.json", summary)
 
-    log.info("mean_seen_loss=%s", summary["mean_seen_loss"])
-    log.info("mean_forgetting=%s", summary["mean_forgetting"])
-    log.info("test_results=%s", summary["test"])
-    log.info("verify_frozen=%s", frozen)
+    log_final_summary(log, summary, frozen, start_time=start_time)
     if not frozen["params_unchanged"]:
         log.error("Base parameters changed during training.")
         return 1

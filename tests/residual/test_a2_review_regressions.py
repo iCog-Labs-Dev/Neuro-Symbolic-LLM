@@ -5,14 +5,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from residual.a2_losses import contrastive_future_loss, hidden_prediction_loss
+from losses.a2_loss import contrastive_future_loss, hidden_prediction_loss
 from residual.cpc_heads import a_key, init_cpc_heads, q_key
 from residual.local_predictor import PredictorConfig
 from residual.stability import StabilityConfig, StabilityMonitor, residual_smoothness
 from stages.stage_A.a2 import (
     A2Config,
     CPCConfig,
-    HEPConfig,
     HiddenConfig,
     StabLossConfig,
 )
@@ -29,7 +28,6 @@ from stages.stage_base import TrainingConfig
         lambda x: CPCConfig(tau=x),
         lambda x: CPCConfig(a_init_noise=x),
         lambda x: StabLossConfig(weight=x),
-        lambda x: HEPConfig(alpha=x),
         lambda x: HiddenConfig(predictor_lr_mult=x),
         lambda x: PredictorConfig(out_init_std=x),
         lambda x: StabilityConfig(delta=x),

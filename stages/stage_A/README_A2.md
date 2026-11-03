@@ -13,7 +13,11 @@ supplies differentiable heads and energy components. Latent settling belongs to 
 | [run_stage_a2.py](../../experiments/run_stage_a2.py) | Training and evaluation CLI |
 | [a2_pc_inspired.yaml](../../configs/stage_A/a2_pc_inspired.yaml) | Main GPT-2 experiment across three LexGLUE domains |
 | [a2_smoke.yaml](../../configs/stage_A/a2_smoke.yaml) | Small GPT-2/WikiText integration configuration |
-| [residual/](../../residual/) | Predictors, CPC heads, stability metrics, and loss functions |
+| [residual/](../../residual/) | FabricPC predictors, CPC heads, and stability metrics |
+
+| [losses/a2_loss.py](../../losses/a2_loss.py) | Feedforward losses and detach controls |
+| [losses/stability_loss.py](../../losses/stability_loss.py) | A3-only settling penalties; never imported by A2 |
+| [stage_base.py](../stage_base.py) | Shared preparation, training, evaluation, optimizer and logging |
 
 ## Objective and gradient ownership
 
@@ -22,7 +26,6 @@ L_A2 = L_task + lambda_kl * KL(base || adapted) + lambda_wd * ||adapter||^2
        + lambda_hid * L_hidden + lambda_cp * L_CPC + lambda_stab * L_stability
 
 L_stability = w_anch * L_base_anchor + w_smooth * L_residual_smoothness
-              + w_hep * L_projected_error_norm + w_step * L_step
 ```
 
 | Term | Parameters updated |
@@ -30,13 +33,12 @@ L_stability = w_anch * L_base_anchor + w_smooth * L_residual_smoothness
 | Task, base KL, adapter weight regularization | Adapter |
 | Hidden prediction, detached input | Hidden predictor only |
 | Hidden prediction, coupled input | Hidden predictor and adapter |
-| CPC | CPC heads and adapter |
+| CPC, detached query (default) | CPC heads only |
+| CPC, live query | CPC heads and adapter |
 | Base-state anchor and residual smoothness | Adapter |
-| Projected-error norm control | Trainable highway only |
-| Settling-step loss | None: zero in A2 |
 
 Setting all auxiliary weights to zero gives the A1 control. Teachers and CPC
-positive targets are detached. Evaluation uses causal feedforward predictions.
+positive and negative targets are detached. Evaluation uses causal feedforward predictions.
 
 ### Hidden targets
 
@@ -49,20 +51,28 @@ positive targets are detached. Evaluation uses causal feedforward predictions.
 Report these as separate experiments. A flexible predictor fitting the base
 target does not itself bound hidden-state drift.
 
-The main YAML uses `detach_input: true` as a predictor-only diagnostic. The
+The main YAML uses `objective.hid_detach_input: true` and
+`objective.cpc_detach_query: true`. These detach column states before the heads;
+the heads still learn. Use `--no-hid-detach-input` (legacy alias:
+`--no-detach-input`) or `--no-cpc-detach-query` for coupled ablations. The
 `full` and `hid_coupled` arms enable hidden-loss gradients into the adapter.
 `predictor_lr_mult` scales the predictor LR relative to `training.learning_rate`.
 
-### HEP and stability interpretation
+### Feedforward and settling stability
 
-A2 does not inject a highway error signal into latent states. The
-`hep_norm_control` arm minimizes a projected-error norm and trains only the
-highway; a zero highway minimizes that penalty. `stab_hep` is a compatibility
-alias. Fixed-random projections are diagnostics with `w_hep: 0`.
+The retained A2 anchor is the direct penalty `||h_corrected - sg(h_base)||^2`.
+It requires no settling and may update columns. Raw drift is also logged as
+`drift_l<layer>` and `drift_mean`; these metrics are detached and add no loss.
+With only corrected-state targets, enable the diagnostic monitor to request
+the clean-base forward needed for drift measurement.
 
-The base-state anchor regularizes drift from the clean frozen trajectory.
-`L_step` is zero because A2 performs no settling steps; it does not establish
-convergence of an iterative process.
+A2 contains no HEP or inference-step objective. A3's separate stability module
+uses a fixed, detached feedforward reference and averages valid tokens,
+dimensions, sites and inference steps. A2 never imports that module.
+
+Older A2 configurations containing `stab.hep`, `w_hep`, or `w_step` must remove
+those fields; they are rejected rather than silently ignored. The new CPC
+query-detachment default changes gradient routing from earlier coupled runs.
 
 ## GPU setup
 
@@ -90,7 +100,7 @@ Start with the small integration configuration:
 ```bash
 python experiments/run_stage_a2.py \
   --config configs/stage_A/a2_smoke.yaml \
-  --arm full --audit --run-name a2-smoke
+  --audit --run-name a2-smoke
 ```
 
 Run the main A2 experiment and its matched A1 control:
@@ -98,7 +108,7 @@ Run the main A2 experiment and its matched A1 control:
 ```bash
 python experiments/run_stage_a2.py \
   --config configs/stage_A/a2_pc_inspired.yaml \
-  --arm full --seed 0 --audit --run-name a2-full
+  --seed 0 --audit --run-name a2-detached
 
 python experiments/run_stage_a2.py \
   --config configs/stage_A/a2_pc_inspired.yaml \
@@ -117,12 +127,11 @@ change it and `--epochs` to override epochs for every domain.
 | `cpc_multi` | CPC with horizons 1, 2, and 4 |
 | `stab_anch` | Base-state anchor |
 | `stab_smooth` | Anchor plus residual smoothness |
-| `hep_norm_control` | Anchor plus trainable highway norm-only control |
-| `stab_all` | All stability components, including the inactive step term |
 | `full` | Base-target CPC, base-state anchor, and coupled hidden prediction |
 
 Use `--hidden-target base_anchor` to select the clean-base hidden target.
-Explicit `--lambda-*` arguments override the arm's weights.
+Explicit `--lambda-*` arguments override the arm's weights. CPC query detachment
+remains enabled unless explicitly disabled, including in the `full` arm.
 
 ## Evaluate a saved checkpoint
 
@@ -178,9 +187,9 @@ python -m pytest tests/residual/ -v --tb=short
 ```
 
 Regression coverage includes combined-checkpoint CLI reload, strict adapter
-validation, zero-alpha HEP audits, masked stability metrics, inactive CPC,
+validation, detached hidden/CPC gradients, causal query states, masked metrics, inactive CPC,
 nonfinite settings, empty hidden reductions, and selected-target reporting.
-Runtime and GPU validation remain pending; no A2-versus-A1 quality improvement
+This refactor was checked statically; tests and training were not run locally; no A2-versus-A1 quality improvement
 or benchmark result is claimed.
 
 CPC needs at least two sequences per training batch and valid cross-sequence

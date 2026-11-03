@@ -229,7 +229,12 @@ class LocalPredictorBank:
     # forward
 
     def predict(
-        self, params: Mapping[str, Any], layer_idx: int, u: jax.Array
+        self,
+        params: Mapping[str, Any],
+        layer_idx: int,
+        u: jax.Array,
+        *,
+        detach_input: bool | None = None,
     ) -> jax.Array:
         """Feedforward prediction ``P_l(u)`` (plus ``u`` when ``predict_delta``).
 
@@ -244,7 +249,7 @@ class LocalPredictorBank:
         if key not in params:
             raise KeyError(f"No predictor parameters for layer {layer_idx} ({key!r}).")
         u32 = u.astype(jnp.float32)
-        if self.config.detach_input:
+        if self.config.detach_input if detach_input is None else detach_input:
             u32 = jax.lax.stop_gradient(u32)
         state = initialize_graph_state(
             self.structure,

@@ -11,6 +11,7 @@ It tests padding mask and head backend. The paper's note: "Mask padding position
 from __future__ import annotations
 
 import math
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -18,7 +19,7 @@ import numpy as np
 import optax
 import pytest
 
-from residual.a2_losses import (
+from losses.a2_loss import (
     anchor_positions,
     contrastive_future_loss,
 )
@@ -37,12 +38,13 @@ def randn(*shape: int, seed: int = 0) -> jax.Array:
 
 
 _jit_loss = jax.jit(
-    contrastive_future_loss,
-    static_argnames=("offset", "tau", "max_anchors_per_seq"),
+    partial(contrastive_future_loss, cpc_detach_query=False),
+    static_argnames=("offset", "tau", "max_anchors_per_seq", "cpc_detach_query"),
 )
 
 
 def loss_fn(q, a, anchors, targets, **kw):
+    kw.setdefault("cpc_detach_query", False)
     return _jit_loss(q, a, anchors, targets, **kw)
 
 
@@ -365,7 +367,7 @@ def _x(*shape: int, seed: int = 0) -> jax.Array:
 
 
 _loss = jax.jit(
-    contrastive_future_loss,
+    partial(contrastive_future_loss, cpc_detach_query=False),
     static_argnames=("offset", "tau", "max_anchors_per_seq", "backend"),
 )
 

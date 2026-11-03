@@ -3,7 +3,7 @@
 # DomainConfig; unknown keys are rejected. See stages/stage_A/a2.py.
 #
 # L = L_task + lambda_kl*KL + lambda_wd*||phi||^2
-#   + lambda_cp*L_cpc + lambda_stab*(w_anch*L_zanch + w_hep*L_hep)
+#   + lambda_cp*L_cpc + lambda_stab*(w_anch*L_base_anchor + w_smooth*L_res_smooth)
 #   + lambda_hid*L_local_predictor/hidden_prediction
 # Set a weight to 0 to switch its term (and its heads) off
 adapter:
@@ -18,7 +18,9 @@ adapter:
 objective:
   lambda_kl: 0.0        # Same meaning as in A1
   lambda_wd: 0.0
-  seed: 0               # seed of the auxiliary heads / predictors / fixed-random highway
+  seed: 0               # auxiliary head seed
+  hid_detach_input: true
+  cpc_detach_query: true
   hid:
     lambda_hid: 0.1      # local predictor/hidden prediction loss weight
     # corrected_teacher (Option B): recommended by the auxiliary-loss review
@@ -33,7 +35,6 @@ objective:
       ff_dim: 256
       out_init_std: null
       predict_delta: false
-      detach_input: true # predictor-only diagnostic; use hid_coupled to train the adapter
       layers: null
   # Contrastive future loss (InfoNCE on a q-projected code; heads are FabricPC nodes).
   cpc:
@@ -45,17 +46,13 @@ objective:
     max_anchors_per_seq: 256
     a_init_noise: 0.01
     heads: fabricpc     # fabricpc | jax (reference)
-  # Stability: w_anch * L_zanch (anchor to the base state) + w_hep * L_hep-nudge.
+  # Direct clean-base anchor (not a settling anchor) and residual smoothness.
   stab:
-    weight: 0.1         # lambda_stab
+    weight: 0.1
     w_anch: 1.0
-    w_hep: 0.0          # > 0 needs hep.kind: lowrank (or dense) = a trainable highway
-    normalize: relative # relative | none
-    backend: fabricpc   # fabricpc | jax (reference)
-    hep:
-      kind: fixed_random  # null | dense | lowrank | fixed_random (tied: not wired yet)
-      rank: 16
-      alpha: 1.0
+    w_smooth: 0.0
+    normalize: relative
+    backend: fabricpc
 
   monitor:
     mode: diagnostic    # off | diagnostic

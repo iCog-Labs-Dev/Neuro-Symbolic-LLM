@@ -2,8 +2,7 @@
 
 L_A2 = L_task + lambda_kl * KL(p_F0 || p_F0+R) + lambda_wd * ||phi||^2   (A1, unchanged)
      + lambda_cp   * L_cpc                                               (contrastive future)
-     + lambda_stab * (w_anch * L_zanch + w_hep * L_hep-nudge
-                      + w_smooth * L_res-smooth + w_step * L_step)    (stability)
+     + lambda_stab * (w_anch * L_base_anchor + w_smooth * L_res-smooth)
      + lambda_hid  * L_hid                                               (hidden prediction)
 """
 
@@ -20,18 +19,17 @@ import numpy as np
 import optax
 
 from frozenllm.substrate import FrozenSubstrate, identity_modify
-from residual import AdapterParams, ResidualAdapter
-from residual.a2_losses import (
-    _EPS,
-    _VAR_FLOOR,
-    _masked_mean,
+from losses.a2_loss import (
+    DetachConfig,
     anchor_loss,
     collect_stability_metrics,
     contrastive_future_loss,
-    hep_nudge_loss,
-    output_error,
+    drift_metrics,
+    hidden_prediction_loss,
+    hidden_prediction_term,
+    residual_smoothness_loss,
 )
-from residual.a2_losses import hidden_prediction_loss as _hidden_loss_unmasked
+from residual import AdapterParams, ResidualAdapter
 from residual.cpc_heads import BACKENDS as CPC_BACKENDS
 from residual.cpc_heads import (
     CPCParams,
@@ -41,15 +39,6 @@ from residual.cpc_heads import (
     split_cpc,
 )
 from residual.fpc_energy import BACKENDS as ENERGY_BACKENDS
-from residual.fpc_energy import anchor_sq_distance, check_backend
-from residual.hep import (
-    KINDS,
-    TRAINABLE_KINDS,
-    HEPParams,
-    highway_for,
-    init_hep,
-    split_hep,
-)
 from residual.local_predictor import (
     LocalPredictorBank,
     PredictorConfig,
@@ -59,7 +48,12 @@ from residual.local_predictor import (
 from residual.stability import StabilityConfig as MonitorConfig
 from residual.stability import StabilityMonitor
 from stages.stage_A.a1 import A1Config, a1_objective
-from stages.stage_base import base_logits, checked_kwargs
+from stages.stage_base import (
+    base_logits,
+    checked_kwargs,
+    make_optimizer,
+    model_loss_terms,
+)
 
 POSITIVES = ("base", "corrected")
 HIDDEN_TARGETS = ("corrected_teacher", "base_anchor")
@@ -138,124 +132,6 @@ class CPCConfig:
         return self.enabled and self.positive == "base"
 
 
-NORMALIZATIONS = ("relative", "none")
-
-
-def _sq_norm(x: jax.Array, backend: str) -> jax.Array:
-    """``||x||^2`` per token, ``[..., B, T]``; on ``"fabricpc"`` the energy of an
-    ``IdentityNode`` whose target is clamped to 0 (so ``x`` carries the gradient)."""
-    if backend == "fabricpc":
-        return anchor_sq_distance(x, jnp.zeros_like(x))
-    return jnp.sum(jnp.square(x), axis=-1)
-
-
-def residual_smoothness_loss(
-    correction: jax.Array,
-    inputs: jax.Array,
-    *,
-    normalize: str = "relative",
-    mask: jax.Array | None = None,
-    backend: str = "fabricpc",
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Residual-smoothness loss ``L_res-smooth``: neighbouring tokens get similar corrections.
-
-    L = mean_{b, t>1} || R(h_t) - R(h_{t-1}) ||^2                         (``"none"``)
-    L = that / ( mean_{b, t>1} || sg(h_t - h_{t-1}) ||^2 + eps )          (``"relative"``)
-
-    """
-    if normalize not in NORMALIZATIONS:
-        raise ValueError(f"normalize must be 'relative' or 'none', got {normalize!r}")
-    check_backend(backend)
-    if correction.ndim < 3 or correction.shape != inputs.shape:
-        raise ValueError(
-            f"correction and inputs must share a shape [..., B, T, d], got "
-            f"{correction.shape} and {inputs.shape}"
-        )
-    r = correction.astype(jnp.float32)
-    h = jax.lax.stop_gradient(inputs.astype(jnp.float32))
-    if r.shape[-2] < 2:
-        zero = jnp.zeros((), jnp.float32) + 0.0 * jnp.sum(r)
-        return zero, {"smooth_res": zero, "smooth_ratio": zero}
-    pair = None if mask is None else (mask[..., 1:] & mask[..., :-1])
-    res = _masked_mean(_sq_norm(r[..., 1:, :] - r[..., :-1, :], backend), pair)
-    inp = _masked_mean(_sq_norm(h[..., 1:, :] - h[..., :-1, :], backend), pair)
-    ratio = res / (inp + _EPS)
-    loss = ratio if normalize == "relative" else res
-    return loss, {"smooth_res": res, "smooth_ratio": ratio}
-
-
-def step_loss(
-    trajectory: jax.Array,
-    *,
-    normalize: str = "relative",
-    mask: jax.Array | None = None,
-    backend: str = "fabricpc",
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Settling-step loss ``L_step``: successive states of a trajectory stay close.
-
-        L = mean_{b,t} sum_s || z^(s+1) - z^(s) ||^2                          (``"none"``)
-        L = that / ( mean_{b,t} || sg(z^(0)) ||^2 + eps )                     (``"relative"``)
-
-    ``trajectory`` is ``[S+1, B, T, d]``. A2 has no settling and passes the single state
-    ``[1, B, T, d]``: no differences, so the loss is exactly 0 with zero gradient. Stage A3
-    passes its real trajectory. Returns ``(loss, {"step_sq"})``.
-    """
-    if normalize not in NORMALIZATIONS:
-        raise ValueError(f"normalize must be 'relative' or 'none', got {normalize!r}")
-    check_backend(backend)
-    if trajectory.ndim != 4:
-        raise ValueError(
-            f"trajectory must be [S+1, B, T, d], got {tuple(trajectory.shape)}"
-        )
-    z = trajectory.astype(jnp.float32)
-    if z.shape[0] < 2:
-        zero = jnp.zeros((), jnp.float32) + 0.0 * jnp.sum(z)
-        return zero, {"step_sq": zero}
-    sq = jnp.sum(_sq_norm(z[1:] - z[:-1], backend), axis=0)  # [B, T]
-    raw = _masked_mean(sq, mask)
-    scale = _masked_mean(jnp.sum(jnp.square(jax.lax.stop_gradient(z[0])), -1), mask)
-    loss = raw / (scale + _EPS) if normalize == "relative" else raw
-    return loss, {"step_sq": raw}
-
-
-def hidden_prediction_loss(
-    pred: jax.Array,
-    target: jax.Array,
-    source: jax.Array,
-    config: Any,
-    mask: jax.Array | None = None,
-) -> dict[str, jax.Array]:
-    """The teammate's ``hidden_prediction_loss``, plus an optional padding ``mask``.
-
-    Without ``mask`` this *is* ``residual.a2_losses.hidden_prediction_loss``. With ``mask``
-    (``[B, S]``, ``False`` = padding or an ignored label) every mean, and the target variance,
-    runs over the valid tokens only.
-    """
-    if mask is None:
-        return _hidden_loss_unmasked(pred, target, source, config)
-    target = jax.lax.stop_gradient(target.astype(jnp.float32))
-    source = source.astype(jnp.float32)
-    if config.skip_first_token:
-        pred, target, source = pred[:, 1:], target[:, 1:], source[:, 1:]
-        mask = mask[:, 1:]
-    sq = jnp.square(pred - target)
-    copy_sq = jnp.square(jax.lax.stop_gradient(source) - target)
-    w = mask.astype(jnp.float32)[..., None]  # [B, S, 1]
-    n = jnp.maximum(jnp.sum(w), 1.0)
-    d = target.shape[-1]
-    mse = jnp.sum(w * sq) / (n * d)
-    copy_mse = jnp.sum(w * copy_sq) / (n * d)
-    mean = jnp.sum(w * target, axis=(0, 1)) / n  # [D]
-    var = jnp.mean(jnp.sum(w * jnp.square(target - mean), axis=(0, 1)) / n) + _VAR_FLOOR
-    rel = mse / var
-    return {
-        "loss": rel if config.hidden_norm == "target_var" else mse,
-        "mse": mse,
-        "rel": rel,
-        "copy_rel": copy_mse / var,
-    }
-
-
 def _number(name: str, value: Any) -> None:
     if (
         isinstance(value, bool)
@@ -267,102 +143,30 @@ def _number(name: str, value: Any) -> None:
 
 
 @dataclass(frozen=True)
-class HEPConfig:
-    """``objective.stab.hep`` section of the A2 YAML."""
-
-    # null switches HEP off (no nudge metric, no HEP loss).
-    kind: str | None = None
-    # Rank of the low-rank / fixed-random highway.
-    rank: int = 16
-    # alpha_y: gain of the nudge (the program sweeps it).
-    alpha: float = 1.0
-
-    def __post_init__(self) -> None:
-        if self.kind is not None and self.kind not in KINDS:
-            raise ValueError(
-                f"kind must be null or one of {list(KINDS)}, got {self.kind!r}"
-            )
-        if (
-            not isinstance(self.rank, int)
-            or isinstance(self.rank, bool)
-            or self.rank < 1
-        ):
-            raise ValueError(f"rank must be an integer >= 1, got {self.rank!r}")
-        _number("alpha", self.alpha)
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> HEPConfig:
-        return cls(**checked_kwargs(cls, data))
-
-    @property
-    def trainable(self) -> bool:
-        return self.kind in TRAINABLE_KINDS
-
-
-@dataclass(frozen=True)
 class StabLossConfig:
-    """``objective.stab`` section of the A2 YAML: the stability *loss*.
+    """Feedforward stability: direct clean-base anchoring and residual smoothness.
 
-    The stability loss has four sub-terms:
-
-    =========== ============================= ================================
-    Sub-term    Weight field                  Status in A2
-    =========== ============================= ================================
-    L_zanch     ``w_anch``                    Active
-    L_hep-nudge ``w_hep``                     Active (needs trainable highway)
-    L_res-smooth``w_smooth``                  Active
-    L_step      ``w_step``                    **Inactive** in A2 — see below
-    =========== ============================= ================================
-
-    ``w_step`` and ``L_step`` in A2
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    ``L_step = E_{b,t} sum_{s=0}^{K-1} ||z^(s+1) - z^(s)||^2``.
-    A2 provides only a single feed-forward state (no settling trajectory),
-    so ``K = 0`` and the sum is empty: the loss is *identically zero* with
-    *zero gradient*.  Enabling ``w_step > 0`` in A2 (as the ``stab_all``
-    arm does) is therefore harmless but has **no training effect**.
-
-    The field exists for API compatibility so that ``stab_all`` exercises
-    the step-loss code path, and A3 can reuse ``StabLossConfig`` with a
-    real settling trajectory without any schema changes.
+    The direct anchor is not a settling anchor. HEP and inference-step penalties
+    belong to losses.stability_loss and are not accepted by this A2 schema.
     """
 
     weight: float = 0.0
     w_anch: float = 1.0
-    w_hep: float = 0.0
     w_smooth: float = 0.0
-    # Settling-step loss: structurally inactive in A2 (no settling trajectory,
-    # so L_step ≡ 0 with zero gradient).  Retained for A3 API compatibility.
-    w_step: float = 0.0
     normalize: str = "relative"
     backend: str = "fabricpc"
-    hep: HEPConfig = field(default_factory=HEPConfig)
 
     def __post_init__(self) -> None:
-        for name in ("weight", "w_anch", "w_hep", "w_smooth", "w_step"):
+        for name in ("weight", "w_anch", "w_smooth"):
             _number(name, getattr(self, name))
-        if self.normalize not in NORMALIZATIONS:
-            raise ValueError(
-                f"normalize must be one of {list(NORMALIZATIONS)}, got {self.normalize!r}"
-            )
+        if self.normalize not in ("relative", "none"):
+            raise ValueError("normalize must be relative or none")
         if self.backend not in ENERGY_BACKENDS:
-            raise ValueError(
-                f"backend must be one of {list(ENERGY_BACKENDS)}, got {self.backend!r}"
-            )
-        if self.w_hep > 0 and self.hep.kind is None:
-            raise ValueError("w_hep > 0 needs hep.kind (dense or lowrank).")
-        if self.w_hep > 0 and not self.hep.trainable:
-            raise ValueError(
-                f"w_hep > 0 with hep.kind={self.hep.kind!r}: the highway is fixed and "
-                "eps is under stop-gradient, so the term has no gradient. Set w_hep = 0 "
-                "(the nudge norm is still logged) or use kind dense / lowrank."
-            )
+            raise ValueError(f"unknown energy backend: {self.backend}")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> StabLossConfig:
-        raw = dict(checked_kwargs(cls, data))
-        raw["hep"] = HEPConfig.from_dict(raw.get("hep") or {})
-        return cls(**raw)
+        return cls(**checked_kwargs(cls, data))
 
     @property
     def enabled(self) -> bool:
@@ -371,10 +175,6 @@ class StabLossConfig:
     @property
     def needs_base_states(self) -> bool:
         return self.enabled and self.w_anch > 0
-
-    @property
-    def needs_output_error(self) -> bool:
-        return self.enabled and self.hep.kind is not None
 
 
 HIDDEN_TARGETS = ("corrected_teacher", "base_anchor")
@@ -485,7 +285,7 @@ _LEGACY_HID_KEYS = (
 
 
 @dataclass(frozen=True)
-class A2Config:
+class A2Config(DetachConfig):
     """``objective:`` section of the A2 YAML."""
 
     lambda_kl: float = 0.0
@@ -497,15 +297,22 @@ class A2Config:
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
+        # The objective flag is canonical; keep legacy predictor config consistent.
+        object.__setattr__(
+            self,
+            "hid",
+            replace(
+                self.hid,
+                predictor=replace(
+                    self.hid.predictor, detach_input=self.hid_detach_input
+                ),
+            ),
+        )
         _number("lambda_kl", self.lambda_kl)
         _number("lambda_wd", self.lambda_wd)
         if not isinstance(self.seed, int) or isinstance(self.seed, bool):
             raise ValueError(f"seed must be an integer, got {self.seed!r}")
-        if self.stab.hep.kind == "tied":
-            raise ValueError(
-                "hep.kind='tied' is not wired into a2_objective yet (it needs the frozen "
-                "LM-head matrix); use dense, lowrank or fixed_random."
-            )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> A2Config:
@@ -523,6 +330,10 @@ class A2Config:
             if "monitor" in raw:
                 raise ValueError("give either 'stability' or 'monitor', not both")
             raw["monitor"] = raw.pop("stability")
+        # Read old saved configs; new configs use explicit objective-level flags.
+        predictor = (raw.get("hid") or {}).get("predictor") or {}
+        if "hid_detach_input" not in raw and "detach_input" in predictor:
+            raw["hid_detach_input"] = predictor["detach_input"]
         raw = dict(checked_kwargs(cls, raw))
         raw["cpc"] = CPCConfig.from_dict(raw.get("cpc") or {})
         raw["stab"] = StabLossConfig.from_dict(raw.get("stab") or {})
@@ -568,7 +379,7 @@ class A2Config:
     @property
     def hid_coupled(self) -> bool:
         """Whether the predictor error reaches the adapter (``detach_input`` false)."""
-        return self.hid.coupled
+        return self.uses_hidden_pred and not self.hid_detach_input
 
     @property
     def needs_base_targets(self) -> bool:
@@ -582,6 +393,7 @@ class A2Config:
             self.cpc.needs_base_states
             or self.stab.needs_base_states
             or self.needs_base_targets
+            or self.monitor.enabled
         )
 
     @property
@@ -614,12 +426,7 @@ def init_a2_params(
     d = adapter.hidden_size
     layers = tuple(adapter.layers)
     params: dict[str, Any] = dict(adapter.init_params())
-    heads = {
-        **init_cpc_params(config.cpc, config.seed, layers, d),
-        **init_hep_params(
-            config.stab, config.seed, layers, adapter.architecture.vocab_size, d
-        ),
-    }
+    heads = init_cpc_params(config.cpc, config.seed, layers, d)
     clash = sorted(set(heads) & set(params))
     if clash:
         raise ValueError(f"head parameters clash with the adapter keys: {clash}")
@@ -641,7 +448,7 @@ def predictor_bank(
     config: A2Config, adapter: ResidualAdapter, seq_len: int
 ) -> LocalPredictorBank:
     """The predictors ``P_l`` of ``config.predictor`` for ``adapter``'s sites (built once)."""
-    p = config.predictor
+    p = replace(config.predictor, detach_input=config.hid_detach_input)
     arch = adapter.architecture
     key = (
         p.ff_dim,
@@ -675,7 +482,7 @@ def predictor_params(params: Mapping[str, Mapping[str, jax.Array]]) -> Predictor
 def param_counts(
     params: Mapping[str, Mapping[str, jax.Array]],
 ) -> dict[str, int]:
-    """Trainable parameters by group: ``adapter``, ``cpc``, ``hep``, ``pred`` and ``total``."""
+    """Trainable parameters by group: ``adapter``, ``cpc``, ``pred`` and ``total``."""
 
     def count(tree: Mapping[str, Mapping[str, jax.Array]]) -> int:
         return sum(int(leaf.size) for leaf in jax.tree_util.tree_leaves(tree))
@@ -683,7 +490,6 @@ def param_counts(
     groups = {
         "adapter": count(adapter_params(params)),
         "cpc": count(split_cpc(params)),
-        "hep": count(split_hep(params)),
         "pred": count(predictor_params(params)),
     }
     other = count(params) - sum(groups.values())
@@ -708,22 +514,6 @@ def init_cpc_params(
     )
 
 
-def init_hep_params(
-    config: StabLossConfig,
-    seed: int,
-    layers: tuple[int, ...],
-    vocab_size: int,
-    hidden_size: int,
-) -> HEPParams:
-    """Trainable highway parameters; empty unless HEP is enabled with a trainable kind."""
-    if not (config.enabled and config.hep.trainable):
-        return {}
-    assert config.hep.kind is not None
-    return init_hep(
-        config.hep.kind, seed, layers, vocab_size, hidden_size, config.hep.rank
-    )
-
-
 # =============================================================================
 # 3. Terms (pure functions of hidden-state dictionaries ``{layer: [B, T, d]}``)
 # =============================================================================
@@ -743,6 +533,7 @@ def cpc_term(
     corrected: Mapping[int, jax.Array],
     base: Mapping[int, jax.Array] | None = None,
     mask: jax.Array | None = None,
+    cpc_detach_query: bool = True,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Unweighted ``L_cpc`` (mean over sites ``(l, k)``) and its diagnostics."""
     if not corrected:
@@ -770,6 +561,7 @@ def cpc_term(
                 max_anchors_per_seq=config.max_anchors_per_seq,
                 mask=mask,
                 backend=config.heads,
+                cpc_detach_query=cpc_detach_query,
             )
             losses.append(loss)
             for name, value in m.items():
@@ -784,17 +576,12 @@ def stability_term(
     config: StabLossConfig,
     corrected: Mapping[int, jax.Array],
     base: Mapping[int, jax.Array] | None = None,
-    logits: jax.Array | None = None,
-    labels: jax.Array | None = None,
-    seed: int = 0,
-    tied: jax.Array | None = None,
     mask: jax.Array | None = None,
     sites: Mapping[int, jax.Array] | None = None,
-    trajectories: Mapping[int, jax.Array] | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """The stability loss without ``lambda_stab``, and diagnostics::
 
-    w_anch * L_zanch + w_hep * L_hep-nudge + w_smooth * L_res-smooth + w_step * L_step
+    w_anch * L_base_anchor + w_smooth * L_res-smooth
     """
     if not corrected:
         raise ValueError("stability_term needs at least one site.")
@@ -845,60 +632,6 @@ def stability_term(
         for name in parts[0]:
             metrics[name] = jnp.mean(jnp.stack([m[name] for m in parts]))
 
-    if config.w_step > 0:
-        # In A2, trajectories is None → traj = h[None] with shape [1,B,T,d].
-        # step_loss returns exactly 0 (no successive states to compare).
-        # This branch is exercised for code-path coverage (stab_all arm)
-        # but has no training effect until A3 supplies a real trajectory.
-        losses, parts = [], []
-        for layer, h in corrected.items():
-            traj = h[None] if trajectories is None else trajectories[layer]
-            loss, m = step_loss(
-                traj, normalize=config.normalize, mask=mask, backend=config.backend
-            )
-            losses.append(loss)
-            parts.append(m)
-        l_step = jnp.mean(jnp.stack(losses))
-        total = total + config.w_step * l_step
-        metrics["stab_step"] = l_step
-        for name in parts[0]:
-            metrics[name] = jnp.mean(jnp.stack([m[name] for m in parts]))
-
-    if config.hep.kind is not None:
-        if logits is None or labels is None:
-            raise ValueError("HEP needs the adapted logits and the labels.")
-        eps, eps_mask = output_error(logits, labels)
-        n_pos = eps.shape[-2]
-        losses, parts = [], []
-        for layer, h in corrected.items():
-            v = highway_for(
-                config.hep.kind,
-                layer,
-                params=params,
-                seed=seed,
-                d_out=eps.shape[-1],
-                d_hidden=h.shape[-1],
-                rank=config.hep.rank,
-                tied=tied,
-            )
-
-            loss, m = hep_nudge_loss(
-                eps,
-                v,
-                config.hep.alpha,
-                reference=h[..., :n_pos, :],
-                mask=eps_mask,
-                backend=config.backend,
-            )
-            losses.append(loss)
-            parts.append(m)
-        l_hep = jnp.mean(jnp.stack(losses))
-        if config.w_hep > 0:
-            total = total + config.w_hep * l_hep
-        metrics["stab_hep"] = l_hep
-        for name in parts[0]:
-            metrics[name] = jnp.mean(jnp.stack([m[name] for m in parts]))
-
     return total, metrics
 
 
@@ -920,8 +653,9 @@ def hid_term(
         if layer not in targets:
             raise KeyError(f"missing next-block hidden state for layer {layer}.")
         source = corrected[layer]
-        pred = bank.predict(params, layer, source)
-        out = hidden_prediction_loss(pred, targets[layer], source, config, mask=mask)
+        out = hidden_prediction_term(
+            bank, params, layer, source, targets[layer], config, mask=mask
+        )
         losses.append(out["loss"])
         parts.append(out)
     metrics = {
@@ -1003,7 +737,9 @@ def _a2_objective(
     target_labels = input_ids if labels is None else labels
     wd = ResidualAdapter.l2_norm_sq(ap)
 
-    need_states = config.cpc.needs_base_states or config.stab.needs_base_states
+    need_states = (
+        config.cpc.needs_base_states or config.stab.needs_base_states or monitor_on
+    )
     need_targets = config.needs_base_targets
     need_kl = config.lambda_kl > 0 or base is not None
     base_states: dict[int, jax.Array] | None = None
@@ -1036,21 +772,9 @@ def _a2_objective(
             else jax.lax.stop_gradient(base)
         )
 
-    if base_lg is None:  # no KL: skip it rather than log NaN (strict JSON rejects it)
-        model_loss = task = substrate.compute_loss(
-            adapted, target_labels, losses=("CE",)
-        )
-        kl = None
-    else:
-        model_loss, components = substrate.compute_loss(
-            adapted,
-            target_labels,
-            losses=("CE", "KL"),
-            base_logits=base_lg,
-            weights={"KL": config.lambda_kl},
-            return_components=True,
-        )
-        task, kl = components["ce"], components["kl"]
+    model_loss, task, kl = model_loss_terms(
+        substrate, adapted, target_labels, config.lambda_kl, base_lg
+    )
 
     l_cpc = l_stab = l_hid = None
     extra: dict[str, jax.Array] = {}
@@ -1074,10 +798,13 @@ def _a2_objective(
                     mask=mask,
                 )
             )
+        if base_states is not None:
+            extra.update(drift_metrics(corrected, base_states, mask))
         if config.cpc.enabled:
             l_cpc, m = cpc_term(
                 params,
                 config=config.cpc,
+                cpc_detach_query=config.cpc_detach_query,
                 corrected=corrected,
                 base=base_states,
                 mask=mask,
@@ -1089,9 +816,6 @@ def _a2_objective(
                 config=config.stab,
                 corrected=corrected,
                 base=base_states,
-                logits=adapted,
-                labels=target_labels,
-                seed=config.seed,
                 mask=mask,
                 sites=sites,
             )
@@ -1152,9 +876,7 @@ def _site_rel(
     layer: int,
     mask: jax.Array | None,
 ) -> jax.Array:
-    out = hidden_prediction_loss(
-        bank.predict(params, layer, source), target, source, config, mask=mask
-    )
+    out = hidden_prediction_term(bank, params, layer, source, target, config, mask=mask)
     return out["rel"]
 
 
@@ -1195,24 +917,10 @@ def make_a2_optimizer(
     config: A2Config, learning_rate: float
 ) -> optax.GradientTransformation:
     """Adam over the combined PyTree; the predictor group can use its own step size."""
-    if config.predictor_lr_mult == 1.0:
-        return optax.adam(learning_rate)
-
-    def labels(params: Mapping[str, Any]) -> dict[str, Any]:
-        _, pred = split_params(params)
-        return {
-            k: jax.tree_util.tree_map(
-                lambda _, group="pred" if k in pred else "adapter": group, v
-            )
-            for k, v in params.items()
-        }
-
-    return optax.multi_transform(
-        {
-            "adapter": optax.adam(learning_rate),
-            "pred": optax.adam(learning_rate * config.predictor_lr_mult),
-        },
-        labels,
+    return make_optimizer(
+        learning_rate,
+        predictor_lr_mult=config.predictor_lr_mult,
+        predictor_prefix="pred_",
     )
 
 
@@ -1242,7 +950,7 @@ def a2_diagnostics(
         out: dict[str, jax.Array] = {}
         for i in bank.layers:
             u = adapter.apply(p_adapter, res.hidden_state(i), i)
-            guess = bank.predict(p_pred, i, u)
+            guess = bank.predict(p_pred, i, u, detach_input=config.hid_detach_input)
             teacher = res.hidden_state(i + 1)
             base_next = base_res.hidden_state(i + 1)
             on_teacher = hidden_prediction_loss(guess, teacher, u, config)
@@ -1285,10 +993,7 @@ ARM_DEFAULT_WEIGHTS = {"cpc": 0.05, "stab": 0.1, "hid": 0.1}
 ARMS = (
     "a1_mode",  # no auxiliary term: the A1 objective
     "stab_anch",  # anchor only
-    "stab_hep",  # compatibility alias for hep_norm_control
-    "hep_norm_control",  # explicit name for the legacy stab_hep norm-only control
     "stab_smooth",  # anchor + residual smoothness
-    "stab_all",  # anchor, highway norm control, residual smoothness, inactive step term
     "cpc_base",  # contrastive future, positive from the base state
     "cpc_corrected",  # contrastive future, positive from the corrected state
     "cpc_multi",  # contrastive future, offsets 1, 2, 4
@@ -1307,23 +1012,17 @@ def apply_arm(config: A2Config, arm: str) -> A2Config:
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}; choose one of {list(ARMS)}")
     off_cpc = replace(config.cpc, weight=0.0)
-    off_stab = replace(
-        config.stab, weight=0.0, w_hep=0.0, w_smooth=0.0, w_step=0.0, hep=HEPConfig()
-    )
+    off_stab = replace(config.stab, weight=0.0, w_smooth=0.0)
 
     def cpc_on(**over: Any) -> CPCConfig:
         return replace(config.cpc, weight=_weight(config.cpc.weight, "cpc"), **over)
 
     def anchor_on() -> StabLossConfig:
-        hep = config.stab.hep if not config.stab.hep.trainable else HEPConfig()
         return replace(
             config.stab,
             weight=_weight(config.stab.weight, "stab"),
             w_anch=1.0,
-            w_hep=0.0,
             w_smooth=0.0,
-            w_step=0.0,
-            hep=hep,
         )
 
     def hid_on(detach_input: bool) -> HiddenConfig:
@@ -1336,24 +1035,10 @@ def apply_arm(config: A2Config, arm: str) -> A2Config:
     cpc, stab, hid = off_cpc, off_stab, replace(config.hid, weight=0.0)
     if arm == "stab_anch":
         stab = anchor_on()
-    elif arm in ("stab_hep", "hep_norm_control"):
-        base = anchor_on()
-        kind = config.stab.hep.kind if config.stab.hep.trainable else "lowrank"
-        w_hep = config.stab.w_hep if config.stab.w_hep > 0 else 0.1
-        stab = replace(base, w_hep=w_hep, hep=replace(config.stab.hep, kind=kind))
     elif arm == "stab_smooth":
         stab = replace(
             anchor_on(),
             w_smooth=config.stab.w_smooth if config.stab.w_smooth > 0 else 0.1,
-        )
-    elif arm == "stab_all":
-        kind = config.stab.hep.kind if config.stab.hep.trainable else "lowrank"
-        stab = replace(
-            anchor_on(),
-            w_hep=config.stab.w_hep if config.stab.w_hep > 0 else 0.1,
-            w_smooth=config.stab.w_smooth if config.stab.w_smooth > 0 else 0.1,
-            w_step=config.stab.w_step if config.stab.w_step > 0 else 1.0,
-            hep=replace(config.stab.hep, kind=kind),
         )
     elif arm == "cpc_base":
         cpc = cpc_on(positive="base")
@@ -1371,7 +1056,15 @@ def apply_arm(config: A2Config, arm: str) -> A2Config:
             anchor_on(),
             hid_on(detach_input=False),
         )
-    return replace(config, cpc=cpc, stab=stab, hid=hid)
+    return replace(
+        config,
+        cpc=cpc,
+        stab=stab,
+        hid=hid,
+        hid_detach_input=(
+            hid.predictor.detach_input if hid.enabled else config.hid_detach_input
+        ),
+    )
 
 
 #  Audit: checkpoints you can inspect
@@ -1392,12 +1085,11 @@ def _f(x: Any) -> float:
 
 
 def _group_norms(tree: Mapping[str, Mapping[str, jax.Array]]) -> dict[str, float]:
-    """L2 norm of ``tree`` per parameter group (``adapter`` / ``cpc`` / ``hep`` / ``pred``)."""
+    """L2 norm of ``tree`` per parameter group (``adapter`` / ``cpc`` / ``pred``)."""
     out = {}
     for name, sub in (
         ("adapter", adapter_params(tree)),
         ("cpc", split_cpc(tree)),
-        ("hep", split_hep(tree)),
         ("pred", predictor_params(tree)),
     ):
         sq = sum(
@@ -1443,16 +1135,12 @@ def a2_audit(
 
     counts = param_counts(params0)
     want_cpc = config.cpc.enabled
-    want_hep = config.stab.enabled and config.stab.hep.trainable
     want_pred = config.uses_hidden_pred
     add(
         "param_groups",
-        (counts["cpc"] > 0) == want_cpc
-        and (counts["hep"] > 0) == want_hep
-        and (counts["pred"] > 0) == want_pred,
+        (counts["cpc"] > 0) == want_cpc and (counts["pred"] > 0) == want_pred,
         counts,
-        f"expected cpc heads: {want_cpc}, trainable highway: {want_hep}, "
-        f"hidden predictors: {want_pred}",
+        f"expected cpc heads: {want_cpc}, " f"hidden predictors: {want_pred}",
     )
 
     add("frozen_before", bool(substrate.params_unchanged()), None)
@@ -1544,7 +1232,10 @@ def a2_audit(
     _, probe_terms = run(probe)
     routed = {"task": ("task", {"adapter"})}
     if config.cpc.enabled:
-        routed["cpc"] = ("cpc", {"adapter", "cpc"})
+        routed["cpc"] = (
+            "cpc",
+            {"cpc"} if config.cpc_detach_query else {"adapter", "cpc"},
+        )
     if config.uses_hidden_pred:
         # detach_input: only P_l learns (negative control); otherwise the adapter does too.
         routed["hid"] = ("hid", {"adapter", "pred"} if config.hid_coupled else {"pred"})
@@ -1552,19 +1243,6 @@ def a2_audit(
         routed["stab_anch"] = ("stab_anch", {"adapter"})
     if "stab_smooth" in probe_terms:
         routed["stab_smooth"] = ("stab_smooth", {"adapter"})
-    if (
-        "stab_step" in probe_terms
-    ):  # no settling in A2: one state, no steps, no gradient
-        routed["stab_step"] = ("stab_step", set())
-    if "stab_hep" in probe_terms:
-        routed["stab_hep"] = (
-            "stab_hep",
-            (
-                {"hep"}
-                if config.stab.hep.trainable and config.stab.hep.alpha > 0
-                else set()
-            ),
-        )
     norms: dict[str, dict[str, float]] = {}
     for label, (term, expected_groups) in routed.items():
         grad = jax.grad(lambda p, term=term: run(p)[1][term])(probe)
@@ -1671,7 +1349,6 @@ __all__ = [
     "ADAPTER_PREFIX",
     "CPCConfig",
     "Check",
-    "HEPConfig",
     "HIDDEN_NORMS",
     "HIDDEN_TARGETS",
     "POSITIVES",
@@ -1690,10 +1367,8 @@ __all__ = [
     "hid_term",
     "hidden_prediction_loss",
     "residual_smoothness_loss",
-    "step_loss",
     "init_a2_params",
     "init_cpc_params",
-    "init_hep_params",
     "make_a2_objective",
     "make_a2_optimizer",
     "param_counts",
