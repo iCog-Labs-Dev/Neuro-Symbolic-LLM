@@ -127,10 +127,11 @@ def test_a2_schema_defaults_and_settling_separation():
     import ast
 
     root = Path(__file__).resolve().parents[3]
-    for name in ("a2_pc_inspired.yaml", "a2_smoke.yaml"):
-        cfg = load_configs(root / "configs" / "stage_A" / name, A2Config).objective
-        assert cfg.hid_detach_input is True and cfg.cpc_detach_query is True
-        assert A2Config.from_dict(asdict(cfg)) == cfg
+    cfg = load_configs(
+        root / "configs" / "stage_A" / "a2_pc_inspired.yaml", A2Config
+    ).objective
+    assert cfg.hid_detach_input is True and cfg.cpc_detach_query is True
+    assert A2Config.from_dict(asdict(cfg)) == cfg
     for name in ("w_step", "w_hep", "hep"):
         with pytest.raises(ValueError, match="Unknown"):
             A2Config.from_dict({"stab": {name: 1}})

@@ -12,7 +12,6 @@ supplies differentiable heads and energy components. Latent settling belongs to 
 | [a2_reporting.py](a2_reporting.py) | Internal metrics for saved checkpoints |
 | [run_stage_a2.py](../../experiments/run_stage_a2.py) | Training and evaluation CLI |
 | [a2_pc_inspired.yaml](../../configs/stage_A/a2_pc_inspired.yaml) | Main GPT-2 experiment across three LexGLUE domains |
-| [a2_smoke.yaml](../../configs/stage_A/a2_smoke.yaml) | Small GPT-2/WikiText integration configuration |
 | [residual/](../../residual/) | FabricPC predictors, CPC heads, and stability metrics |
 
 | [losses/a2_loss.py](../../losses/a2_loss.py) | Feedforward losses and detach controls |
@@ -95,14 +94,6 @@ The A2 dependency pin is FabricPC v0.6.0, matching `Base`. Graph assembly uses
 
 ## Run A2
 
-Start with the small integration configuration:
-
-```bash
-python experiments/run_stage_a2.py \
-  --config configs/stage_A/a2_smoke.yaml \
-  --audit --run-name a2-smoke
-```
-
 Run the main A2 experiment and its matched A1 control:
 
 ```bash
@@ -140,13 +131,13 @@ the checkpoint:
 
 ```bash
 python experiments/run_stage_a2.py \
-  --config runs/a2-smoke/config.yaml \
-  --eval-checkpoint runs/a2-smoke/params/task_0_wikitext.npz \
+  --config runs/a2-detached/config.yaml \
+  --eval-checkpoint runs/a2-detached/params/task_2_scotus.npz \
   --split validation --report-internals
 
 python experiments/run_stage_a2.py \
-  --config runs/a2-full/config.yaml \
-  --eval-checkpoint runs/a2-full/params/task_2_scotus.npz \
+  --config runs/a2-detached/config.yaml \
+  --eval-checkpoint runs/a2-detached/params/task_2_scotus.npz \
   --split test --report-internals
 ```
 
