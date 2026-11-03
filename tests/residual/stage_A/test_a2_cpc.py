@@ -148,9 +148,8 @@ def test_gradient_reaches_heads_and_adapter_only(substrate, adapter, input_ids) 
 
     g_ap, g_heads = jax.grad(f, argnums=(0, 1))(ap, heads)
     for name, g in g_heads.items():
-        assert all(
-            np.isfinite(x).all() and np.abs(x).max() > 0 for x in g.values()
-        ), name
+        valid = all(np.isfinite(x).all() and np.abs(x).max() > 0 for x in g.values())
+        assert valid, name
     for name, g in g_ap.items():
         assert np.abs(g["A"]).max() > 0 and np.abs(g["B"]).max() > 0, name
     assert substrate.params_unchanged()

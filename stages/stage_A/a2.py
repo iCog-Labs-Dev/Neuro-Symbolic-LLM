@@ -1140,7 +1140,7 @@ def a2_audit(
         "param_groups",
         (counts["cpc"] > 0) == want_cpc and (counts["pred"] > 0) == want_pred,
         counts,
-        f"expected cpc heads: {want_cpc}, " f"hidden predictors: {want_pred}",
+        f"expected cpc heads: {want_cpc}, hidden predictors: {want_pred}",
     )
 
     add("frozen_before", bool(substrate.params_unchanged()), None)

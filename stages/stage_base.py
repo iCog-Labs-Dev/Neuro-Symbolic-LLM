@@ -298,15 +298,11 @@ def make_optimizer(
         return optax.adam(learning_rate)
 
     def labels(params):
-        return {
-            k: jax.tree_util.tree_map(
-                lambda _, group=(
-                    "pred" if k.startswith(predictor_prefix) else "main"
-                ): group,
-                v,
-            )
-            for k, v in params.items()
-        }
+        groups = {}
+        for key, value in params.items():
+            group = "pred" if key.startswith(predictor_prefix) else "main"
+            groups[key] = jax.tree_util.tree_map(lambda _, group=group: group, value)
+        return groups
 
     return optax.multi_transform(
         {
