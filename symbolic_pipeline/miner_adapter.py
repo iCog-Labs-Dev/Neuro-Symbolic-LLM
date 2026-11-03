@@ -7,8 +7,15 @@ records. Each SemanticParseResult becomes one SemanticDocument:
   one fact for each participant role;
 - the consequents of a specific rule become hypothetical facts that are
   conditional on a Clause entity covering its antecedents;
+- a universal rule becomes a miner SemanticRule with signed literals over its
+  variables. An Evaluation part becomes one provisional relation over its
+  participants, in role order: the event form cannot be used, because the
+  miner forbids consequent variables that are missing from the antecedents;
 - each entity kind becomes a provisional kind fact;
-- content the miner contract cannot express raises MinerAdapterError.
+- content the miner contract cannot express raises MinerAdapterError: a
+  negative catalog fact, modality on a catalog predicate or inside a
+  universal rule, and an Evaluation without participants inside a universal
+  rule.
 """
 
 from __future__ import annotations
@@ -19,10 +26,13 @@ from typing import Final
 from hybrid_miner.contracts.semantic_document import (
     EntityRecord,
     ParserProvenance,
+    RuleLiteral,
+    RuleVariable,
     SemanticDocument,
     SourceSpan,
 )
 from hybrid_miner.contracts.semantic_document import SemanticAssertion as MinerAssertion
+from hybrid_miner.contracts.semantic_document import SemanticRule as MinerRule
 from pydantic import ValidationError
 
 from parser.semantic.schema import (
@@ -57,8 +67,9 @@ def to_semantic_document(result: SemanticParseResult) -> SemanticDocument:
 
         for rule in result.extraction.rules:
             if rule.scope == "universal":
-                raise MinerAdapterError("Universal rules are not supported yet")
-            builder.add_specific_rule(rule)
+                builder.add_universal_rule(rule)
+            else:
+                builder.add_specific_rule(rule)
 
         builder.add_kind_facts()
         return builder.build()
@@ -77,6 +88,7 @@ class _SemanticDocumentBuilder:
     result: SemanticParseResult
     entities: list[EntityRecord] = field(default_factory=list)
     assertions: list[MinerAssertion] = field(default_factory=list)
+    rules: list[MinerRule] = field(default_factory=list)
     entity_types: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
 
@@ -145,6 +157,12 @@ class _SemanticDocumentBuilder:
         if assertion.predicate == "Evaluation":
             self.add_evaluation(assertion, conditional_on=conditional_on)
             return
+
+        if assertion.modality != "none":
+            raise MinerAdapterError(
+                f"{assertion.modality} on {assertion.predicate} has no encoding "
+                "in the miner contract"
+            )
 
         if assertion.polarity == "negative":
             raise MinerAdapterError(
@@ -223,6 +241,94 @@ class _SemanticDocumentBuilder:
         for part in rule.consequents:
             self.add_assertion(part, conditional_on=clause)
 
+    def add_universal_rule(self, rule: SemanticRule) -> None:
+        """Add one universal rule as a miner SemanticRule.
+
+        Rule variables keep their IDs and types. Each antecedent and
+        consequent becomes one RuleLiteral that keeps its polarity.
+        """
+
+        variable_types = {
+            variable.id: variable.entity_type for variable in rule.variables
+        }
+        self.rules.append(
+            MinerRule(
+                id=self._next_rule_id(),
+                status=_STATUS,
+                variables=tuple(
+                    RuleVariable(id=variable.id, type=variable.entity_type)
+                    for variable in rule.variables
+                ),
+                antecedents=tuple(
+                    self._rule_literal(part, variable_types)
+                    for part in rule.antecedents
+                ),
+                consequents=tuple(
+                    self._rule_literal(part, variable_types)
+                    for part in rule.consequents
+                ),
+                source_spans=tuple(self._span(quote) for quote in rule.evidence),
+            )
+        )
+
+    def _next_rule_id(self) -> str:
+        """Return the next document-local rule ID."""
+
+        number = self.counters.get("rule", 0)
+        self.counters["rule"] = number + 1
+        return f"rule-{number}"
+
+    def _rule_literal(
+        self, part: SemanticAssertion, variable_types: dict[str, str]
+    ) -> RuleLiteral:
+        """Convert one universal-rule part into a RuleLiteral.
+
+        A catalog predicate keeps its name and argument order. An Evaluation
+        becomes ``ProvisionalRelation`` named by its relation, with its
+        participants in role order. Negation is the literal's polarity; the
+        miner contract has no modality, so a modal part is rejected.
+        """
+
+        if part.modality != "none":
+            raise MinerAdapterError(
+                f"{part.modality} in a universal rule has no encoding "
+                "in the miner contract"
+            )
+
+        identifiers = [argument.entity_id for argument in part.arguments]
+        argument_types = []
+        for identifier in identifiers:
+            entity_type = variable_types.get(identifier) or self.entity_types.get(
+                identifier
+            )
+            if entity_type is None:
+                raise MinerAdapterError(
+                    f"Rule argument {identifier!r} is not a declared entity or variable"
+                )
+            argument_types.append(entity_type)
+
+        if part.predicate == "Evaluation":
+            if not identifiers:
+                raise MinerAdapterError(
+                    f"Evaluation {part.relation!r} without participants "
+                    "cannot be a universal rule literal"
+                )
+            predicate, relation = _PROVISIONAL, part.relation
+        else:
+            predicate, relation = part.predicate, None
+
+        return RuleLiteral(
+            predicate=predicate,
+            arguments=tuple(identifiers),
+            argument_types=tuple(argument_types),
+            status=_STATUS,
+            polarity=part.polarity,
+            confidence=part.confidence,
+            source_spans=tuple(self._span(quote) for quote in part.evidence),
+            alternatives=tuple(dict.fromkeys(part.alternatives)),
+            provisional_relation_id=relation,
+        )
+
     def add_kind_facts(self) -> None:
         """Add one kind fact per entity that has a kind and is used by a fact."""
 
@@ -272,4 +378,5 @@ class _SemanticDocumentBuilder:
             ),
             entities=tuple(self.entities),
             assertions=tuple(self.assertions),
+            rules=tuple(self.rules),
         )
