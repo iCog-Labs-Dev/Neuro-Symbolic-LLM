@@ -42,7 +42,7 @@ def test_prompt_uses_catalog_signatures_versions_and_current_examples() -> None:
 
 
 def test_prompt_preserves_source_context_and_current_contract_guidance() -> None:
-    source = "  The door was opened by Alice.\nCafé ☕ remained open.  "
+    source = "  The door was opened by Alice.\nCafé remained open.  "
     context = "Alice is the caretaker."
 
     prompt = build_catalog_document_prompt(

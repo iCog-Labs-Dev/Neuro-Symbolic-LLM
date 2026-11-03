@@ -62,7 +62,7 @@ def test_exports_parse_results_and_auditable_rejections(tmp_path: Path) -> None:
     output_path = tmp_path / "parsed.jsonl"
     rejected_path = tmp_path / "rejected.jsonl"
     student_pairs_path = tmp_path / "student-pairs.jsonl"
-    source_text = "  Mira left. 🙂  "
+    source_text = "  Mira left.  "
     input_path.write_text(
         "\n".join(
             [

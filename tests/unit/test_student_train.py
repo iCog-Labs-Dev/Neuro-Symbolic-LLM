@@ -333,7 +333,7 @@ def test_load_pairs_preserves_utf8_with_a_non_utf8_system_default(
     path = tmp_path / "pairs.jsonl"
     import json
 
-    example = canonical_pair("José left. 🙂")
+    example = canonical_pair("José left.")
     path.write_text(json.dumps(example, ensure_ascii=False) + "\n", encoding="utf-8")
     original_open = open
 

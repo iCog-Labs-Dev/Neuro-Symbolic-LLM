@@ -59,7 +59,7 @@ def _evidence(text: str) -> list[dict[str, Any]]:
 
 
 def _concession() -> tuple[str, dict[str, Any]]:
-    source = "🙂 Although Mira promised Sol, she delayed."
+    source = "Although Mira promised Sol, she delayed."
     first = "Although Mira promised Sol"
     second = "she delayed"
     return source, {

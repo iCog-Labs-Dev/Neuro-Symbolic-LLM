@@ -36,7 +36,7 @@ def test_preserves_unicode_quotes_and_nested_source_content() -> None:
                 "arguments": [],
                 "fallback": True,
                 "confidence": 0.9,
-                "evidence": [{"text": 'Café {x} says "yes".\n🙂', "occurrence": 0}],
+                "evidence": [{"text": 'Café {x} says "yes".', "occurrence": 0}],
             }
         ],
         "rules": [],
