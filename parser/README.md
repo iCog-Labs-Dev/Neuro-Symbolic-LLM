@@ -17,24 +17,24 @@ MeTTa view:   (Obligation (Evaluation deliver (List supplier goods)))
 
 [`ReferenceSemanticParser`](semantic/semantic_parser.py) uses a large teacher
 model for offline annotation. [`DistilledSemanticParser`](semantic/semantic_parser.py)
-uses a fine-tuned local 1B–3B student for deployment. Both run the same pipeline
+uses a fine-tuned local 1Bâ€“3B student for deployment. Both run the same pipeline
 and return a `SemanticParseResult` (semantic contract `2.0.0`): the source
 document, the parse provenance, and the validated extraction.
 
 ## Architecture
 
-### End-to-end teacher–student flow
+### End-to-end teacherâ€“student flow
 
 ```mermaid
 flowchart TD
     subgraph offline["Offline annotation and dataset stage"]
         source["Source sentence<br/>The Supplier shall deliver the Goods."]
         teacher["ReferenceSemanticParser<br/>large teacher model"]
-        draft["Model extraction JSON<br/>Evaluation · deliver · supplier · goods"]
+        draft["Model extraction JSON<br/>Evaluation Â· deliver Â· supplier Â· goods"]
         checked["Normalization, validation,<br/>recorded repairs, catalog checks"]
         results[("Parse results JSONL")]
         rejected[("Rejected JSONL<br/>source line + reason")]
-        pairs[("Student pairs JSONL<br/>source → extraction")]
+        pairs[("Student pairs JSONL<br/>source â†’ extraction")]
 
         source --> teacher --> draft --> checked --> results --> pairs
         checked -. invalid .-> rejected
@@ -152,8 +152,11 @@ plus every catalog relation with its arity.
 [`symbolic_pipeline`](../symbolic_pipeline/miner_adapter.py) is the only code
 that converts parser results into the hybrid miner's `SemanticDocument`. An
 `Evaluation` becomes an event with role facts, a specific rule becomes facts
-conditional on a clause, and each entity kind becomes a kind fact. Content the
-miner contract cannot express is rejected with a reason.
+conditional on a clause, a universal rule becomes a miner `SemanticRule` with
+signed literals, and each entity kind becomes a kind fact. Content the miner
+contract cannot express is rejected with a reason: a negative catalog fact,
+modality on a catalog predicate or inside a universal rule, and an Evaluation
+without participants inside a universal rule.
 
 The parser never imports hybrid-miner. It loads the modules a bundle manifest
 selects with [`catalog.py`](ontology/catalog.py);
@@ -347,26 +350,21 @@ of overwriting artifacts, and `--skip-training` evaluates an existing
 checkpoint. The exact-match score compares extractions field by field, so it is
 sensitive to IDs and order; it is not a semantic-equivalence score.
 
-## Known limitation
-
-The miner adapter does not convert universal rules yet; such a document is
-written to the rejected file with its reason.
-
 ## Repository structure
 
 ```text
 configs/parser_config/
-├── atomese_grammar.yaml        # MeTTa grammar words and operators
-├── catalog_document_prompt.yaml
-├── catalog_document_examples.jsonl
-├── model_backend.yaml          # provider and model profiles
-├── parser_prompt.yaml          # shared extraction guidance
-└── student_config.yaml
+â”œâ”€â”€ atomese_grammar.yaml        # MeTTa grammar words and operators
+â”œâ”€â”€ catalog_document_prompt.yaml
+â”œâ”€â”€ catalog_document_examples.jsonl
+â”œâ”€â”€ model_backend.yaml          # provider and model profiles
+â”œâ”€â”€ parser_prompt.yaml          # shared extraction guidance
+â””â”€â”€ student_config.yaml
 parser/
-├── grammar/atomese.py          # Atomese model, parser, and validation
-├── ontology/                   # versioned relation catalogs and bundle manifest
-├── semantic/                   # parser, contract, export, CLI
-└── student/                    # student prompt and training
+â”œâ”€â”€ grammar/atomese.py          # Atomese model, parser, and validation
+â”œâ”€â”€ ontology/                   # versioned relation catalogs and bundle manifest
+â”œâ”€â”€ semantic/                   # parser, contract, export, CLI
+â””â”€â”€ student/                    # student prompt and training
 symbolic_pipeline/              # parser-to-miner adapter
 tests/                          # offline unit and integration tests
 ```
@@ -393,4 +391,4 @@ Implemented: the contract `2.0.0` output, catalog validation, recorded
 repairs, deterministic MeTTa rendering, configurable provider backends,
 checkpointed export with resume, student data and training, the
 `symbolic_pipeline` adapter to hybrid-miner, and the contract `2.0.0` teacher
-prompt with its worked examples. Next: adapter support for universal rules.
+prompt with its worked examples, and universal rules in the miner adapter.
