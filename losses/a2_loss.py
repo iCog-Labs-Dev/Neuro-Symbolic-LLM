@@ -58,7 +58,7 @@ def contrastive_future_loss(
     max_anchors_per_seq: int | None = None,
     mask: jax.Array | None = None,
     backend: str = "fabricpc",
-    cpc_detach_query: bool = True,
+    cpc_detach_query: bool = False,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """InfoNCE between the predicted future code and the true future code.
 
@@ -329,10 +329,10 @@ def residual_smoothness_loss(
 
 @dataclass(frozen=True)
 class DetachConfig:
-    """First-run gradient controls; targets are unconditionally detached."""
+    """Coupled auxiliary inputs by default; targets are always detached."""
 
-    hid_detach_input: bool = True
-    cpc_detach_query: bool = True
+    hid_detach_input: bool = False
+    cpc_detach_query: bool = False
 
     def __post_init__(self) -> None:
         for name in ("hid_detach_input", "cpc_detach_query"):
@@ -341,7 +341,7 @@ class DetachConfig:
 
 
 def hidden_prediction_term(bank, params, layer, source, target, config, mask=None):
-    """Detach before the predictor, preserving gradients on its trainable weights."""
+    """Apply optional input detachment while keeping predictor weights live."""
     pred = bank.predict(params, layer, source, detach_input=config.hid_detach_input)
     return hidden_prediction_loss(pred, target, source, config, mask=mask)
 

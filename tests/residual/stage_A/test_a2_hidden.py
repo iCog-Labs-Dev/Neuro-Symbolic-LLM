@@ -58,7 +58,7 @@ FF = 16
 def make_cfg(
     *,
     hid: float = 0.0,
-    detach: bool = True,
+    detach: bool = False,
     monitor: str = "off",
     cpc: float = 0.0,
     stab: float = 0.0,

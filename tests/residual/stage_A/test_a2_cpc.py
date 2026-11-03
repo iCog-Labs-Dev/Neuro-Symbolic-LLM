@@ -129,7 +129,6 @@ def _loss(substrate, adapter, cfg, input_ids, adapter_params, heads, mask=None):
         corrected=corrected,
         base=base,
         mask=mask,
-        cpc_detach_query=False,
     )
 
 

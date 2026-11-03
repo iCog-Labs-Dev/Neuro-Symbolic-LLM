@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from losses.a2_loss import anchor_loss
-from losses.stability_loss import hep_nudge_loss
+from metrics.representation import hep_nudge_loss
 from residual.fpc_energy import anchor_sq_distance
 from residual.hep import init_hep
 

@@ -63,7 +63,7 @@ class PredictorConfig:
     ff_dim: int = 256
     out_init_std: float | None = None
     predict_delta: bool = False
-    detach_input: bool = True
+    detach_input: bool = False
     layers: list[int] | None = None
     seed: int = 0
 

@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from losses.stability_loss import settling_loss
+from metrics.representation import settling_loss
 
 
 def test_settling_reduction_averages_steps_dimensions_sites_and_valid_tokens():

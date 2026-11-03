@@ -1,1 +1,1 @@
-"""Stage-specific loss functions; A3 settling losses are imported explicitly."""
+"""Feedforward A2 losses; A3 settling helpers live in metrics.representation."""

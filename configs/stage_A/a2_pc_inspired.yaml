@@ -19,8 +19,8 @@ objective:
   lambda_kl: 0.0        # Same meaning as in A1
   lambda_wd: 0.0
   seed: 0               # auxiliary head seed
-  hid_detach_input: true
-  cpc_detach_query: true
+  hid_detach_input: false # hidden-prediction gradients also train the adapter
+  cpc_detach_query: false # CPC query gradients also train the adapter
   hid:
     lambda_hid: 0.1      # local predictor/hidden prediction loss weight
     # corrected_teacher (Option B): recommended by the auxiliary-loss review

@@ -210,7 +210,7 @@ def test_gradient_audit() -> None:
     anchors, targets = randn(4, 8, D, seed=13), randn(4, 8, D, seed=14)
 
     def f(q, a, anchors, targets):
-        return loss_fn(q, a, anchors, targets, offset=1, tau=0.1)[0]
+        return contrastive_future_loss(q, a, anchors, targets, offset=1, tau=0.1)[0]
 
     gq, ga, g_anchor, g_target = jax.grad(f, argnums=(0, 1, 2, 3))(
         q, a, anchors, targets

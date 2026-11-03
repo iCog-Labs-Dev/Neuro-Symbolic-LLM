@@ -147,7 +147,7 @@ class StabLossConfig:
     """Feedforward stability: direct clean-base anchoring and residual smoothness.
 
     The direct anchor is not a settling anchor. HEP and inference-step penalties
-    belong to losses.stability_loss and are not accepted by this A2 schema.
+    belong to metrics.representation and are not accepted by this A2 schema.
     """
 
     weight: float = 0.0
@@ -533,7 +533,7 @@ def cpc_term(
     corrected: Mapping[int, jax.Array],
     base: Mapping[int, jax.Array] | None = None,
     mask: jax.Array | None = None,
-    cpc_detach_query: bool = True,
+    cpc_detach_query: bool = False,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Unweighted ``L_cpc`` (mean over sites ``(l, k)``) and its diagnostics."""
     if not corrected:

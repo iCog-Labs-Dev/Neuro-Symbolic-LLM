@@ -105,7 +105,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="detach_input",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Stop L_hidden-pred gradients into the adapter.",
+        help="Stop L_hidden-pred gradients into the adapter (config default: false).",
     )
     parser.add_argument(
         "--predict-delta", action=argparse.BooleanOptionalAction, default=None
@@ -114,7 +114,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--cpc-detach-query",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Detach the causal CPC input from column parameters (default: true).",
+        help="Detach the causal CPC input from column parameters (config default: false).",
     )
     parser.add_argument("--predictor-lr-mult", type=float, default=None)
     # Stability

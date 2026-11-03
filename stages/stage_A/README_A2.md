@@ -15,7 +15,7 @@ supplies differentiable heads and energy components. Latent settling belongs to 
 | [residual/](../../residual/) | FabricPC predictors, CPC heads, and stability metrics |
 
 | [losses/a2_loss.py](../../losses/a2_loss.py) | Feedforward losses and detach controls |
-| [losses/stability_loss.py](../../losses/stability_loss.py) | A3-only settling penalties; never imported by A2 |
+| [metrics/representation.py](../../metrics/representation.py) | Representation metrics and A3-only settling/HEP helpers |
 | [stage_base.py](../stage_base.py) | Shared preparation, training, evaluation, optimizer and logging |
 
 ## Objective and gradient ownership
@@ -31,9 +31,9 @@ L_stability = w_anch * L_base_anchor + w_smooth * L_residual_smoothness
 | --- | --- |
 | Task, base KL, adapter weight regularization | Adapter |
 | Hidden prediction, detached input | Hidden predictor only |
-| Hidden prediction, coupled input | Hidden predictor and adapter |
-| CPC, detached query (default) | CPC heads only |
-| CPC, live query | CPC heads and adapter |
+| Hidden prediction, coupled input (default) | Hidden predictor and adapter |
+| CPC, detached query | CPC heads only |
+| CPC, live query (default) | CPC heads and adapter |
 | Base-state anchor and residual smoothness | Adapter |
 
 Setting all auxiliary weights to zero gives the A1 control. Teachers and CPC
@@ -50,11 +50,12 @@ positive and negative targets are detached. Evaluation uses causal feedforward p
 Report these as separate experiments. A flexible predictor fitting the base
 target does not itself bound hidden-state drift.
 
-The main YAML uses `objective.hid_detach_input: true` and
-`objective.cpc_detach_query: true`. These detach column states before the heads;
-the heads still learn. Use `--no-hid-detach-input` (legacy alias:
-`--no-detach-input`) or `--no-cpc-detach-query` for coupled ablations. The
-`full` and `hid_coupled` arms enable hidden-loss gradients into the adapter.
+The config defaults and main YAML use `objective.hid_detach_input: false` and
+`objective.cpc_detach_query: false`. Enabled hidden-prediction and CPC losses
+therefore train the adapter through their input/query branches as well as their
+heads. Teacher targets remain detached. Use `--hid-detach-input` (legacy alias:
+`--detach-input`) or `--cpc-detach-query` for detached controls. The `hid_detached`
+arm explicitly detaches hidden inputs; `full` and `hid_coupled` couple them.
 `predictor_lr_mult` scales the predictor LR relative to `training.learning_rate`.
 
 ### Feedforward and settling stability
@@ -65,13 +66,15 @@ It requires no settling and may update columns. Raw drift is also logged as
 With only corrected-state targets, enable the diagnostic monitor to request
 the clean-base forward needed for drift measurement.
 
-A2 contains no HEP or inference-step objective. A3's separate stability module
-uses a fixed, detached feedforward reference and averages valid tokens,
-dimensions, sites and inference steps. A2 never imports that module.
+A2 contains no HEP or inference-step objective. The A3 settling helpers in
+[metrics/representation.py](../../metrics/representation.py) use a fixed, detached
+feedforward reference and average valid tokens, dimensions, sites and inference
+steps. A2 uses the representation metrics but never calls the settling/HEP helpers.
 
 Older A2 configurations containing `stab.hep`, `w_hep`, or `w_step` must remove
-those fields; they are rejected rather than silently ignored. The new CPC
-query-detachment default changes gradient routing from earlier coupled runs.
+those fields; they are rejected rather than silently ignored. Old saved configs
+with explicit detach flags keep their recorded routing. Use
+`--no-hid-detach-input --no-cpc-detach-query` to override them for coupled runs.
 
 ## GPU setup
 
@@ -99,7 +102,7 @@ Run the main A2 experiment and its matched A1 control:
 ```bash
 python experiments/run_stage_a2.py \
   --config configs/stage_A/a2_pc_inspired.yaml \
-  --seed 0 --audit --run-name a2-detached
+  --seed 0 --audit --run-name a2-coupled
 
 python experiments/run_stage_a2.py \
   --config configs/stage_A/a2_pc_inspired.yaml \
@@ -122,7 +125,7 @@ change it and `--epochs` to override epochs for every domain.
 
 Use `--hidden-target base_anchor` to select the clean-base hidden target.
 Explicit `--lambda-*` arguments override the arm's weights. CPC query detachment
-remains enabled unless explicitly disabled, including in the `full` arm.
+follows the config or CLI setting, including in the `full` arm; its default is false.
 
 ## Evaluate a saved checkpoint
 
@@ -131,13 +134,13 @@ the checkpoint:
 
 ```bash
 python experiments/run_stage_a2.py \
-  --config runs/a2-detached/config.yaml \
-  --eval-checkpoint runs/a2-detached/params/task_2_scotus.npz \
+  --config runs/a2-coupled/config.yaml \
+  --eval-checkpoint runs/a2-coupled/params/task_2_scotus.npz \
   --split validation --report-internals
 
 python experiments/run_stage_a2.py \
-  --config runs/a2-detached/config.yaml \
-  --eval-checkpoint runs/a2-detached/params/task_2_scotus.npz \
+  --config runs/a2-coupled/config.yaml \
+  --eval-checkpoint runs/a2-coupled/params/task_2_scotus.npz \
   --split test --report-internals
 ```
 

@@ -73,6 +73,8 @@ def setup():
 def test_detach_flags_block_column_gradients_but_heads_and_task_terms_stay_live(setup):
     """Each auxiliary loss is checked independently, with a nonzero adapter probe."""
     substrate, adapter, config, ids, params = setup
+    detached = replace(config, hid_detach_input=True, cpc_detach_query=True)
+    assert not config.hid_detach_input and not config.cpc_detach_query
 
     def terms(p, cfg=config):
         return a2_objective(
@@ -80,11 +82,11 @@ def test_detach_flags_block_column_gradients_but_heads_and_task_terms_stay_live(
         )[1]
 
     for term, prefix in (("hid", "pred_"), ("cpc", "cpc")):
-        grad = jax.grad(lambda p, term=term: terms(p)[term])(params)
+        grad = jax.grad(lambda p, term=term: terms(p, detached)[term])(params)
         assert tree_norm(adapter_params(grad)) == 0.0
         assert tree_norm({k: v for k, v in grad.items() if k.startswith(prefix)}) > 0
-        coupled = replace(config, hid_detach_input=False, cpc_detach_query=False)
-        grad = jax.grad(lambda p, term=term, cfg=coupled: terms(p, cfg)[term])(params)
+        # No explicit flags: the default objective must train the adapter too.
+        grad = jax.grad(lambda p, term=term: terms(p)[term])(params)
         assert tree_norm(adapter_params(grad)) > 0
 
     for term in ("task", "kl", "stab_anch", "stab_smooth"):
@@ -130,36 +132,63 @@ def test_a2_schema_defaults_and_settling_separation():
     cfg = load_configs(
         root / "configs" / "stage_A" / "a2_pc_inspired.yaml", A2Config
     ).objective
-    assert cfg.hid_detach_input is True and cfg.cpc_detach_query is True
+    for candidate in (cfg, A2Config(), A2Config.from_dict({})):
+        assert candidate.hid_detach_input is False
+        assert candidate.cpc_detach_query is False
+        assert candidate.predictor.detach_input is False
+    assert PredictorConfig().detach_input is False
     assert A2Config.from_dict(asdict(cfg)) == cfg
+    legacy = A2Config.from_dict({"hid": {"predictor": {"detach_input": True}}})
+    assert legacy.hid_detach_input is True and legacy.predictor.detach_input is True
     for name in ("w_step", "w_hep", "hep"):
         with pytest.raises(ValueError, match="Unknown"):
             A2Config.from_dict({"stab": {name: 1}})
     for name in ("hid_detach_input", "cpc_detach_query"):
         with pytest.raises(ValueError, match="boolean"):
             A2Config.from_dict({name: 1})
-    for path in (root / "stages" / "stage_A").glob("a2*.py"):
-        imports = [
-            n.module
-            for n in ast.walk(ast.parse(path.read_text()))
-            if isinstance(n, ast.ImportFrom)
-        ]
-        assert "losses.stability_loss" not in imports
+    settling_helpers = {
+        "settling_loss",
+        "hep_nudge",
+        "hep_nudge_loss",
+        "output_error",
+        "v_hidden_size",
+    }
+    paths = [
+        *(root / "stages" / "stage_A").glob("a2*.py"),
+        root / "experiments" / "run_stage_a2.py",
+    ]
+    for path in paths:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "metrics.representation"
+            ):
+                assert settling_helpers.isdisjoint(alias.name for alias in node.names)
+                assert all(alias.name != "*" for alias in node.names)
 
 
-def test_runner_detach_overrides_and_predictor_multiplier(runner):
+@pytest.mark.parametrize(
+    "flags, detached",
+    [
+        ([], False),
+        (["--hid-detach-input", "--cpc-detach-query"], True),
+        (["--no-hid-detach-input", "--no-cpc-detach-query"], False),
+    ],
+)
+def test_runner_detach_overrides_and_predictor_multiplier(runner, flags, detached):
     cfg = load_configs(REPO_ROOT / "configs/stage_A/a2_pc_inspired.yaml", A2Config)
-    args = runner.parse_args(
-        [
-            "--no-hid-detach-input",
-            "--no-cpc-detach-query",
-            "--predictor-lr-mult",
-            "2",
-        ]
-    )
+    if "--no-hid-detach-input" in flags:
+        cfg = replace(
+            cfg,
+            objective=replace(
+                cfg.objective, hid_detach_input=True, cpc_detach_query=True
+            ),
+        )
+    args = runner.parse_args([*flags, "--predictor-lr-mult", "2"])
     out = runner.apply_overrides(cfg, args).objective
-    assert not out.hid_detach_input and not out.cpc_detach_query
-    assert out.hid_coupled and not out.predictor.detach_input
+    assert out.hid_detach_input is detached and out.cpc_detach_query is detached
+    assert out.hid_coupled is (not detached)
+    assert out.predictor.detach_input is detached
     assert out.predictor_lr_mult == 2.0
 
 
