@@ -140,7 +140,7 @@ class RunConfig:
     # Stage objective config: any frozen dataclass with ``from_dict``.
     objective: Any
     training: TrainingConfig
-    domains: tuple[DomainConfig, ...]
+    domains: tuple[DomainConfig, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,16 +153,24 @@ class RunConfig:
 
 def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
     raw = yaml.safe_load(path.read_text()) or {}
+
     unknown = sorted(set(raw) - set(SECTIONS))
     if unknown:
         raise ValueError(f"Unknown config sections in {path}: {unknown}.")
-    domains_raw = raw.get("domains")
-    if not isinstance(domains_raw, list) or not domains_raw:
-        raise ValueError(f"{path}: 'domains' must be a non-empty list of domains.")
-    domains = tuple(DomainConfig.from_dict(d) for d in domains_raw)
-    names = [d.name for d in domains]
+
+    # Runtime datasets are now managed centrally by runtime/data_loader.py.
+    # Keep optional domains temporarily for backward compatibility.
+    domains_raw = raw.get("domains", [])
+
+    if not isinstance(domains_raw, list):
+        raise ValueError(f"{path}: 'domains' must be a list when provided.")
+
+    domains = tuple(DomainConfig.from_dict(domain) for domain in domains_raw)
+
+    names = [domain.name for domain in domains]
     if len(set(names)) != len(names):
         raise ValueError(f"{path}: domain names must be unique, got {names}.")
+
     return RunConfig(
         adapter=ResidualConfig.from_dict(raw.get("adapter") or {}),
         objective=objective_cls.from_dict(raw.get("objective") or {}),

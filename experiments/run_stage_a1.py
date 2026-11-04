@@ -29,19 +29,17 @@ if str(REPO_ROOT) not in sys.path:
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
+from runtime.data_loader import load_runtime_data  # noqa: E402
 from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
 from stages.stage_A.a1 import A1Config, a1_objective  # noqa: E402
 from stages.stage_base import (  # noqa: E402
-    Domain,
     RunConfig,
     configure_logging,
     evaluate,
     evaluate_checkpoint,
     load_configs,
-    load_token_blocks,
     log_experiment_header,
     log_final_summary,
-    make_eval_set,
     run_sequential,
 )
 
@@ -171,21 +169,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Load data before creating the run directory, so bad datasets fail fast.
     log.info("Preparing datasets across %d domain(s)...", len(cfg.domains))
-    domains = []
-    for d in cfg.domains:
-        train_blocks = load_token_blocks(substrate, d, d.train_split, train_cfg.seq_len)
-        eval_blocks = load_token_blocks(substrate, d, d.eval_split, train_cfg.seq_len)
-        domains.append(
-            Domain(
-                name=d.name,
-                train_blocks=train_blocks,
-                eval_set=make_eval_set(
-                    eval_blocks, train_cfg.batch_size, train_cfg.eval_batches
-                ),
-                epochs=train_cfg.epochs if d.epochs is None else d.epochs,
-            )
-        )
 
+    runtime_data = load_runtime_data(
+        config_path=REPO_ROOT / "configs" / "runtime_datasets.yaml",
+        tokenizer=substrate.tokenizer,
+        sequence_length=train_cfg.seq_len,
+        batch_size=train_cfg.batch_size,
+        eval_batches=train_cfg.eval_batches,
+        default_epochs=train_cfg.epochs,
+    )
+
+    domains = runtime_data.tasks
     run_name = args.run_name or default_run_name("a1")
     with RunWriter(train_cfg.output_dir, run_name) as writer:
         writer.write_config(cfg.to_dict())
@@ -233,20 +227,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.eval_batches is not None
             else train_cfg.eval_batches
         )
-        log.info("Running final test evaluation across %d domains...", len(cfg.domains))
+        log.info(
+            "Running final test evaluation across %d tasks...",
+            len(runtime_data.test_blocks),
+        )
+
         test_results = {}
-        for d in cfg.domains:
-            test_blocks = load_token_blocks(
-                substrate, d, d.test_split, train_cfg.seq_len
+
+        for task_name, test_set in runtime_data.get_test_sets(
+            train_cfg.batch_size,
+            test_eval_batches,
+        ).items():
+            test_results[task_name] = evaluate(
+                substrate,
+                adapter,
+                params,
+                test_set,
+                jit=train_cfg.jit,
             )
-            test_set = make_eval_set(
-                test_blocks, train_cfg.batch_size, test_eval_batches
+
+            writer.log(
+                "test",
+                domain=task_name,
+                **test_results[task_name],
             )
-            test_results[d.name] = evaluate(
-                substrate, adapter, params, test_set, jit=train_cfg.jit
-            )
-            writer.log("test", domain=d.name, **test_results[d.name])
+
         summary["test"] = test_results
+        summary["runtime_data"] = runtime_data.metadata
         writer.write_json("results.json", summary)
 
     log_final_summary(log, summary, frozen, start_time=start_time)

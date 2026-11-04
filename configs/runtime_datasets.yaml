@@ -1,0 +1,45 @@
+
+runtime:
+  source: separate
+  seed: 42
+
+datasets:
+  - name: eurlex
+    type: separate
+    dataset: coastalcph/lex_glue
+    config: eurlex
+    train_split: "train[:5000]"
+    validation_split: "validation[:500]"
+    test_split: "test[:500]"
+    text_field: text
+    separator: "\n\n"
+
+  - name: ledgar
+    type: separate
+    dataset: coastalcph/lex_glue
+    config: ledgar
+    train_split: "train[:20000]"
+    validation_split: "validation[:2000]"
+    test_split: "test[:2000]"
+    text_field: text
+    separator: "\n\n"
+
+  - name: scotus
+    type: separate
+    dataset: coastalcph/lex_glue
+    config: scotus
+    train_split: "train[:500]"
+    validation_split: "validation[:200]"
+    test_split: "test[:200]"
+    text_field: text
+    separator: "\n\n"
+
+  - name: rocstories
+    type: stories
+    dataset: hamishivi/ROCStories
+    train_split: train
+    validation_split: validation
+    test_split: test
+    text_field: text
+    stories_per_task: 10
+    shuffle_train: true
