@@ -8,6 +8,7 @@ records. Each SemanticParseResult becomes one SemanticDocument:
 - the consequents of a specific rule become hypothetical facts that are
   conditional on a Clause entity covering its antecedents;
 - each entity kind becomes a provisional kind fact;
+- a negative assertion becomes a negative miner fact (signed head);
 - content the miner contract cannot express raises MinerAdapterError.
 """
 
@@ -128,6 +129,7 @@ class _SemanticDocumentBuilder:
         *,
         relation: str | None = None,
         conditional_on: str | None = None,
+        polarity: str = "positive",
     ) -> None:
         """Add one miner fact that inherits the evidence of a parser assertion."""
 
@@ -139,6 +141,7 @@ class _SemanticDocumentBuilder:
                 status=_STATUS,
                 factuality=source.factuality,
                 conditional_on=conditional_on,
+                polarity=polarity,
                 confidence=source.confidence,
                 source_spans=tuple(self._span(quote) for quote in source.evidence),
                 alternatives=tuple(dict.fromkeys(source.alternatives)),
@@ -155,16 +158,12 @@ class _SemanticDocumentBuilder:
             self.add_evaluation(assertion, conditional_on=conditional_on)
             return
 
-        if assertion.polarity == "negative":
-            raise MinerAdapterError(
-                f"Negated {assertion.predicate} has no encoding in the miner contract"
-            )
-
         self.add_fact(
             assertion.predicate,
             [argument.entity_id for argument in assertion.arguments],
             assertion,
             conditional_on=conditional_on,
+            polarity=assertion.polarity,
         )
 
     def add_evaluation(
@@ -179,6 +178,7 @@ class _SemanticDocumentBuilder:
             assertion,
             relation=assertion.relation,
             conditional_on=conditional_on,
+            polarity=assertion.polarity,
         )
 
         for argument in assertion.arguments:
@@ -198,9 +198,6 @@ class _SemanticDocumentBuilder:
                     relation=f"role_{argument.role}",
                     conditional_on=conditional_on,
                 )
-
-        if assertion.polarity == "negative":
-            self.add_fact("Negated", [event], assertion, conditional_on=conditional_on)
 
         if assertion.modality != "none":
             self.add_fact(

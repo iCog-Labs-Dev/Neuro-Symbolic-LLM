@@ -22,6 +22,100 @@ def _provenance() -> dict[str, object]:
     }
 
 
+def test_negative_evaluation_uses_signed_relation_fact() -> None:
+    result = SemanticParseResult.model_validate(
+        {
+            "document": {
+                "document_id": "negative-evaluation",
+                "corpus_id": "unit-tests",
+                "source_text": "The lamp was not repaired by Sora.",
+            },
+            "provenance": _provenance(),
+            "extraction": {
+                "entities": [
+                    {
+                        "id": "lamp",
+                        "entity_type": "Entity",
+                        "mention": {"text": "lamp"},
+                    },
+                    {
+                        "id": "sora",
+                        "entity_type": "Entity",
+                        "mention": {"text": "Sora"},
+                    },
+                ],
+                "assertions": [
+                    {
+                        "predicate": "Evaluation",
+                        "relation": "repair",
+                        "arguments": [
+                            {"entity_id": "lamp", "role": "patient"},
+                            {"entity_id": "sora", "role": "agent"},
+                        ],
+                        "polarity": "negative",
+                        "fallback": True,
+                        "confidence": 0.95,
+                        "evidence": [{"text": "The lamp was not repaired by Sora."}],
+                    }
+                ],
+                "rules": [],
+            },
+        }
+    )
+
+    document = _adapt(result)
+
+    relation_fact = next(
+        fact
+        for fact in document.assertions
+        if fact.predicate == "ProvisionalRelation"
+        and fact.provisional_relation_id == "repair"
+    )
+    assert relation_fact.polarity == "negative"
+    assert not any(fact.predicate == "Negated" for fact in document.assertions)
+
+
+def test_negative_non_evaluation_assertion_is_preserved() -> None:
+    result = SemanticParseResult.model_validate(
+        {
+            "document": {
+                "document_id": "negative-has",
+                "corpus_id": "unit-tests",
+                "source_text": "Nora does not own the car.",
+            },
+            "provenance": _provenance(),
+            "extraction": {
+                "entities": [
+                    {
+                        "id": "nora",
+                        "entity_type": "Entity",
+                        "mention": {"text": "Nora"},
+                    },
+                    {"id": "car", "entity_type": "Entity", "mention": {"text": "car"}},
+                ],
+                "assertions": [
+                    {
+                        "predicate": "Has",
+                        "arguments": [
+                            {"entity_id": "nora", "role": "owner"},
+                            {"entity_id": "car", "role": "possessed"},
+                        ],
+                        "polarity": "negative",
+                        "confidence": 0.95,
+                        "evidence": [{"text": "Nora does not own the car."}],
+                    }
+                ],
+                "rules": [],
+            },
+        }
+    )
+
+    document = _adapt(result)
+
+    has_fact = next(fact for fact in document.assertions if fact.predicate == "Has")
+    assert has_fact.polarity == "negative"
+
+
 def test_converts_repeated_unicode_source_quotes_to_character_spans() -> None:
     source = "🙂 Mira left. Mira returned."
     result = SemanticParseResult.model_validate(
