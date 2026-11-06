@@ -152,8 +152,11 @@ plus every catalog relation with its arity.
 [`symbolic_pipeline`](../symbolic_pipeline/miner_adapter.py) is the only code
 that converts parser results into the hybrid miner's `SemanticDocument`. An
 `Evaluation` becomes an event with role facts, a specific rule becomes facts
-conditional on a clause, and each entity kind becomes a kind fact. Content the
-miner contract cannot express is rejected with a reason.
+conditional on a clause, a universal rule becomes a miner `SemanticRule` with
+signed literals, a negative assertion becomes a negative miner fact, and each
+entity kind becomes a kind fact. Content the miner contract cannot express is
+rejected with a reason: modality inside a universal rule, and an Evaluation
+without participants inside a universal rule.
 
 The parser never imports hybrid-miner. It loads the modules a bundle manifest
 selects with [`catalog.py`](ontology/catalog.py);
@@ -346,11 +349,6 @@ continues an interrupted extraction, `--force` starts a fresh child run instead
 of overwriting artifacts, and `--skip-training` evaluates an existing
 checkpoint. The exact-match score compares extractions field by field, so it is
 sensitive to IDs and order; it is not a semantic-equivalence score.
-
-## Known limitation
-
-The miner adapter does not convert universal rules yet; such a document is
-written to the rejected file with its reason.
 
 ## Repository structure
 
