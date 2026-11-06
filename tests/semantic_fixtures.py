@@ -4,7 +4,6 @@ import json
 
 from parser.ontology.catalog import load_ontology_catalog
 from parser.semantic.backends import CallableBackend
-from parser.semantic.catalog_prompt import build_catalog_document_prompt
 from parser.semantic.catalog_student import make_student_pair
 from parser.semantic.schema import (
     SEMANTIC_CONTRACT_VERSION,
@@ -15,6 +14,7 @@ from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParserConfig,
 )
+from parser.student.student_prompt import build_student_prompt_spec
 
 
 def target(text):
@@ -64,15 +64,20 @@ def pair(text="Mira left.", *, catalog=None):
 
 
 def write_checkpoint_metadata(path):
-    """Write training metadata for a compatible student checkpoint."""
+    """Write metadata for a compatible combined-prompt student checkpoint."""
     catalog = load_ontology_catalog()
+
+    prompt = build_student_prompt_spec(
+        "Checkpoint.",
+        catalog=catalog,
+    )
+
     (path / "training_metadata.json").write_text(
         json.dumps(
             {
                 "target_contract_version": SEMANTIC_CONTRACT_VERSION,
-                "prompt_version": build_catalog_document_prompt(
-                    "Checkpoint.", catalog=catalog
-                ).version,
+                "prompt_format": "catalog-combined-compact-v1",
+                "prompt_version": prompt.version,
                 "ontology_versions": list(catalog.versions),
             }
         ),

@@ -135,7 +135,7 @@ def test_returns_validated_result_with_runtime_provenance() -> None:
         2,
         len(source),
     )
-    assert f"<source_text>\n{source}\n</source_text>" in backend.calls[0][0]
+    assert f"Source text:\n{source}" in backend.calls[0][0]
     assert SemanticParseResult.model_validate_json(result.model_dump_json()) == result
 
 

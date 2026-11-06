@@ -23,7 +23,7 @@ from tests.semantic_fixtures import target
 
 def make_parser(payload=None):
     def generate(*, prompt, model):
-        text = prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
+        text = prompt.rsplit("Source text:\n", 1)[1]
         return json.dumps(payload if payload is not None else target(text))
 
     return ReferenceSemanticParser(

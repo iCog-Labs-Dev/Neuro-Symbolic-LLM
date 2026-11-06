@@ -102,6 +102,14 @@ profiles:
     think: false
     temperature: 0.0
 
+  ollama_qwen3_32b_teacher:
+    provider: ollama
+    model: qwen3:32b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 4096
+    num_ctx: 32768
+    think: false
+    temperature: 0.0
   transformers_local:
     # A locally downloaded Hugging Face model; no provider API key is required.
     provider: transformers-local

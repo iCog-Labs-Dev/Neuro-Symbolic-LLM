@@ -22,16 +22,16 @@ def backend(monkeypatch):
     def generate(*, prompt, model):
         calls.append(prompt)
 
-        if '"run_general"' in prompt and '"run_discourse"' in prompt:
+        # Router call: return the current ParserRoute contract.
+        if "routing component" in prompt.lower():
             return json.dumps(
                 {
-                    "run_general": True,
                     "run_discourse": False,
                 }
             )
 
-        source = prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
-
+        # General extraction call.
+        source = prompt.rsplit("Source text:\n", 1)[1]
         return json.dumps(target(source))
 
     monkeypatch.setattr(

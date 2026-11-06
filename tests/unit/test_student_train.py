@@ -29,9 +29,19 @@ class TinyModel(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
         self.device = torch.device("cpu")
+        self.config = SimpleNamespace(use_cache=True)
+        self.gradient_checkpointing_enabled = False
+        self.gradient_checkpointing_kwargs = None
 
     def num_parameters(self):
         return 1
+
+    def gradient_checkpointing_enable(
+        self,
+        gradient_checkpointing_kwargs=None,
+    ):
+        self.gradient_checkpointing_enabled = True
+        self.gradient_checkpointing_kwargs = gradient_checkpointing_kwargs
 
     def forward(self, input_ids, attention_mask, labels):
         targets = labels[:, 1:].float()

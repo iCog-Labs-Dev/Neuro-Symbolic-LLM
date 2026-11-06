@@ -156,9 +156,9 @@ def test_prompt_contains_source_context_and_selected_catalog() -> None:
     prompt = parser.build_document_prompt("Mira left.", context="Earlier event.")
 
     assert "Ontology versions: upper-v1" in prompt.text
-    assert "<reference_context>\nEarlier event.\n</reference_context>" in prompt.text
-    assert "<source_text>\nMira left.\n</source_text>" in prompt.text
-    assert prompt.version.startswith("general-v3+sha256.")
+    assert "Background context:\nEarlier event." in prompt.text
+    assert "Source text:\nMira left." in prompt.text
+    assert prompt.version.startswith("general-v1+sha256.")
     assert prompt.version == parser.prompt_version
 
 
@@ -235,7 +235,8 @@ def test_context_is_not_a_source_for_entity_mentions_or_evidence() -> None:
 
     with pytest.raises(SemanticParseError, match="not in the source text"):
         parser.parse(source, context="Nora arrived yesterday.")
-    assert "<reference_context>\nNora arrived yesterday." in backend.calls[0][0]
+    assert "Background context:\nNora arrived yesterday." in backend.calls[0][0]
+    assert "Source text:\nShe left." in backend.calls[0][0]
 
 
 def test_preserves_specific_rule_and_renders_hypothetical_literals() -> None:

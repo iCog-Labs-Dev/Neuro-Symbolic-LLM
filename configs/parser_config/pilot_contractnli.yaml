@@ -1,0 +1,16 @@
+
+seed: 42
+
+min_chars: 20
+max_chars: 600
+
+sources:
+  - name: contractnli
+    domain: legal_conditional
+    kind: hf_list_field
+    dataset: reuben256/contract-nli
+    split: train
+    field: evidence_texts
+    count: 30
+    streaming: false
+    max_scan: 3000

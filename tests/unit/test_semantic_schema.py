@@ -1,4 +1,4 @@
-"""Unit tests for the versioned semantic parser output contract."""
+"""Unit tests for the current combined semantic extraction contract."""
 
 from __future__ import annotations
 
@@ -8,16 +8,11 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from parser.semantic.catalog_prompt import build_discourse_prompt
 from parser.semantic.schema import (
     SEMANTIC_CONTRACT_VERSION,
-    DiscourseExtraction,
-    SemanticEntity,
     SemanticExtraction,
     SemanticParseResult,
-    SourceQuote,
 )
-from parser.semantic.semantic_parser import _BaseSemanticParser
 
 CATALYST_SOURCE = (
     "Although the catalyst doubled the reaction speed, "
@@ -75,36 +70,63 @@ def valid_result_data() -> dict[str, Any]:
 
 
 def catalyst_result_data() -> dict[str, Any]:
+    """Return a valid extraction for the catalyst example."""
     data = valid_result_data()
     data["document"]["source_text"] = CATALYST_SOURCE
 
-    data["extraction"]["entities"][0] = {
-        "id": "catalyst",
-        "entity_type": "Entity",
-        "mention": {
-            "text": "catalyst",
-            "occurrence": 0,
+    data["extraction"]["entities"] = [
+        {
+            "id": "catalyst",
+            "entity_type": "Entity",
+            "mention": {"text": "catalyst"},
         },
-    }
+        {
+            "id": "final_yield",
+            "entity_type": "Entity",
+            "mention": {"text": "final yield"},
+        },
+    ]
 
-    data["extraction"]["assertions"][0] = {
-        "predicate": "Evaluation",
-        "relation": "increase",
-        "arguments": [{"entity_id": "catalyst", "role": "agent"}],
-        "fallback": True,
-        "confidence": 0.98,
-        "evidence": [
-            {
-                "text": "the catalyst doubled the reaction speed",
-                "occurrence": 0,
-            }
-        ],
-    }
+    data["extraction"]["assertions"] = [
+        {
+            "predicate": "Evaluation",
+            "relation": "double",
+            "arguments": [
+                {"entity_id": "catalyst", "role": "agent"},
+            ],
+            "fallback": True,
+            "confidence": 0.98,
+            "evidence": [
+                {
+                    "text": "the catalyst doubled the reaction speed",
+                    "occurrence": 0,
+                }
+            ],
+        },
+        {
+            "predicate": "Evaluation",
+            "relation": "improve",
+            "arguments": [
+                {"entity_id": "catalyst", "role": "agent"},
+                {"entity_id": "final_yield", "role": "theme"},
+            ],
+            "fallback": True,
+            "polarity": "negative",
+            "confidence": 0.98,
+            "evidence": [
+                {
+                    "text": "it did not improve the final yield",
+                    "occurrence": 0,
+                }
+            ],
+        },
+    ]
 
     return data
 
 
 def implicit_proposition() -> dict[str, Any]:
+    """Return a source-grounded implicit proposition with symbolic meaning."""
     return {
         "id": "expected_1",
         "entity_type": "Proposition",
@@ -117,121 +139,252 @@ def implicit_proposition() -> dict[str, Any]:
                 "occurrence": 0,
             }
         ],
+        "symbolic_content": {
+            "predicate": "Evaluation",
+            "relation": "improve",
+            "arguments": [
+                {"entity_id": "catalyst", "role": "agent"},
+                {"entity_id": "final_yield", "role": "theme"},
+            ],
+            "fallback": True,
+            "polarity": "positive",
+            "factuality": "hypothetical",
+        },
     }
 
 
-def clause_a() -> SemanticEntity:
-    return SemanticEntity(
-        id="clause_a",
-        entity_type="Clause",
-        mention=SourceQuote(text="the catalyst doubled the reaction speed"),
-    )
+def append_implicit_proposition(data: dict[str, Any]) -> None:
+    """Append an implicit proposition to an extraction.
+
+    catalyst and final_yield must already be declared.
+    """
+    data["extraction"]["entities"].append(implicit_proposition())
 
 
-def clause_b() -> SemanticEntity:
-    return SemanticEntity(
-        id="clause_b",
-        entity_type="Clause",
-        mention=SourceQuote(text="it did not improve the final yield"),
-    )
-
-
-def expected_proposition() -> SemanticEntity:
-    return SemanticEntity.model_validate(implicit_proposition())
-
-
-def general_result() -> SemanticParseResult:
+def catalyst_combined_extraction() -> SemanticExtraction:
+    """Build a complete general and discourse extraction."""
     data = catalyst_result_data()
 
-    data["document"]["document_id"] = "doc_001"
     data["extraction"]["entities"].extend(
         [
-            clause_a().model_dump(mode="python"),
-            clause_b().model_dump(mode="python"),
+            {
+                "id": "clause_a",
+                "entity_type": "Clause",
+                "mention": {"text": "Although the catalyst doubled the reaction speed"},
+            },
+            {
+                "id": "clause_b",
+                "entity_type": "Clause",
+                "mention": {"text": "it did not improve the final yield"},
+            },
         ]
     )
 
-    return SemanticParseResult.model_validate(data)
+    append_implicit_proposition(data)
 
-
-def discourse_result() -> DiscourseExtraction:
-    return DiscourseExtraction.model_validate(
-        {
-            "entities": [
-                clause_a(),
-                clause_b(),
-                expected_proposition(),
-            ],
-            "assertions": [
-                {
-                    "predicate": "Concession",
-                    "arguments": [
-                        {"entity_id": "clause_a", "role": "statement"},
-                        {
-                            "entity_id": "clause_b",
-                            "role": "counter_statement",
-                        },
-                    ],
-                    "confidence": 0.95,
-                    "evidence": [{"text": CATALYST_SOURCE}],
-                },
-                {
-                    "predicate": "EvokesExpectation",
-                    "arguments": [
-                        {"entity_id": "clause_a", "role": "trigger"},
-                        {
-                            "entity_id": "expected_1",
-                            "role": "expected_result",
-                        },
-                    ],
-                    "confidence": 0.72,
-                    "evidence": [
-                        {
-                            "text": (
-                                "Although the catalyst doubled " "the reaction speed"
-                            )
-                        }
-                    ],
-                },
-                {
-                    "predicate": "Defeats",
-                    "arguments": [
-                        {
-                            "entity_id": "clause_b",
-                            "role": "defeating_outcome",
-                        },
-                        {
-                            "entity_id": "expected_1",
-                            "role": "prior_expectation",
-                        },
-                    ],
-                    "confidence": 0.85,
-                    "evidence": [{"text": "it did not improve the final yield"}],
-                },
-            ],
-        }
+    data["extraction"]["assertions"].extend(
+        [
+            {
+                "predicate": "Concession",
+                "arguments": [
+                    {"entity_id": "clause_a", "role": "statement"},
+                    {
+                        "entity_id": "clause_b",
+                        "role": "counter_statement",
+                    },
+                ],
+                "confidence": 0.95,
+                "evidence": [{"text": CATALYST_SOURCE}],
+            },
+            {
+                "predicate": "EvokesExpectation",
+                "arguments": [
+                    {"entity_id": "clause_a", "role": "trigger"},
+                    {
+                        "entity_id": "expected_1",
+                        "role": "expected_result",
+                    },
+                ],
+                "confidence": 0.72,
+                "evidence": [
+                    {"text": ("Although the catalyst doubled the reaction speed")}
+                ],
+            },
+            {
+                "predicate": "Defeats",
+                "arguments": [
+                    {
+                        "entity_id": "clause_b",
+                        "role": "defeating_outcome",
+                    },
+                    {
+                        "entity_id": "expected_1",
+                        "role": "prior_expectation",
+                    },
+                ],
+                "confidence": 0.85,
+                "evidence": [{"text": "it did not improve the final yield"}],
+            },
+        ]
     )
 
-
-def merge_extractions(
-    general: SemanticExtraction,
-    discourse: DiscourseExtraction,
-) -> SemanticExtraction:
-    """Call the merger implemented in semantic_parser.py."""
-    return _BaseSemanticParser.merge_discourse(general, discourse)
+    return SemanticExtraction.model_validate(data["extraction"])
 
 
-def merge_discourse_result(
-    general: SemanticParseResult,
-    discourse: DiscourseExtraction,
-) -> SemanticParseResult:
-    """Merge and validate the complete output contract."""
-    merged = merge_extractions(general.extraction, discourse)
+def treatment_extraction() -> SemanticExtraction:
+    """Build a combined general and discourse treatment extraction."""
+    entities = [
+        {
+            "id": "clause_a",
+            "entity_type": "Clause",
+            "mention": {
+                "text": (
+                    "Although the new treatment reduced " "the patients' recovery time"
+                )
+            },
+        },
+        {
+            "id": "clause_b",
+            "entity_type": "Clause",
+            "mention": {"text": "it did not reduce their hospital costs"},
+        },
+        {
+            "id": "new_treatment",
+            "entity_type": "Entity",
+            "mention": {"text": "new treatment"},
+        },
+        {
+            "id": "recovery_time",
+            "entity_type": "Entity",
+            "mention": {"text": "recovery time"},
+        },
+        {
+            "id": "hospital_costs",
+            "entity_type": "Entity",
+            "mention": {"text": "hospital costs"},
+        },
+        {
+            "id": "expected_1",
+            "entity_type": "Proposition",
+            "origin": "implicit",
+            "mention": None,
+            "content": "The new treatment reduces hospital costs",
+            "evidence": [
+                {
+                    "text": (
+                        "Although the new treatment reduced "
+                        "the patients' recovery time"
+                    )
+                }
+            ],
+            "symbolic_content": {
+                "predicate": "Evaluation",
+                "relation": "reduce",
+                "arguments": [
+                    {
+                        "entity_id": "new_treatment",
+                        "role": "agent",
+                    },
+                    {
+                        "entity_id": "hospital_costs",
+                        "role": "theme",
+                    },
+                ],
+                "fallback": True,
+                "polarity": "positive",
+                "factuality": "hypothetical",
+            },
+        },
+    ]
 
-    data = general.model_dump(mode="python")
-    data["extraction"] = merged.model_dump(mode="python")
+    assertions = [
+        {
+            "predicate": "Evaluation",
+            "relation": "reduce",
+            "arguments": [
+                {"entity_id": "new_treatment", "role": "agent"},
+                {"entity_id": "recovery_time", "role": "theme"},
+            ],
+            "fallback": True,
+            "polarity": "positive",
+            "confidence": 0.95,
+            "evidence": [
+                {"text": ("the new treatment reduced " "the patients' recovery time")}
+            ],
+        },
+        {
+            "predicate": "Evaluation",
+            "relation": "reduce",
+            "arguments": [
+                {"entity_id": "new_treatment", "role": "agent"},
+                {"entity_id": "hospital_costs", "role": "theme"},
+            ],
+            "fallback": True,
+            "polarity": "negative",
+            "confidence": 0.95,
+            "evidence": [{"text": "it did not reduce their hospital costs"}],
+        },
+        {
+            "predicate": "Concession",
+            "arguments": [
+                {"entity_id": "clause_a", "role": "statement"},
+                {
+                    "entity_id": "clause_b",
+                    "role": "counter_statement",
+                },
+            ],
+            "confidence": 0.95,
+            "evidence": [{"text": TREATMENT_SOURCE}],
+        },
+        {
+            "predicate": "EvokesExpectation",
+            "arguments": [
+                {"entity_id": "clause_a", "role": "trigger"},
+                {
+                    "entity_id": "expected_1",
+                    "role": "expected_result",
+                },
+            ],
+            "confidence": 0.70,
+            "evidence": [
+                {
+                    "text": (
+                        "Although the new treatment reduced "
+                        "the patients' recovery time"
+                    )
+                }
+            ],
+        },
+        {
+            "predicate": "Defeats",
+            "arguments": [
+                {
+                    "entity_id": "clause_b",
+                    "role": "defeating_outcome",
+                },
+                {
+                    "entity_id": "expected_1",
+                    "role": "prior_expectation",
+                },
+            ],
+            "confidence": 0.85,
+            "evidence": [{"text": "it did not reduce their hospital costs"}],
+        },
+        {
+            "predicate": "DiscourseFocus",
+            "arguments": [{"entity_id": "clause_b", "role": "focal_item"}],
+            "confidence": 0.90,
+            "evidence": [{"text": "it did not reduce their hospital costs"}],
+        },
+    ]
 
-    return SemanticParseResult.model_validate(data)
+    return SemanticExtraction.model_validate(
+        {
+            "entities": entities,
+            "assertions": assertions,
+            "rules": [],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +510,10 @@ def test_locates_repeated_source_quotes_by_occurrence():
 
     result = SemanticParseResult.model_validate(data)
 
-    assert result.locate(result.extraction.assertions[0].evidence[0]) == (9, 13)
+    assert result.locate(result.extraction.assertions[0].evidence[0]) == (
+        9,
+        13,
+    )
 
 
 def test_rejects_source_quotes_that_do_not_resolve():
@@ -430,6 +586,7 @@ def test_accepts_explicit_entity_with_source_mention():
     assert entity.mention.text == "Mira"
     assert entity.content is None
     assert entity.evidence == []
+    assert entity.symbolic_content is None
 
 
 def test_rejects_explicit_entity_without_mention():
@@ -452,6 +609,34 @@ def test_defaults_missing_origin_to_explicit():
     assert result.extraction.entities[0].origin == "explicit"
 
 
+def test_rejects_explicit_entity_with_implicit_content():
+    data = valid_result_data()
+    data["extraction"]["entities"][0]["content"] = "Some content"
+
+    with pytest.raises(
+        ValidationError,
+        match="Explicit entities cannot contain implicit",
+    ):
+        SemanticParseResult.model_validate(data)
+
+
+def test_rejects_explicit_entity_with_symbolic_content():
+    data = valid_result_data()
+    data["extraction"]["entities"][0]["symbolic_content"] = {
+        "predicate": "Evaluation",
+        "relation": "leave",
+        "arguments": [{"entity_id": "mira", "role": "agent"}],
+        "fallback": True,
+        "factuality": "hypothetical",
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="symbolic_content",
+    ):
+        SemanticParseResult.model_validate(data)
+
+
 # ---------------------------------------------------------------------------
 # Implicit proposition tests
 # ---------------------------------------------------------------------------
@@ -459,16 +644,21 @@ def test_defaults_missing_origin_to_explicit():
 
 def test_accepts_implicit_proposition():
     data = catalyst_result_data()
-    data["extraction"]["entities"].append(implicit_proposition())
+    append_implicit_proposition(data)
 
     result = SemanticParseResult.model_validate(data)
-    proposition = result.extraction.entities[1]
 
-    assert proposition.id == "expected_1"
+    proposition = next(
+        entity for entity in result.extraction.entities if entity.id == "expected_1"
+    )
+
     assert proposition.origin == "implicit"
     assert proposition.entity_type == "Proposition"
     assert proposition.mention is None
-    assert proposition.content == "The catalyst improves the final yield"
+    assert proposition.content == ("The catalyst improves the final yield")
+    assert proposition.symbolic_content.predicate == "Evaluation"
+    assert proposition.symbolic_content.relation == "improve"
+    assert proposition.symbolic_content.factuality == "hypothetical"
 
 
 def test_rejects_implicit_proposition_without_content():
@@ -497,17 +687,23 @@ def test_rejects_implicit_non_proposition_entity():
     proposition["entity_type"] = "Event"
     data["extraction"]["entities"].append(proposition)
 
-    with pytest.raises(ValidationError, match="Only implicit propositions"):
+    with pytest.raises(
+        ValidationError,
+        match="Only implicit propositions",
+    ):
         SemanticParseResult.model_validate(data)
 
 
-def test_rejects_implicit_proposition_with_fabricated_mention():
+def test_rejects_implicit_proposition_with_source_mention():
     data = catalyst_result_data()
     proposition = implicit_proposition()
     proposition["mention"] = {"text": "The catalyst improves the final yield"}
     data["extraction"]["entities"].append(proposition)
 
-    with pytest.raises(ValidationError, match="fabricated mention"):
+    with pytest.raises(
+        ValidationError,
+        match="cannot have a source mention",
+    ):
         SemanticParseResult.model_validate(data)
 
 
@@ -517,528 +713,276 @@ def test_rejects_implicit_proposition_with_invalid_evidence():
     proposition["evidence"] = [{"text": "The catalyst improves the final yield"}]
     data["extraction"]["entities"].append(proposition)
 
-    with pytest.raises(ValidationError, match="not in the source text"):
+    with pytest.raises(
+        ValidationError,
+        match="not in the source text",
+    ):
+        SemanticParseResult.model_validate(data)
+
+
+def test_rejects_implicit_proposition_without_symbolic_content():
+    data = catalyst_result_data()
+    proposition = implicit_proposition()
+    proposition.pop("symbolic_content")
+    data["extraction"]["entities"].append(proposition)
+
+    with pytest.raises(
+        ValidationError,
+        match="Implicit propositions require symbolic_content",
+    ):
+        SemanticParseResult.model_validate(data)
+
+
+def test_rejects_non_hypothetical_symbolic_content():
+    data = catalyst_result_data()
+    proposition = implicit_proposition()
+    proposition["symbolic_content"]["factuality"] = "asserted"
+    data["extraction"]["entities"].append(proposition)
+
+    with pytest.raises(ValidationError):
+        SemanticParseResult.model_validate(data)
+
+
+def test_rejects_symbolic_content_without_evaluation_relation():
+    data = catalyst_result_data()
+    proposition = implicit_proposition()
+    proposition["symbolic_content"]["relation"] = None
+    data["extraction"]["entities"].append(proposition)
+
+    with pytest.raises(
+        ValidationError,
+        match="requires a relation",
+    ):
+        SemanticParseResult.model_validate(data)
+
+
+def test_rejects_symbolic_content_without_fallback():
+    data = catalyst_result_data()
+    proposition = implicit_proposition()
+    proposition["symbolic_content"]["fallback"] = False
+    data["extraction"]["entities"].append(proposition)
+
+    with pytest.raises(
+        ValidationError,
+        match="requires fallback=true",
+    ):
+        SemanticParseResult.model_validate(data)
+
+
+def test_rejects_implicit_proposition_with_unknown_symbolic_argument():
+    data = catalyst_result_data()
+    proposition = implicit_proposition()
+
+    proposition["symbolic_content"]["arguments"][1]["entity_id"] = "missing_entity"
+
+    data["extraction"]["entities"].append(proposition)
+
+    with pytest.raises(
+        ValidationError,
+        match="unknown entity",
+    ):
         SemanticParseResult.model_validate(data)
 
 
 def test_locates_implicit_proposition_evidence():
     data = catalyst_result_data()
-    data["extraction"]["entities"].append(implicit_proposition())
+    append_implicit_proposition(data)
 
     result = SemanticParseResult.model_validate(data)
-    quote = result.extraction.entities[1].evidence[0]
 
+    proposition = next(
+        entity for entity in result.extraction.entities if entity.id == "expected_1"
+    )
+
+    quote = proposition.evidence[0]
     start, end = result.locate(quote)
 
     assert result.document.source_text[start:end] == quote.text
 
 
 # ---------------------------------------------------------------------------
-# Discourse schema tests
+# Combined general and discourse extraction tests
 # ---------------------------------------------------------------------------
 
 
-def test_accepts_shared_implicit_proposition_in_discourse_relations():
-    data = catalyst_result_data()
+def test_combined_extraction_contains_general_and_discourse_semantics():
+    extraction = catalyst_combined_extraction()
 
-    data["extraction"]["entities"].extend(
-        [
-            clause_a().model_dump(mode="python"),
-            clause_b().model_dump(mode="python"),
-            implicit_proposition(),
-        ]
-    )
-
-    discourse = discourse_result()
-
-    data["extraction"]["assertions"].extend(
-        [assertion.model_dump(mode="python") for assertion in discourse.assertions]
-    )
-
-    result = SemanticParseResult.model_validate(data)
-
-    expectations = [
-        assertion
-        for assertion in result.extraction.assertions
-        if assertion.predicate in ("EvokesExpectation", "Defeats")
-    ]
-
-    assert len(expectations) == 2
-    assert expectations[0].arguments[1].entity_id == "expected_1"
-    assert expectations[1].arguments[1].entity_id == "expected_1"
-
-
-def test_accepts_empty_discourse_extraction():
-    extraction = DiscourseExtraction()
-
-    assert extraction.entities == []
-    assert extraction.assertions == []
-
-
-def test_accepts_discourse_extraction_with_implicit_proposition():
-    extraction = DiscourseExtraction(
-        entities=[
-            clause_a(),
-            expected_proposition(),
-        ],
-        assertions=[
-            {
-                "predicate": "EvokesExpectation",
-                "arguments": [
-                    {"entity_id": "clause_a", "role": "trigger"},
-                    {
-                        "entity_id": "expected_1",
-                        "role": "expected_result",
-                    },
-                ],
-                "confidence": 0.72,
-                "evidence": [
-                    {"text": "Although the catalyst doubled the reaction speed"}
-                ],
-            }
-        ],
-    )
-
-    assert extraction.entities[1].origin == "implicit"
-
-
-def test_rejects_duplicate_discourse_entity_ids():
-    proposition = implicit_proposition()
-
-    with pytest.raises(ValidationError, match="unique"):
-        DiscourseExtraction(entities=[proposition, deepcopy(proposition)])
-
-
-def test_discourse_schema_allows_cross_stage_entity_references():
-    """The merger, not the discourse schema, checks cross-stage IDs."""
-    extraction = DiscourseExtraction(
-        entities=[implicit_proposition()],
-        assertions=[
-            {
-                "predicate": "EvokesExpectation",
-                "arguments": [
-                    {"entity_id": "clause_a", "role": "trigger"},
-                    {
-                        "entity_id": "expected_1",
-                        "role": "expected_result",
-                    },
-                ],
-                "confidence": 0.72,
-                "evidence": [
-                    {"text": "Although the catalyst doubled the reaction speed"}
-                ],
-            }
-        ],
-    )
-
-    assert extraction.assertions[0].arguments[0].entity_id == "clause_a"
-
-
-# ---------------------------------------------------------------------------
-# Discourse prompt tests
-# ---------------------------------------------------------------------------
-
-
-CLAUSES = """
-clause_a: the catalyst doubled the reaction speed
-clause_b: it did not improve the final yield
-"""
-
-GENERAL = """
-The catalyst increased reaction speed.
-The catalyst did not improve final yield.
-"""
-
-
-def test_builds_discourse_prompt():
-    prompt = build_discourse_prompt(
-        CATALYST_SOURCE,
-        CLAUSES,
-        GENERAL,
-    )
-
-    assert prompt.version.startswith("discourse-v1+sha256.")
-    assert CATALYST_SOURCE in prompt.text
-    assert "Concession" in prompt.text
-    assert "EvokesExpectation" in prompt.text
-    assert "Defeats" in prompt.text
-
-
-def test_includes_general_semantic_context():
-    prompt = build_discourse_prompt(
-        CATALYST_SOURCE,
-        CLAUSES,
-        GENERAL,
-    )
-
-    assert "The catalyst increased reaction speed." in prompt.text
-
-
-def test_rejects_empty_source():
-    with pytest.raises(ValueError, match="source_text"):
-        build_discourse_prompt("", CLAUSES, GENERAL)
-
-
-def test_rejects_empty_clause_context():
-    with pytest.raises(ValueError, match="clause_context"):
-        build_discourse_prompt(CATALYST_SOURCE, "", GENERAL)
-
-
-# ---------------------------------------------------------------------------
-# Discourse merger tests
-# ---------------------------------------------------------------------------
-
-
-def test_merges_general_and_discourse_entities():
-    merged = merge_extractions(
-        general_result().extraction,
-        discourse_result(),
-    )
-
-    ids = [entity.id for entity in merged.entities]
-
-    assert len(ids) == len(set(ids))
-    assert "catalyst" in ids
-    assert "clause_a" in ids
-    assert "clause_b" in ids
-    assert "expected_1" in ids
-
-
-def test_reuses_identical_clause_entities():
-    merged = merge_extractions(
-        general_result().extraction,
-        discourse_result(),
-    )
-
-    matches = [entity for entity in merged.entities if entity.id == "clause_a"]
-
-    assert len(matches) == 1
-
-
-def test_adds_implicit_proposition():
-    merged = merge_extractions(
-        general_result().extraction,
-        discourse_result(),
-    )
-
-    proposition = next(
-        entity for entity in merged.entities if entity.id == "expected_1"
-    )
-
-    assert proposition.origin == "implicit"
-    assert proposition.content == "The catalyst improves the final yield"
-
-
-def test_preserves_general_and_adds_discourse_assertions():
-    merged = merge_extractions(
-        general_result().extraction,
-        discourse_result(),
-    )
-
-    predicates = [a.predicate for a in merged.assertions]
-
-    assert predicates.count("Evaluation") == 1
-    assert predicates.count("Concession") == 1
-    assert predicates.count("EvokesExpectation") == 1
-    assert predicates.count("Defeats") == 1
-
-
-def test_preserves_general_rules():
-    general = general_result().extraction
-
-    merged = merge_extractions(
-        general,
-        DiscourseExtraction(),
-    )
-
-    assert merged.rules == general.rules
-
-
-def test_rejects_conflicting_entity_definitions():
-    general = general_result().extraction
-
-    conflicting = SemanticEntity(
-        id="clause_a",
-        entity_type="Clause",
-        mention=SourceQuote(text="it did not improve the final yield"),
-    )
-
-    discourse = DiscourseExtraction(entities=[conflicting])
-
-    with pytest.raises(Exception, match="conflicts"):
-        merge_extractions(general, discourse)
-
-
-def test_rejects_unknown_discourse_entity():
-    general = general_result().extraction
-
-    discourse = DiscourseExtraction(
-        entities=[expected_proposition()],
-        assertions=[
-            {
-                "predicate": "EvokesExpectation",
-                "arguments": [
-                    {
-                        "entity_id": "missing_clause",
-                        "role": "trigger",
-                    },
-                    {
-                        "entity_id": "expected_1",
-                        "role": "expected_result",
-                    },
-                ],
-                "confidence": 0.72,
-                "evidence": [
-                    {"text": "Although the catalyst doubled the reaction speed"}
-                ],
-            }
-        ],
-    )
-
-    with pytest.raises(Exception, match="unknown entity"):
-        merge_extractions(general, discourse)
-
-
-def test_rejects_invalid_discourse_evidence():
-    general = general_result()
-
-    invalid = DiscourseExtraction(
-        entities=[
-            clause_a(),
-            clause_b(),
-            expected_proposition(),
-        ],
-        assertions=[
-            {
-                "predicate": "Concession",
-                "arguments": [
-                    {"entity_id": "clause_a", "role": "statement"},
-                    {
-                        "entity_id": "clause_b",
-                        "role": "counter_statement",
-                    },
-                ],
-                "confidence": 0.95,
-                "evidence": [{"text": "This sentence does not exist"}],
-            }
-        ],
-    )
-
-    with pytest.raises(ValidationError):
-        merge_discourse_result(general, invalid)
-
-
-def test_produces_one_validated_semantic_parse_result():
-    result = merge_discourse_result(
-        general_result(),
-        discourse_result(),
-    )
-
-    assert isinstance(result, SemanticParseResult)
-    assert result.document.document_id == "doc_001"
-
-    predicates = [assertion.predicate for assertion in result.extraction.assertions]
+    predicates = [assertion.predicate for assertion in extraction.assertions]
 
     assert "Evaluation" in predicates
     assert "Concession" in predicates
     assert "EvokesExpectation" in predicates
     assert "Defeats" in predicates
 
+
+def test_combined_extraction_declares_all_argument_entities():
+    extraction = catalyst_combined_extraction()
+
+    known_ids = {entity.id for entity in extraction.entities}
+
+    for assertion in extraction.assertions:
+        for argument in assertion.arguments:
+            assert argument.entity_id in known_ids
+
+
+def test_combined_extraction_reuses_shared_implicit_expectation():
+    extraction = catalyst_combined_extraction()
+
+    expectation = next(
+        assertion
+        for assertion in extraction.assertions
+        if assertion.predicate == "EvokesExpectation"
+    )
+
+    defeat = next(
+        assertion
+        for assertion in extraction.assertions
+        if assertion.predicate == "Defeats"
+    )
+
+    assert expectation.arguments[1].entity_id == "expected_1"
+    assert defeat.arguments[1].entity_id == "expected_1"
+
+
+def test_combined_extraction_preserves_general_assertions():
+    extraction = catalyst_combined_extraction()
+
+    evaluations = [
+        assertion
+        for assertion in extraction.assertions
+        if assertion.predicate == "Evaluation"
+    ]
+
+    assert len(evaluations) == 2
+    assert {assertion.polarity for assertion in evaluations} == {
+        "positive",
+        "negative",
+    }
+
+
+def test_combined_extraction_rejects_missing_implicit_expectation():
+    extraction = catalyst_combined_extraction()
+
+    extraction_data = extraction.model_dump(mode="python")
+    extraction_data["entities"] = [
+        entity for entity in extraction_data["entities"] if entity["id"] != "expected_1"
+    ]
+
+    with pytest.raises(
+        ValidationError,
+        match="unknown entity",
+    ):
+        SemanticExtraction.model_validate(extraction_data)
+
+
+def test_combined_extraction_rejects_duplicate_entity_ids():
+    extraction = catalyst_combined_extraction()
+    extraction_data = extraction.model_dump(mode="python")
+
+    extraction_data["entities"].append(deepcopy(extraction_data["entities"][0]))
+
+    with pytest.raises(
+        ValidationError,
+        match="Entity IDs must be unique",
+    ):
+        SemanticExtraction.model_validate(extraction_data)
+
+
+def test_combined_extraction_rejects_undeclared_argument():
+    extraction = catalyst_combined_extraction()
+    extraction_data = extraction.model_dump(mode="python")
+
+    extraction_data["assertions"][0]["arguments"][0]["entity_id"] = "unknown_entity"
+
+    with pytest.raises(
+        ValidationError,
+        match="unknown entity",
+    ):
+        SemanticExtraction.model_validate(extraction_data)
+
+
+def test_combined_extraction_preserves_specific_rules():
+    data = valid_result_data()
+    data["extraction"]["assertions"] = []
+
+    literal = deepcopy(valid_result_data()["extraction"]["assertions"][0])
+    literal["factuality"] = "hypothetical"
+
+    data["extraction"]["rules"] = [
+        {
+            "scope": "specific",
+            "antecedents": [literal],
+            "consequents": [deepcopy(literal)],
+            "evidence": [{"text": "Mira left."}],
+        }
+    ]
+
+    result = SemanticParseResult.model_validate(data)
+
+    assert len(result.extraction.rules) == 1
+    assert result.extraction.rules[0].scope == "specific"
+
+
+def test_combined_extraction_produces_one_parse_result():
+    data = catalyst_result_data()
+    combined = catalyst_combined_extraction()
+
+    data["extraction"] = combined.model_dump(mode="python")
+    data["document"]["document_id"] = "combined-001"
+
+    result = SemanticParseResult.model_validate(data)
+
+    assert isinstance(result, SemanticParseResult)
+    assert result.document.document_id == "combined-001"
+
+    predicates = {assertion.predicate for assertion in result.extraction.assertions}
+
+    assert {
+        "Evaluation",
+        "Concession",
+        "EvokesExpectation",
+        "Defeats",
+    }.issubset(predicates)
+
     assert any(
-        entity.id == "expected_1" and entity.origin == "implicit"
+        entity.id == "expected_1"
+        and entity.origin == "implicit"
+        and entity.symbolic_content is not None
         for entity in result.extraction.entities
     )
 
 
-def test_merges_empty_discourse_result():
-    result = merge_discourse_result(
-        general_result(),
-        DiscourseExtraction(),
-    )
+def test_combined_extraction_preserves_evidence_grounding():
+    data = catalyst_result_data()
+    data["extraction"] = catalyst_combined_extraction().model_dump(mode="python")
 
-    assert len(result.extraction.assertions) == 1
-    assert result.extraction.assertions[0].predicate == "Evaluation"
+    result = SemanticParseResult.model_validate(data)
 
+    for entity in result.extraction.entities:
+        if entity.mention is not None:
+            start, end = result.locate(entity.mention)
+            assert result.document.source_text[start:end] == (entity.mention.text)
 
-def test_does_not_duplicate_discourse_assertions():
-    general = general_result().extraction
-    discourse = discourse_result()
+        for quote in entity.evidence:
+            start, end = result.locate(quote)
+            assert result.document.source_text[start:end] == quote.text
 
-    once = merge_extractions(general, discourse)
-    twice = merge_extractions(once, discourse)
-
-    assert len(twice.assertions) == len(once.assertions)
+    for assertion in result.extraction.assertions:
+        for quote in assertion.evidence:
+            start, end = result.locate(quote)
+            assert result.document.source_text[start:end] == quote.text
 
 
 # ---------------------------------------------------------------------------
-# Treatment example regression tests
+# Treatment regression tests
 # ---------------------------------------------------------------------------
 
 
-def treatment_general() -> SemanticExtraction:
-    return SemanticExtraction.model_validate(
-        {
-            "entities": [
-                {
-                    "id": "clause_a",
-                    "entity_type": "Clause",
-                    "mention": {
-                        "text": (
-                            "Although the new treatment reduced "
-                            "the patients' recovery time"
-                        )
-                    },
-                },
-                {
-                    "id": "clause_b",
-                    "entity_type": "Clause",
-                    "mention": {"text": "it did not reduce their hospital costs"},
-                },
-                {
-                    "id": "new_treatment",
-                    "entity_type": "Entity",
-                    "mention": {"text": "new treatment"},
-                },
-                {
-                    "id": "recovery_time",
-                    "entity_type": "Entity",
-                    "mention": {"text": "recovery time"},
-                },
-                {
-                    "id": "hospital_costs",
-                    "entity_type": "Entity",
-                    "mention": {"text": "hospital costs"},
-                },
-            ],
-            "assertions": [
-                {
-                    "predicate": "Evaluation",
-                    "relation": "reduce",
-                    "arguments": [
-                        {"entity_id": "new_treatment", "role": "agent"},
-                        {"entity_id": "recovery_time", "role": "theme"},
-                    ],
-                    "fallback": True,
-                    "polarity": "positive",
-                    "confidence": 0.95,
-                    "evidence": [
-                        {
-                            "text": (
-                                "the new treatment reduced "
-                                "the patients' recovery time"
-                            )
-                        }
-                    ],
-                },
-                {
-                    "predicate": "Evaluation",
-                    "relation": "reduce",
-                    "arguments": [
-                        {"entity_id": "new_treatment", "role": "agent"},
-                        {"entity_id": "hospital_costs", "role": "theme"},
-                    ],
-                    "fallback": True,
-                    "polarity": "negative",
-                    "confidence": 0.95,
-                    "evidence": [{"text": "it did not reduce their hospital costs"}],
-                },
-            ],
-            "rules": [],
-        }
-    )
+def test_treatment_combined_extraction_contains_all_relations():
+    extraction = treatment_extraction()
 
-
-def treatment_discourse() -> DiscourseExtraction:
-    general = treatment_general()
-
-    entities = [entity.model_dump(mode="python") for entity in general.entities]
-
-    entities.append(
-        {
-            "id": "expected_1",
-            "entity_type": "Proposition",
-            "origin": "implicit",
-            "mention": None,
-            "content": "the new treatment reduces hospital costs",
-            "evidence": [
-                {
-                    "text": (
-                        "Although the new treatment reduced "
-                        "the patients' recovery time"
-                    )
-                }
-            ],
-        }
-    )
-
-    return DiscourseExtraction.model_validate(
-        {
-            "entities": entities,
-            "assertions": [
-                {
-                    "predicate": "Concession",
-                    "arguments": [
-                        {"entity_id": "clause_a", "role": "statement"},
-                        {
-                            "entity_id": "clause_b",
-                            "role": "counter_statement",
-                        },
-                    ],
-                    "confidence": 0.95,
-                    "evidence": [{"text": TREATMENT_SOURCE}],
-                },
-                {
-                    "predicate": "EvokesExpectation",
-                    "arguments": [
-                        {"entity_id": "clause_a", "role": "trigger"},
-                        {
-                            "entity_id": "expected_1",
-                            "role": "expected_result",
-                        },
-                    ],
-                    "confidence": 0.70,
-                    "evidence": [
-                        {
-                            "text": (
-                                "Although the new treatment reduced "
-                                "the patients' recovery time"
-                            )
-                        }
-                    ],
-                },
-                {
-                    "predicate": "Defeats",
-                    "arguments": [
-                        {
-                            "entity_id": "clause_b",
-                            "role": "defeating_outcome",
-                        },
-                        {
-                            "entity_id": "expected_1",
-                            "role": "prior_expectation",
-                        },
-                    ],
-                    "confidence": 0.85,
-                    "evidence": [{"text": "it did not reduce their hospital costs"}],
-                },
-                {
-                    "predicate": "DiscourseFocus",
-                    "arguments": [{"entity_id": "clause_b", "role": "focal_item"}],
-                    "confidence": 0.90,
-                    "evidence": [{"text": "it did not reduce their hospital costs"}],
-                },
-            ],
-        }
-    )
-
-
-def test_treatment_merges_all_discourse_relations():
-    merged = merge_extractions(
-        treatment_general(),
-        treatment_discourse(),
-    )
-
-    predicates = [a.predicate for a in merged.assertions]
+    predicates = [assertion.predicate for assertion in extraction.assertions]
 
     assert predicates.count("Evaluation") == 2
     assert predicates.count("Concession") == 1
@@ -1048,46 +992,79 @@ def test_treatment_merges_all_discourse_relations():
 
 
 def test_treatment_declares_shared_implicit_expectation():
-    merged = merge_extractions(
-        treatment_general(),
-        treatment_discourse(),
-    )
+    extraction = treatment_extraction()
 
-    entity_ids = {entity.id for entity in merged.entities}
+    entity_ids = {entity.id for entity in extraction.entities}
 
     assert "expected_1" in entity_ids
 
     expectation = next(
-        a for a in merged.assertions if a.predicate == "EvokesExpectation"
+        assertion
+        for assertion in extraction.assertions
+        if assertion.predicate == "EvokesExpectation"
     )
 
-    defeat = next(a for a in merged.assertions if a.predicate == "Defeats")
+    defeat = next(
+        assertion
+        for assertion in extraction.assertions
+        if assertion.predicate == "Defeats"
+    )
 
     assert expectation.arguments[1].entity_id == "expected_1"
     assert defeat.arguments[1].entity_id == "expected_1"
 
 
 def test_treatment_preserves_positive_and_negative_polarity():
-    merged = merge_extractions(
-        treatment_general(),
-        treatment_discourse(),
-    )
+    extraction = treatment_extraction()
 
-    evaluations = [a for a in merged.assertions if a.predicate == "Evaluation"]
+    evaluations = [
+        assertion
+        for assertion in extraction.assertions
+        if assertion.predicate == "Evaluation"
+    ]
 
     assert len(evaluations) == 2
-    assert {a.polarity for a in evaluations} == {
+    assert {assertion.polarity for assertion in evaluations} == {
         "positive",
         "negative",
     }
 
 
-def test_treatment_rejects_missing_implicit_expectation():
-    discourse = treatment_discourse()
+def test_treatment_symbolic_expectation_is_hypothetical():
+    extraction = treatment_extraction()
 
-    discourse.entities = [
-        entity for entity in discourse.entities if entity.id != "expected_1"
+    proposition = next(
+        entity for entity in extraction.entities if entity.id == "expected_1"
+    )
+
+    assert proposition.symbolic_content is not None
+    assert proposition.symbolic_content.predicate == "Evaluation"
+    assert proposition.symbolic_content.relation == "reduce"
+    assert proposition.symbolic_content.factuality == "hypothetical"
+
+
+def test_treatment_combined_extraction_is_source_grounded():
+    data = valid_result_data()
+    data["document"]["source_text"] = TREATMENT_SOURCE
+    data["extraction"] = treatment_extraction().model_dump(mode="python")
+
+    result = SemanticParseResult.model_validate(data)
+
+    assert len(result.extraction.entities) == 6
+    assert len(result.extraction.assertions) == 6
+    assert result.extraction.rules == []
+
+
+def test_treatment_rejects_missing_implicit_expectation():
+    extraction = treatment_extraction()
+    data = extraction.model_dump(mode="python")
+
+    data["entities"] = [
+        entity for entity in data["entities"] if entity["id"] != "expected_1"
     ]
 
-    with pytest.raises(Exception, match="unknown entity"):
-        merge_extractions(treatment_general(), discourse)
+    with pytest.raises(
+        ValidationError,
+        match="unknown entity",
+    ):
+        SemanticExtraction.model_validate(data)
