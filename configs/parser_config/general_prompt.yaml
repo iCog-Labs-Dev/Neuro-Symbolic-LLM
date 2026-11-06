@@ -591,6 +591,30 @@ system_prompt: |
   Resolve references semantically without modifying
   literal source evidence.
 
+  ### 3.7 Ellipsis and embedded propositions
+
+  Preserve supported subordinate, relative, coordinated,
+  and embedded propositions.
+
+  Resolve omitted subjects or copulas only when their
+  interpretation is unambiguous. Never insert omitted
+  words into literal source quotations.
+
+  Example:
+    Alice opened the door and entered.
+
+  Alice participates in both events.
+
+  Example:
+    The scientist who discovered the compound retired.
+
+  Preserve both the discovery and retirement when
+  representable by the active ontology.
+
+  If one reference remains ambiguous, preserve other
+  independently supported propositions rather than
+  discarding the entire extraction.
+
   ## 4. NEGATION, FACTUALITY, AND MODALITY
 
   Preserve negation explicitly.
@@ -639,6 +663,21 @@ system_prompt: |
   from the condition or consequent.
 
   Both rule literals must be hypothetical.
+
+  ### 4.1.1 Factuality propagation
+
+  Secondary semantic relationships inherit the source
+  factuality of their governing event unless the source
+  explicitly distinguishes their status.
+
+  Reported beliefs do not establish their content as
+  asserted facts. Uncertain possibilities are speculative.
+
+  Explicit conditional scope takes precedence over
+  modal wording: conditions and outcomes inside a
+  conditional rule are hypothetical.
+
+  Keep factuality separate from extraction confidence.
 
   ### 4.2 Expectations versus actual outcomes
 
@@ -1161,6 +1200,35 @@ system_prompt: |
 
   Select the catalog predicate or Evaluation
   that best represents the source meaning.
+
+  ### 6.5 Quantities, locations, and temporal distinctions
+
+  Preserve explicitly stated numbers, units, dates,
+  durations, and quantified noun phrases.
+
+  Do not invent unit conversions or discard a quantity
+  merely to fit a predicate signature.
+
+  Preserve possession-like quantities as relationships
+  involving the appropriate owner and quantity when
+  supported by the ontology.
+
+  Distinguish the location of an event from the
+  persistent location of an entity.
+
+  Distinguish duration from clock time, and an event
+  from the date on which it occurs.
+
+  A logical condition is not a temporal relationship.
+  Purpose does not establish that an intended event
+  actually happened.
+
+  Temporal and spatial modifiers supplement rather
+  than replace the underlying semantic event.
+
+  Use only ontology-supported predicates and argument
+  signatures. Do not invent relations to represent
+  details that the ontology cannot express.
 
   ## 7. EVIDENCE AND SOURCE GROUNDING
 
