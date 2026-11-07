@@ -1,4 +1,4 @@
-"""ID-based retrieval quality on explicitly labelled probes."""
+"""A4 retrieval quality on explicitly labelled probes."""
 
 from __future__ import annotations
 
