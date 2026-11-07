@@ -7,6 +7,7 @@ function (``run_sequential``); stage-specific code lives in ``stages/stage_<X>/`
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -96,7 +97,9 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
         if self.epochs < 0:
             raise ValueError(f"epochs must be >= 0, got {self.epochs}")
-        if not self.learning_rate > 0:
+        if self.seq_len < 2:
+            raise ValueError("seq_len must be >= 2 for next-token training.")
+        if not math.isfinite(self.learning_rate) or not self.learning_rate > 0:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
         if not isinstance(self.jit, bool):
             raise ValueError(f"jit must be a boolean, got {self.jit!r}")
@@ -171,6 +174,33 @@ def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
     )
 
 
+def apply_run_overrides(cfg: RunConfig, args: Any) -> RunConfig:
+    """Common A1/A2 model, adapter and training CLI overrides."""
+    from dataclasses import replace
+
+    adapter, training, domains = cfg.adapter, cfg.training, cfg.domains
+    if args.rank is not None:
+        adapter = replace(adapter, rank=args.rank)
+    if args.model is not None:
+        training = replace(training, model=args.model)
+    if args.output_dir is not None:
+        training = replace(training, output_dir=args.output_dir)
+    if getattr(args, "no_jit", False):
+        training = replace(training, jit=False)
+    if args.epochs is not None and getattr(args, "steps", None) is not None:
+        raise ValueError("Cannot specify both --epochs and --steps. Use --epochs.")
+    if getattr(args, "steps", None) is not None:
+        raise ValueError("--steps has been replaced by --epochs. Use --epochs.")
+    if args.epochs is not None:
+        if args.epochs < 0:
+            raise ValueError(f"epochs must be >= 0, got {args.epochs}")
+        training = replace(training, epochs=args.epochs)
+        domains = tuple(replace(d, epochs=args.epochs) for d in domains)
+    if args.eval_batches is not None:
+        training = replace(training, eval_batches=args.eval_batches)
+    return replace(cfg, adapter=adapter, training=training, domains=domains)
+
+
 @dataclass(frozen=True)
 class Domain:
     name: str
@@ -233,6 +263,105 @@ def base_logits(substrate: FrozenSubstrate, input_ids: jax.Array) -> jax.Array:
         input_ids, modify_fn=identity_modify, intercept_layers=()
     )
     return jax.lax.stop_gradient(result.logits)
+
+
+def model_loss_terms(
+    substrate: FrozenSubstrate,
+    adapted: jax.Array,
+    labels: jax.Array,
+    lambda_kl: float,
+    base: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array | None]:
+    """Shared A1/A2 task and KL calculation; only the augmented branch is live."""
+    if base is None:
+        task = substrate.compute_loss(adapted, labels, losses=("CE",))
+        return task, task, None
+    total, parts = substrate.compute_loss(
+        adapted,
+        labels,
+        losses=("CE", "KL"),
+        base_logits=jax.lax.stop_gradient(base),
+        weights={"KL": lambda_kl},
+        return_components=True,
+    )
+    return total, parts["ce"], parts["kl"]
+
+
+def make_optimizer(
+    learning_rate: float,
+    *,
+    predictor_lr_mult: float = 1.0,
+    predictor_prefix: str = "pred_",
+) -> optax.GradientTransformation:
+    """Adam with an optional predictor group; the A1 default remains plain Adam."""
+    if predictor_lr_mult == 1.0:
+        return optax.adam(learning_rate)
+
+    def labels(params):
+        groups = {}
+        for key, value in params.items():
+            group = "pred" if key.startswith(predictor_prefix) else "main"
+            groups[key] = jax.tree_util.tree_map(lambda _, group=group: group, value)
+        return groups
+
+    return optax.multi_transform(
+        {
+            "main": optax.adam(learning_rate),
+            "pred": optax.adam(learning_rate * predictor_lr_mult),
+        },
+        labels,
+    )
+
+
+def prepare_domain(
+    substrate: FrozenSubstrate, domain: DomainConfig, training: TrainingConfig
+) -> Domain:
+    """Load training blocks and the configured validation prefix for either stage."""
+    train = load_token_blocks(substrate, domain, domain.train_split, training.seq_len)
+    validation = load_token_blocks(
+        substrate, domain, domain.eval_split, training.seq_len
+    )
+    return Domain(
+        name=domain.name,
+        train_blocks=train,
+        eval_set=make_eval_set(validation, training.batch_size, training.eval_batches),
+        epochs=training.epochs if domain.epochs is None else domain.epochs,
+    )
+
+
+def test_domain(
+    substrate: FrozenSubstrate,
+    adapter: ResidualAdapter,
+    params: AdapterParams,
+    domain: DomainConfig,
+    training: TrainingConfig,
+    *,
+    writer: RunWriter | None = None,
+) -> dict[str, float]:
+    """Final test evaluation with the same batching and logging in A1 and A2."""
+    blocks = load_token_blocks(substrate, domain, domain.test_split, training.seq_len)
+    result = evaluate(
+        substrate,
+        adapter,
+        params,
+        make_eval_set(blocks, training.batch_size, training.eval_batches),
+        jit=training.jit,
+    )
+    if writer is not None:
+        writer.log("test", domain=domain.name, **result)
+    return result
+
+
+def initialize_stage(substrate: FrozenSubstrate, cfg: RunConfig) -> ResidualAdapter:
+    """Shared position validation, adapter construction and frozen-base check."""
+    arch = substrate.architecture
+    max_pos = arch.max_position_embeddings
+    if max_pos is not None and cfg.training.seq_len > max_pos:
+        raise ValueError(f"seq_len={cfg.training.seq_len} exceeds {max_pos} positions.")
+    frozen = substrate.verify_frozen()
+    if not frozen["params_unchanged"]:
+        raise ValueError(f"Substrate not frozen before training: {frozen}")
+    return ResidualAdapter(cfg.adapter, arch)
 
 
 def evaluate(
@@ -372,6 +501,8 @@ def run_sequential(
     objective_cfg: Any,
     training: TrainingConfig,
     writer: RunWriter,
+    *,
+    optimizer: optax.GradientTransformation | None = None,
 ) -> tuple[AdapterParams, dict[str, Any]]:
     if not domains:
         raise ValueError("At least one domain is required.")
@@ -402,7 +533,8 @@ def run_sequential(
     # after_task=-1: before training, where adapted equals base.
     init = eval_all(-1)
 
-    optimizer = optax.adam(training.learning_rate)
+    if optimizer is None:
+        optimizer = make_optimizer(training.learning_rate)
     grad_fn = jax.value_and_grad(objective_fn, has_aux=True)
 
     def train_step(
@@ -422,11 +554,12 @@ def run_sequential(
     if training.jit:
         train_step = jax.jit(train_step)
 
-    # The optimizer only sees the adapter PyTree; base weights live outside it.
+    # The optimizer sees adapters and enabled auxiliary heads; base weights stay outside.
     opt_state = optimizer.init(params)
     rows: list[dict[str, dict[str, float]]] = []
     step_times: list[float] = []
     global_step = tokens = 0
+    cpc_skipped_batches = 0
 
     for t, domain in enumerate(domains):
         if t > 0 and training.reset_optimizer:
@@ -483,6 +616,12 @@ def run_sequential(
                 step_times.append(step_time)
                 epoch_step_times.append(step_time)
                 scalars = {k: float(v) for k, v in terms.items()}
+                if scalars.get("cpc_valid", 1.0) == 0.0:
+                    cpc_skipped_batches += 1
+                    if cpc_skipped_batches == 1:
+                        log.warning(
+                            "CPC batch has no valid cross-sequence negatives; loss is inactive. Skipped batches are logged."
+                        )
                 epoch_scalars.append(scalars)
 
                 train_writer_metrics = {f"loss_{k}": v for k, v in scalars.items()}
@@ -500,6 +639,7 @@ def run_sequential(
                     global_step=global_step,
                     tokens=tokens,
                     step_time=step_time,
+                    cpc_skipped_batches=cpc_skipped_batches,
                     # Prefixed so the "task" term does not clash with the task index.
                     **train_writer_metrics,
                 )
@@ -593,6 +733,7 @@ def run_sequential(
         epochs={d.name: d.epochs for d in domains},
         steps=global_step,
         tokens=tokens,
+        cpc_skipped_batches=cpc_skipped_batches,
         # Exclude the first step, which includes tracing.
         mean_step_time=float(np.mean(step_times[1:])) if len(step_times) > 1 else None,
     )
@@ -824,19 +965,25 @@ __all__ = [
     "Objective",
     "RunConfig",
     "TrainingConfig",
+    "apply_run_overrides",
     "base_logits",
     "batches",
     "checked_kwargs",
     "configure_logging",
     "evaluate",
     "evaluate_checkpoint",
+    "initialize_stage",
     "load_configs",
     "load_token_blocks",
     "log_experiment_header",
     "log_final_summary",
     "make_eval_set",
+    "make_optimizer",
+    "model_loss_terms",
+    "prepare_domain",
     "resolve_split",
     "run_sequential",
     "summarize",
+    "test_domain",
     "validate_checkpoint_params",
 ]

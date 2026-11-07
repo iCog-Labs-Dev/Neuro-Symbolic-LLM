@@ -13,7 +13,7 @@ import jax
 
 from frozenllm.substrate import FrozenSubstrate
 from residual import AdapterParams, ResidualAdapter
-from stages.stage_base import base_logits, checked_kwargs
+from stages.stage_base import base_logits, checked_kwargs, model_loss_terms
 
 
 @dataclass(frozen=True)
@@ -50,29 +50,17 @@ def a1_objective(
     target_labels = input_ids if labels is None else labels
     wd = ResidualAdapter.l2_norm_sq(params)
 
-    # Skip the base forward; omit "kl" rather than NaN, which strict JSON rejects.
-    if config.lambda_kl == 0 and base is None:
-        task = substrate.compute_loss(adapted, target_labels, losses=("CE",))
-        total = task + config.lambda_wd * wd
-        return total, {"total": total, "task": task, "wd": wd}
-
-    base = (
-        base_logits(substrate, input_ids)
-        if base is None
-        else jax.lax.stop_gradient(base)
+    reference = None
+    if config.lambda_kl > 0 or base is not None:
+        reference = base_logits(substrate, input_ids) if base is None else base
+    model_loss, task, kl = model_loss_terms(
+        substrate, adapted, target_labels, config.lambda_kl, reference
     )
-    total_model_loss, components = substrate.compute_loss(
-        adapted,
-        target_labels,
-        losses=("CE", "KL"),
-        base_logits=base,
-        weights={"KL": config.lambda_kl},
-        return_components=True,
-    )
-    task = components["ce"]
-    kl = components["kl"]
-    total = total_model_loss + config.lambda_wd * wd
-    return total, {"total": total, "task": task, "kl": kl, "wd": wd}
+    total = model_loss + config.lambda_wd * wd
+    terms = {"total": total, "task": task, "wd": wd}
+    if kl is not None:
+        terms["kl"] = kl
+    return total, terms
 
 
 __all__ = ["A1Config", "a1_objective"]
