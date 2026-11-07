@@ -1,0 +1,71 @@
+version: "discourse-v1"
+
+relations:
+
+  Concession:
+    arity: 2
+    arguments:
+      - name: statement
+        type: Clause
+      - name: counter_statement
+        type: Clause
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: >
+      Extract when a clause acknowledges or presents a relevant point
+      while another clause counters the expectation or main direction
+      associated with that point. Preserve the identity of both clauses.
+      Do not extract merely because two clauses express different facts.
+
+  Contrast:
+    arity: 2
+    arguments:
+      - name: item1
+        type: Clause|Entity|Proposition
+      - name: item2
+        type: Clause|Entity|Proposition
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: >
+      Extract when two clauses, entities, or propositions are explicitly
+      presented as different or opposed. Preserve the compared items.
+      Contrast does not necessarily imply that one item defeats an
+      expectation established by the other.
+
+  EvokesExpectation:
+    arity: 2
+    arguments:
+      - name: trigger
+        type: Clause
+      - name: expected_result
+        type: Proposition
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: >
+      Extract when a clause establishes or evokes a contextually salient
+      expectation about a possible result or consequence. Represent the
+      expected result as a Proposition with a stable identifier.
+      Do not assume that every event has a universal default consequence.
+      Implicit expectations should have lower confidence when appropriate.
+
+  Defeats:
+    arity: 2
+    arguments:
+      - name: defeating_outcome
+        type: Clause|Event
+      - name: prior_expectation
+        type: Proposition
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: >
+      Extract when a clause or event provides evidence that contradicts
+      or undercuts a previously evoked expectation. Reuse the same
+      Proposition identifier referenced by EvokesExpectation.
+      Do not extract merely because two statements are different.
+
+  DiscourseFocus:
+    arity: 1
+    arguments:
+      - name: focal_item
+        type: Clause|Entity|Proposition
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: >
+      Extract the primary clause, entity, or proposition that receives
+      the main attention or emphasis in a discourse segment.
+      Preserve its identity and source evidence.

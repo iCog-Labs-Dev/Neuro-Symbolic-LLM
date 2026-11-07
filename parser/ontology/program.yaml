@@ -1,0 +1,40 @@
+version: "program-v1"
+relations:
+  Application:
+    arity: 2
+    arguments:
+      - name: callable
+        type: Entity
+      - name: arguments
+        type: Entity
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: "Represent a parsed AST application node with its callable and argument structure."
+  Lambda:
+    arity: 2
+    arguments:
+      - name: parameter
+        type: Entity
+      - name: body
+        type: Entity
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: "Represent a parsed lambda node with its bound parameter and body."
+  Map:
+    arity: 2
+    arguments:
+      - name: function
+        type: Entity
+      - name: collection
+        type: Entity
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: "Represent a parsed map application over a collection."
+  Fold:
+    arity: 3
+    arguments:
+      - name: collection
+        type: Entity
+      - name: initial_value
+        type: Entity
+      - name: reducer
+        type: Entity
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: "Represent a parsed fold application with its collection, initial value, and reducer."

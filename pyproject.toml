@@ -19,8 +19,12 @@ dependencies = [
 
     # Frozen base model (PyTorch, hidden state extraction only)
     "torch>=2.6.0,<2.13.0",
-    "transformers>=4.40.0",
-    "datasets>=2.19.0",
+    "transformers>=5.0.0",
+    "accelerate>=0.25.0",
+    "peft>=0.10.0",
+    "datasets>=2.14.0",
+    "sentencepiece>=0.1.99",
+    "protobuf>=3.20.0",
     "torchax==0.0.14.dev20260617",
 
     # MORK service
@@ -36,6 +40,7 @@ dependencies = [
     # Symbolic pipeline
     "numpy>=1.26",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
     "tqdm>=4.66.0",
     "wandb>=0.17.0",
 ]
@@ -47,7 +52,15 @@ gpu = [
 hyperon = [
     "hyperon>=0.2.0",
 ]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.25"]
+gemini = ["google-genai>=2.0.0"]
+ollama = ["ollama>=0.4"]
+miner = [
+    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.0",
+]
 dev = [
+    "jsonschema>=4.18",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4.1",
@@ -58,8 +71,13 @@ dev = [
     "types-redis",
 ]
 
+[project.scripts]
+semantic-parser = "parser.semantic.cli:main"
+semantic-document-export = "parser.semantic.catalog_document_cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
+exclude = ["data*", "tests*", "docs*", "build*", "*.egg-info"]
 include = [
     "fabricpc_ext*",
     "nac*",
@@ -71,11 +89,16 @@ include = [
     "tiers*",
     "symbolic_pipeline*",
     "substrate*",
+    "configs.parser_config",
     "residual*",
     "losses*",
     "stages*",
     "metrics*",
 ]
+
+[tool.setuptools.package-data]
+"parser.ontology" = ["*.yaml", "bundles/*.yaml"]
+"configs.parser_config" = ["*.yaml", "*.jsonl"]
 
 # ── Black ──────────────────────────────────────────────────────────────────
 [tool.black]
@@ -104,8 +127,9 @@ select = [
 ]
 ignore = [
     "E501",  # line too long — black handles this
-    "B008",  # do not perform function calls in default arguments (FastAPI uses this),
-    "N806", "N803"
+    "B008",  # do not perform function calls in default arguments (FastAPI uses this)
+    "N806",  # variable in function should be lowercase
+    "N803",  # argument name should be lowercase
 ]
 
 [tool.ruff.lint.isort]
@@ -149,6 +173,10 @@ module = ["jax", "jax.*", "flax", "flax.*", "numpy", "numpy.*"]
 follow_imports = "skip"
 # Run manually: mypy .
 # Runs automatically on every commit via pre-commit.
+
+[[tool.mypy.overrides]]
+module = "parser.semantic.semantic_parser"
+disable_error_code = ["no-any-return"]
 
 # ── Pytest ─────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

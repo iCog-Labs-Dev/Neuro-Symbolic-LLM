@@ -1,0 +1,28 @@
+# Extraction-target distillation (semantic contract 2.0.0); existing legacy
+# checkpoints are not overwritten.
+
+student:
+  base_model: Qwen/Qwen2.5-1.5B-Instruct
+  output_dir: models/semantic_document_parser
+
+data:
+  contract_version: "2.0.0"
+  ontology_bundle_manifest: parser/ontology/bundles/semantic-extraction-v1.yaml
+  val_split: 0.1
+  # Measure complete prompt + label lengths; an integer sets a strict ceiling.
+  max_length: auto
+
+training:
+  epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 0.00002
+  lr_scheduler: cosine
+  bf16: true
+  seed: 42
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
