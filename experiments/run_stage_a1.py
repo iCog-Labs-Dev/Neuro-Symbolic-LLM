@@ -13,7 +13,6 @@ import os
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 
 # Silence verbose C++ runtime warnings (e.g. XLA slow_operation_alarm) before JAX initializes
@@ -32,17 +31,17 @@ from residual import ResidualAdapter  # noqa: E402
 from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
 from stages.stage_A.a1 import A1Config, a1_objective  # noqa: E402
 from stages.stage_base import (  # noqa: E402
-    Domain,
     RunConfig,
+    apply_run_overrides,
     configure_logging,
-    evaluate,
     evaluate_checkpoint,
+    initialize_stage,
     load_configs,
-    load_token_blocks,
     log_experiment_header,
     log_final_summary,
-    make_eval_set,
+    prepare_domain,
     run_sequential,
+    test_domain,
 )
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml"
@@ -96,29 +95,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
-    adapter, training, domains = cfg.adapter, cfg.training, cfg.domains
-    if args.rank is not None:
-        adapter = replace(adapter, rank=args.rank)
-    if args.model is not None:
-        training = replace(training, model=args.model)
-    if args.output_dir is not None:
-        training = replace(training, output_dir=args.output_dir)
-    if getattr(args, "no_jit", False):
-        training = replace(training, jit=False)
-    if args.epochs is not None and args.steps is not None:
-        raise ValueError("Cannot specify both --epochs and --steps. Use --epochs.")
-    if args.steps is not None:
-        raise ValueError("--steps has been replaced by --epochs. Use --epochs.")
-    if args.epochs is not None:
-        if args.epochs < 0:
-            raise ValueError(f"epochs must be >= 0, got {args.epochs}")
-        training = replace(training, epochs=args.epochs)
-        domains = tuple(replace(d, epochs=args.epochs) for d in domains)
-    if getattr(args, "eval_batches", None) is not None:
-        if args.eval_batches < 1:
-            raise ValueError(f"eval_batches must be >= 1, got {args.eval_batches}")
-        training = replace(training, eval_batches=args.eval_batches)
-    return replace(cfg, adapter=adapter, training=training, domains=domains)
+    return apply_run_overrides(cfg, args)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -130,19 +107,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     substrate = FrozenSubstrate(train_cfg.model)
     arch = substrate.architecture
-    max_pos = arch.max_position_embeddings
-    if max_pos is not None and train_cfg.seq_len > max_pos:
-        raise ValueError(f"seq_len={train_cfg.seq_len} exceeds {max_pos} positions.")
-
-    adapter = ResidualAdapter(cfg.adapter, arch)
+    adapter = initialize_stage(substrate, cfg)
     params = adapter.init_params()
     n_trainable = ResidualAdapter.num_params(params)
     n_frozen = sum(p.numel() for p in substrate.params.values())
-
-    frozen = substrate.verify_frozen()
-    if not frozen["params_unchanged"]:
-        log.error("Substrate not frozen before training: %s", frozen)
-        return 1
 
     if args.eval_checkpoint is not None:
         log.info(
@@ -169,22 +137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(results, indent=2))
         return 0
 
-    # Load data before creating the run directory, so bad datasets fail fast.
-    log.info("Preparing datasets across %d domain(s)...", len(cfg.domains))
-    domains = []
-    for d in cfg.domains:
-        train_blocks = load_token_blocks(substrate, d, d.train_split, train_cfg.seq_len)
-        eval_blocks = load_token_blocks(substrate, d, d.eval_split, train_cfg.seq_len)
-        domains.append(
-            Domain(
-                name=d.name,
-                train_blocks=train_blocks,
-                eval_set=make_eval_set(
-                    eval_blocks, train_cfg.batch_size, train_cfg.eval_batches
-                ),
-                epochs=train_cfg.epochs if d.epochs is None else d.epochs,
-            )
-        )
+    # Shared data preparation; fail before creating a run directory.
+    domains = [prepare_domain(substrate, d, train_cfg) for d in cfg.domains]
 
     run_name = args.run_name or default_run_name("a1")
     with RunWriter(train_cfg.output_dir, run_name) as writer:
@@ -227,25 +181,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         frozen = substrate.verify_frozen()
         summary["params_unchanged"] = frozen["params_unchanged"]
 
-        # Final test-set evaluation across domains for paper-table results
-        test_eval_batches = (
-            args.eval_batches
-            if args.eval_batches is not None
-            else train_cfg.eval_batches
-        )
-        log.info("Running final test evaluation across %d domains...", len(cfg.domains))
-        test_results = {}
-        for d in cfg.domains:
-            test_blocks = load_token_blocks(
-                substrate, d, d.test_split, train_cfg.seq_len
-            )
-            test_set = make_eval_set(
-                test_blocks, train_cfg.batch_size, test_eval_batches
-            )
-            test_results[d.name] = evaluate(
-                substrate, adapter, params, test_set, jit=train_cfg.jit
-            )
-            writer.log("test", domain=d.name, **test_results[d.name])
+        test_results = {
+            d.name: test_domain(substrate, adapter, params, d, train_cfg, writer=writer)
+            for d in cfg.domains
+        }
         summary["test"] = test_results
         writer.write_json("results.json", summary)
 

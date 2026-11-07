@@ -1,0 +1,88 @@
+# MeTTa Atomese grammar: the structural words and operators allowed in
+# rendered and stored expressions. Relation predicates such as LocatedIn,
+# Inheritance, and MemberOf come from the ontology catalog (parser/ontology/*.yaml),
+# not from this file.
+
+structural:
+
+  Evaluation:
+    arity: 2
+    description: >
+      Free-form relation used when no catalog predicate fits:
+      (Evaluation relation (List participants...)).
+
+  List:
+    variable_arity: true
+    min_arity: 0
+    max_arity: 4
+    description: "Ordered argument container used by Evaluation"
+
+  Not:
+    arity: 1
+    description: "Negation wrapper around one assertion"
+
+  Obligation:
+    arity: 1
+    description: "The wrapped assertion is required, as in 'shall'"
+
+  Permission:
+    arity: 1
+    description: "The wrapped assertion is allowed, as in 'may'"
+
+# Query/reasoning operations: world relations.
+operators:
+
+  And:
+    variable_arity: true
+    min_arity: 2
+    description: "Logical conjunction of two or more expressions"
+
+  Or:
+    variable_arity: true
+    min_arity: 2
+    description: "Logical disjunction of two or more expressions"
+
+  Count:
+    arity: 1
+    description: "Return the number of matching entities or expressions"
+
+  Equal:
+    arity: 2
+    roles: [left, right]
+    description: "X is equal to Y"
+
+  GreaterThan:
+    arity: 2
+    roles: [left, right]
+    description: "X is greater than Y"
+
+  LessThan:
+    arity: 2
+    roles: [left, right]
+    description: "X is less than Y"
+
+  GreaterEqual:
+    arity: 2
+    roles: [left, right]
+    description: "X is greater than or equal to Y"
+
+  LessEqual:
+    arity: 2
+    roles: [left, right]
+    description: "X is less than or equal to Y"
+
+  ArgMax:
+    arity: 2
+    roles: [collection, attribute]
+    description: "Select the entity with the maximum value of an attribute"
+
+  # ArgMin is not an operator here: it is a catalog relation (proof-v1) with
+  # three arguments, and one name cannot have two arities.
+
+  Implies:
+    arity: 2
+    roles: [antecedent, consequent]
+    description: >
+      Logical implication from an antecedent expression to a consequent
+      expression. Use for explicit conditional or rule-like statements
+      such as "if X then Y".
