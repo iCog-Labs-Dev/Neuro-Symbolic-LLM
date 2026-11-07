@@ -1,7 +1,7 @@
 """MORK integration tests requiring a live Docker container.
 
 Start MORK before running:
-    docker compose up -d --build
+    Start a compatible MORK HTTP server at MORK_SERVER_URL.
 
 Tests will FAIL (not skip) if MORK is unreachable.
 """

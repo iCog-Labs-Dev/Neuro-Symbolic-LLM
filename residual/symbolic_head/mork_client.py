@@ -244,7 +244,7 @@ class DockerMorkClient(MorkClient):
         if not self._mork_checked and not self.is_connected():
             raise ConnectionError(
                 f"MORK server unreachable at {self.server_url} during {operation}. "
-                f"Start it with: docker compose up -d --build"
+                "Start a compatible MORK HTTP server at the configured endpoint."
             )
         self._mork_checked = True
 

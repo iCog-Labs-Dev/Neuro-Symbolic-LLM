@@ -84,9 +84,26 @@ def test_native_shape_preserves_shared_variables():
     assert different != expected
 
 
-def test_unsupported_native_symbol_is_not_silently_encoded_or_truncated():
-    with pytest.raises(ValueError, match="63 bytes"):
-        _native_expression("(" + "a" * 64 + " $e)")
+def test_long_symbols_are_stable_distinct_and_bounded():
+    a = _native_expression("(" + "a" * 64 + " $e)")
+    b = _native_expression("(" + "b" * 64 + " $e)")
+    assert a == _native_expression("(" + "a" * 64 + " $e)")
+    assert a != b
+    assert a[1] == "$e"
+    assert len(a[0].encode("utf-8")) <= 63
+
+
+def test_generated_symbol_prefix_cannot_alias_a_source_constant():
+    encoded = _native_expression("(" + "a" * 64 + " $e)")[0]
+    assert _native_expression(f"({encoded} $e)")[0] != encoded
+
+
+def test_long_source_identifiers_remain_in_record_payload():
+    source = "(PropertyOf " + "e" * 100 + " $property)"
+    record = TemplateRecord("reference", source, np.ones(3), np.ones(3))
+    assert _decode(_encode(record, 3), 3).metta_expr == source
+    native = _native_expression(source)
+    assert native[0] == "PropertyOf" and native[2] == "$property"
 
 
 def test_native_export_size_is_checked_before_upload():

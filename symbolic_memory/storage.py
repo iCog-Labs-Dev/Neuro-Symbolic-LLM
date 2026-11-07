@@ -34,6 +34,7 @@ _NATIVE_HEAD = "BankTemplateV1"
 _HANDLE = re.compile(r"r[a-z2-7]{52}\Z")
 _DIGEST = re.compile(r"h[a-z2-7]{52}\Z")
 _HEX = re.compile(r"(?:[0-9a-f]{2}){1,30}\Z")
+_SYMBOL_PREFIX = "BankSym_"
 
 
 def _token(prefix: str, payload: bytes) -> str:
@@ -96,11 +97,40 @@ def _decode(payload: bytes, dimension: int) -> TemplateRecord:
     return TemplateRecord(identifier, expression, key, value)
 
 
-def _native_expression(source: str) -> Expression:
-    """Parse a native expression and enforce the server's wire-size limits."""
+def _needs_symbol_codec(node: Expression) -> bool:
+    if isinstance(node, tuple):
+        return any(_needs_symbol_codec(child) for child in node)
+    if node.startswith("$"):
+        return False
+    symbol: str = json.loads(node) if node.startswith('"') else node
+    return len(symbol.encode("utf-8")) > 63 or symbol.startswith(_SYMBOL_PREFIX)
+
+
+def _native_expression(
+    source: str, *, symbol_table: dict[str, str] | None = None
+) -> Expression:
+    """Intern oversized constants without changing structure or variables.
+
+    Complete source identifiers remain in the checksum-bound record payload.
+    Reserved-prefix inputs are escaped to prevent aliasing generated symbols.
+    """
     expression = parse_expression(source)
     if not isinstance(expression, tuple):
         raise ValueError("A native template must be a structured expression")
+    symbols = {} if symbol_table is None else symbol_table
+
+    def encode(node: Expression) -> Expression:
+        if isinstance(node, tuple):
+            return tuple(encode(child) for child in node)
+        if not _needs_symbol_codec(node):
+            return node
+        encoded = _token(_SYMBOL_PREFIX, node.encode("utf-8"))
+        if encoded in symbols and symbols[encoded] != node:
+            raise ValueError("Native symbol handle collision")
+        symbols[encoded] = node
+        return encoded
+
+    expression = encode(expression)
 
     def size(node: Expression) -> int:
         if isinstance(node, tuple):
@@ -118,9 +148,7 @@ def _native_expression(source: str) -> Expression:
         symbol = json.loads(node) if node.startswith('"') else node
         length = len(symbol.encode("utf-8"))
         if length > 63:
-            raise ValueError(
-                "Native symbol exceeds 63 bytes; a compatible MORK build is required"
-            )
+            raise ValueError("Encoded native symbol exceeds 63 bytes")
         return 1 + length
 
     # Include the native wrapper's constants and leave room below the 4 KiB buffer.
@@ -201,7 +229,12 @@ class MorkTemplateStore:
 
     @staticmethod
     def _namespace(bank: TemplateBank) -> str:
-        return _token("b", b"native-v1:" + bytes.fromhex(bank.input_snapshot_sha256))
+        codec = any(
+            _needs_symbol_codec(parse_expression(record.metta_expr))
+            for record in bank.records
+        )
+        version = b"native-v2-symbols:" if codec else b"native-v1:"
+        return _token("b", version + bytes.fromhex(bank.input_snapshot_sha256))
 
     def _query(self, pattern: str, template: str) -> str:
         response = self._http.get(
@@ -256,11 +289,12 @@ class MorkTemplateStore:
     @staticmethod
     def _expected(bank: TemplateBank) -> dict[str, bytes]:
         result = {}
+        symbols: dict[str, str] = {}
         metadata = {
             pattern.id: pattern.model_dump(mode="json") for pattern in bank.patterns
         }
         for record in bank.records:
-            _native_expression(record.metta_expr)
+            _native_expression(record.metta_expr, symbol_table=symbols)
             handle = _token("r", record.template_id.encode("utf-8"))
             if handle in result:
                 raise ValueError("Duplicate record ID or storage-handle collision")

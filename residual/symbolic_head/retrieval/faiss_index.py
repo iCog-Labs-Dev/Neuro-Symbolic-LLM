@@ -1,6 +1,9 @@
 """Rebuildable CPU FAISS index derived from authoritative MORK records."""
 
 import threading
+import time
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -10,6 +13,7 @@ from residual.symbolic_head.contracts.template_record import (
     validate_template_record,
 )
 
+faiss: Any
 try:
     import faiss
 except ImportError:
@@ -51,7 +55,46 @@ class FaissTemplateIndex:
         self.id_store: list[str] = []
         self.metta_store: list[str] = []
         self._id_set: set[str] = set()
+        self._gather_arrays: tuple[np.ndarray, np.ndarray] | None = None
+        self._generation = 0
+        self._native_listeners: dict[int, Callable[[], None]] = {}
+        self._next_listener = 0
         self._faiss_index = self._new_index()
+
+    def _invalidate_native(self) -> None:
+        """Invalidate compiled snapshots before a supported index mutation."""
+        for invalidate in tuple(self._native_listeners.values()):
+            invalidate()
+
+    def native_snapshot(
+        self,
+    ) -> tuple[int, tuple[str, ...], np.ndarray, np.ndarray, np.ndarray]:
+        """Export an atomic CPU snapshot, including the existing FAISS graph."""
+        with self._lock:
+            if not self.id_store:
+                raise ValueError("Native retrieval requires a nonempty bank")
+            return (
+                self._generation,
+                tuple(self.id_store),
+                np.ascontiguousarray(faiss.serialize_index(self._faiss_index)),
+                np.ascontiguousarray(np.stack(self.key_store), dtype=np.float32),
+                np.ascontiguousarray(np.stack(self.val_store), dtype=np.float32),
+            )
+
+    def watch_native_generation(
+        self, generation: int, invalidate: Callable[[], None]
+    ) -> int:
+        """Register only if the exported generation is still current."""
+        with self._lock:
+            if generation != self._generation:
+                raise RuntimeError("Native bank generation changed during setup")
+            self._next_listener += 1
+            self._native_listeners[self._next_listener] = invalidate
+            return self._next_listener
+
+    def unwatch_native_generation(self, token: int) -> None:
+        with self._lock:
+            self._native_listeners.pop(token, None)
 
     def _new_index(self):
         if self._backend == "hnsw":
@@ -90,8 +133,8 @@ class FaissTemplateIndex:
             seen.add(template_id)
             ids.append(template_id)
             expressions.append(expression)
-            keys.append(key)
-            values.append(value)
+            keys.append(key.copy())
+            values.append(value.copy())
 
         replacement = self._new_index()
         if keys:
@@ -102,12 +145,15 @@ class FaissTemplateIndex:
             replacement.add(normalized)
 
         with self._lock:
+            self._invalidate_native()
             self._faiss_index = replacement
             self.key_store = keys
             self.val_store = values
             self.id_store = ids
             self.metta_store = expressions
             self._id_set = seen
+            self._gather_arrays = None
+            self._generation += 1
 
     def add_template(
         self,
@@ -125,13 +171,96 @@ class FaissTemplateIndex:
         with self._lock:
             if template_id in self._id_set:
                 raise ValueError(f"Duplicate template id: {template_id}")
+            self._invalidate_native()
             self._faiss_index.add(normalized)
-            self.key_store.append(key)
-            self.val_store.append(value)
+            self.key_store.append(key.copy())
+            self.val_store.append(value.copy())
             self.id_store.append(template_id)
             self.metta_store.append(metta_expr)
             self._id_set.add(template_id)
+            self._gather_arrays = None
+            self._generation += 1
         return True
+
+    def numeric_binding(self) -> tuple[int, tuple[str, ...]]:
+        """Bind an immutable ID ordering; supported mutations invalidate the generation."""
+        with self._lock:
+            if not self.id_store:
+                raise ValueError("Native retrieval requires a nonempty bank")
+            if self._gather_arrays is None:
+                self._gather_arrays = (
+                    np.stack(self.key_store),
+                    np.stack(self.val_store),
+                )
+            return self._generation, tuple(self.id_store)
+
+    def query_top_k_into(
+        self,
+        query_vectors: np.ndarray,
+        top_m: int,
+        packed: np.ndarray,
+        *,
+        expected_generation: int,
+    ) -> float:
+        """Fill contiguous float32 K/V, scores and bit-preserved int32 indices.
+
+        Intended for reusable pinned host buffers. Return seconds spent on CPU
+        validation/normalization, FAISS search and K/V gathering; metadata packing
+        remains outside that interval. No IDs, vectors or labels are synthesized.
+        A stale generation fails instead of reinterpreting a compiled ID registry.
+        """
+        if isinstance(top_m, bool) or not isinstance(top_m, int) or top_m <= 0:
+            raise ValueError("top_m must be a positive integer")
+        queries = np.asarray(query_vectors, dtype=np.float32)
+        if queries.ndim != 2 or queries.shape[1] != self.key_dim or not len(queries):
+            raise ValueError("Queries must have nonempty [count, key_dim] shape")
+        with self._lock:
+            if self._generation != expected_generation:
+                raise RuntimeError(
+                    "Native bank generation changed; create a new retriever"
+                )
+            count, matches = len(queries), min(top_m, len(self.id_store))
+            vectors = count * matches * self.key_dim
+            metadata = count * matches
+            if (
+                matches == 0
+                or packed.dtype != np.float32
+                or packed.shape != (2 * vectors + 2 * metadata,)
+                or not packed.flags.c_contiguous
+                or not packed.flags.writeable
+            ):
+                raise ValueError(
+                    "Packed result must be writable contiguous float32 with the exact bank shape"
+                )
+            if np.shares_memory(queries, packed):
+                raise ValueError("Query and output buffers must not overlap")
+            if self._gather_arrays is None:
+                self._gather_arrays = (
+                    np.stack(self.key_store),
+                    np.stack(self.val_store),
+                )
+            keys, values = self._gather_arrays
+            selected_keys = packed[:vectors].reshape(count, matches, self.key_dim)
+            selected_values = packed[vectors : 2 * vectors].reshape(
+                count, matches, self.key_dim
+            )
+            started = time.perf_counter_ns()
+            if not np.isfinite(queries).all():
+                raise ValueError("Query vectors must contain only finite values")
+            norms = np.linalg.norm(queries, axis=1, keepdims=True)
+            normalized = np.ascontiguousarray(
+                np.where(norms > 0, queries / (norms + 1e-8), queries),
+                dtype=np.float32,
+            )
+            scores, labels = self._faiss_index.search(normalized, matches)
+            if np.any((labels < 0) | (labels >= len(self.id_store))):
+                raise RuntimeError("FAISS returned an invalid template label")
+            np.take(keys, labels, axis=0, out=selected_keys, mode="clip")
+            np.take(values, labels, axis=0, out=selected_values, mode="clip")
+            elapsed = (time.perf_counter_ns() - started) / 1e9
+            packed[2 * vectors : 2 * vectors + metadata] = scores.reshape(-1)
+            packed.view(np.int32)[2 * vectors + metadata :] = labels.reshape(-1)
+            return elapsed
 
     def contains_template(self, template_id: str) -> bool:
         with self._lock:
@@ -171,23 +300,38 @@ class FaissTemplateIndex:
             scores = np.atleast_2d(np.asarray(scores))
             labels = np.atleast_2d(np.asarray(labels))
 
-            matched_keys = np.empty(
-                (num_queries, k_actual, self.key_dim), dtype=np.float32
-            )
-            matched_vals = np.empty(
-                (num_queries, k_actual, self.key_dim), dtype=np.float32
-            )
-            matched_scores = np.empty((num_queries, k_actual), dtype=np.float32)
-            matched_ids: list[list[str]] = [[] for _ in range(num_queries)]
-            for i in range(num_queries):
+            matched_keys: np.ndarray
+            matched_vals: np.ndarray
+            matched_scores: np.ndarray
+            matched_ids: list[list[str]]
+            if num_queries == 1:
+                matched_keys = np.empty((1, k_actual, self.key_dim), dtype=np.float32)
+                matched_vals = np.empty_like(matched_keys)
+                matched_scores = np.empty((1, k_actual), dtype=np.float32)
+                matched_ids = [[]]
                 for j in range(k_actual):
-                    item_idx = int(labels[i, j])
+                    item_idx = int(labels[0, j])
                     if item_idx < 0 or item_idx >= num_items:
                         raise RuntimeError("FAISS returned an invalid template label")
-                    matched_keys[i, j] = self.key_store[item_idx]
-                    matched_vals[i, j] = self.val_store[item_idx]
-                    matched_scores[i, j] = scores[i, j]
-                    matched_ids[i].append(self.id_store[item_idx])
+                    matched_keys[0, j] = self.key_store[item_idx]
+                    matched_vals[0, j] = self.val_store[item_idx]
+                    matched_scores[0, j] = scores[0, j]
+                    matched_ids[0].append(self.id_store[item_idx])
+            else:
+                if np.any((labels < 0) | (labels >= num_items)):
+                    raise RuntimeError("FAISS returned an invalid template label")
+                if self._gather_arrays is None:
+                    self._gather_arrays = (
+                        np.stack(self.key_store),
+                        np.stack(self.val_store),
+                    )
+                keys, values = self._gather_arrays
+                matched_keys = keys[labels]
+                matched_vals = values[labels]
+                matched_scores = np.asarray(scores, dtype=np.float32).copy()
+                matched_ids = [
+                    [self.id_store[int(index)] for index in row] for row in labels
+                ]
 
         return MorkQueryResult(
             keys=matched_keys,

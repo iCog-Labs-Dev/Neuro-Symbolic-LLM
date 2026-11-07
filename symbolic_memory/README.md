@@ -5,7 +5,7 @@ templates in MORK and builds a FAISS retrieval index.
 
 ## Requirements
 
-- Python dependencies installed with `pip install -e '.[tier2]'`.
+- Python dependencies installed with `pip install -e '.[miner]'`.
 - A compatible MORK HTTP server.
 - Pattern and embedding JSONL artifacts covering the same set of unique IDs.
 
@@ -244,6 +244,146 @@ ordered callback. Shapes are static for compilation; a new batch shape can
 require a new executable. Lowering/compilation and synchronized steady-state
 execution must be measured separately.
 
+## Colocated native CUDA retrieval for A4
+
+`NativeJaxRetriever` provides the same `RetrievedTemplates` interface without
+the per-query TCP hop. The bank is still MORK-authoritative: `from_mork` verifies
+native structures and linked payloads before building a private CPU FAISS index.
+The verified index is serialized once and deserialized into a CPU-owned C++
+FAISS snapshot, preserving its graph, search parameters and insertion ordering.
+At runtime JAX invokes the CUDA FFI handler, which copies the query, normalizes
+and searches in C++, gathers the original float32 K/V and returns the results.
+No Python callback executes in this search path. Only queries and complete
+float32 K/V, scores and indices cross the GPU/CPU boundary. There is no GPU
+retrieval-bank cache or synthetic fallback. Small floating-point differences in
+normalization/FAISS builds require parity checks, particularly for tied scores.
+
+Build explicitly in the installed **Linux CUDA/JAX** environment, using a fresh
+output path (no package installation or automatic compilation at import):
+
+```bash
+python -m symbolic_memory.native_bridge build --faiss-prefix /path/to/faiss-sdk --output native/a4-retrieval-NEW.so
+```
+
+The SDK must contain `include/faiss/Index.h` and `lib/libfaiss.so` (or `lib64`),
+with the same FAISS version as Python. A pip wheel alone may not supply that SDK.
+`--faiss-library PATH` selects an explicitly built compatible shared variant
+(for example `libfaiss_avx2.so` on a supporting CPU). Native and Python compile
+options are recorded; comparing a generic C++ library with an optimized wheel
+does not isolate Python overhead. Never select an instruction set the CPU lacks.
+Without `--faiss-prefix`, the build checks the active environment, `/usr/local`
+and `/usr`; it never downloads/builds FAISS automatically. A C++17 compiler with
+OpenMP, CUDA runtime headers/library and JAX FFI headers must already be installed.
+The adjacent `.so.json` records ABI 2, source/library/JAX fingerprints and the
+FAISS version and shared-library fingerprint. The loader rejects mismatches;
+rebuild after relevant changes. ABI-1 callback libraries are not interchangeable.
+The implementation uses [JAX's CUDA FFI interface](https://docs.jax.dev/en/latest/ffi.html).
+
+```python
+from pathlib import Path
+from symbolic_memory.native_bridge import NativeJaxRetriever
+
+with NativeJaxRetriever.from_mork(
+    bank, server_url="http://127.0.0.1:18000",
+    library_path=Path("native/a4-retrieval-NEW.so"), top_m=8,
+) as retrieve:
+    # Pass retrieve directly to SymbolicHead; retain it until compiled calls finish.
+    compiled_retrieve = jax.jit(retrieve)
+    templates = compiled_retrieve(gpu_queries)
+    jax.block_until_ready(templates)
+```
+
+The A4 training runner (`python -m experiments.run_stage_a4`) defaults to native:
+supply `--native-library PATH.so`.
+`--retrieval-backend tcp` explicitly selects the existing service path.
+Training and evaluation use the same selection. Native mode does not
+need `serve-bank` or a retrieval TCP port, but does need the existing MORK endpoint.
+It does not replace or restart an existing service.
+
+Each bank/query shape has an opaque, never-reused native handle and reusable
+pinned buffers. At most eight shapes are retained per retriever. Supported index
+mutations invalidate its generation; create a new retriever rather than rebinding
+compiled IDs. ID indices always refer to `template_ids`, not FAISS insertion
+order. Closing waits for native calls already executing, releases buffers, and makes
+old compiled handles fail instead of reading another bank. Synchronize submitted
+JAX calls before closing; a call still queued after close fails explicitly.
+One selected CUDA device is supported; sharded/multi-GPU
+execution is not qualified. Use a context manager and synchronize before exit.
+
+For explicit diagnostics, `with retrieve.capture_queries() as queries:` captures
+queries in C++ and fills the Python list when the scope exits, outside timed
+execution. Capture is bounded (default 64 calls), cannot nest or close its
+retriever, and is disabled in ordinary calls. The former `set_observer` callback
+API is removed. Concurrent submission during capture is not supported.
+
+Native counters report actual CPU index time separately from transfers and
+`host_search_seconds`. Both transfer synchronization points remain in place in
+the default `return_mode="sync"`.
+Latency benchmarks must synchronize execution and record the workload and timing
+boundaries. Benchmark drivers are separate from the A4 training entry point.
+
+The opt-in `return_mode="event"` queues CPU-to-GPU copies and a completion event
+on XLA's CUDA stream, without waiting on the host before returning. GPU consumers
+remain stream-ordered. The context waits for its event before reusing pinned
+buffers or freeing them on close. GPU-to-CPU readiness is still synchronized
+before CPU search. Partially submitted transfers are drained on error; a failed
+drain prevents further reuse. If CUDA cleanup fails, release reports an error
+and retains the native context rather than freeing potentially in-flight memory.
+Callers must still finish submitted JAX execution before closing the retriever.
+
+In event mode `h2d_seconds` measures enqueue/event-record host time only, not the
+completed transfer. A synchronized full-call benchmark still includes the
+remaining copy/completion time; subtracting CPU index work must not discard it.
+The build manifest records supported return modes. Rebuild explicitly after
+this source update; previous ABI-2 libraries lack the new context-creation API.
+
+CUDA copy-event profiling is a separate opt-in scope:
+
+```python
+with retrieve.transfer_timing():
+    jax.block_until_ready(compiled_model(...))
+    intervals = retrieve.transfer_stats()
+```
+
+`transfer_stats()` reports profiled call count and D2H/H2D event seconds. Each
+copy direction has its own timing-enabled event pair on XLA's stream. The CPU
+search between pairs and GPU query production preceding the D2H start event are
+excluded. Event intervals can include scheduling/submission gaps; they are not
+hardware PCIe bus-utilization measurements. Stats are collected before event
+reuse, so repeated reads do not double-count completed calls. Timing is disabled
+outside the scope, and new query shapes created inside it inherit profiling.
+Capture, nested profiling and closing inside the scope are rejected. Concurrent
+submission during profiling is unsupported.
+
+Run instrumented model calls separately from uninstrumented latency samples.
+Report the uninstrumented denominator, instrumented wall time and transfer-only
+fraction explicitly; a transfer-only result does not qualify complete bridge
+overhead. Native source updates require an explicit rebuild, including the new
+profiling-control API. This instrumentation does not change the default return
+mode or A4 objective.
+
+The default output layout is `packed`. The opt-in constructor argument
+`output_layout="direct"` copies K, V, scores and int32 registry indices into
+separate JAX result buffers without GPU unpacking. Both layouts use the same
+CPU search, transfer the same number of bytes and retain both synchronization
+points. Direct output uses four H2D submissions rather than one; performance
+must be measured, not inferred from removing unpacking. Rebuild the library
+explicitly after updating native source; earlier ABI-2 builds do not contain
+the additional direct-output handler.
+
+After building, qualify the compiled CPU and CUDA paths explicitly:
+
+```bash
+export NSLLM_NATIVE_LIBRARY=/absolute/path/to/native/a4-retrieval-NEW.so
+python -m pytest tests/unit/test_native_bridge.py tests/unit/test_retrieval_index.py -q -rs
+```
+
+Without that environment variable, compiled parity checks are skipped; handle
+controls alone do not establish native execution or latency. CUDA checks also
+require a real JAX GPU. Snapshot deserialization receives only the locally
+serialized, verified in-memory index; arbitrary serialized indexes are not a
+supported input contract.
+
 ## Storage representation
 
 Each immutable bank occupies a namespace derived from its input fingerprint
@@ -270,10 +410,15 @@ at most 60 characters. Neither representation truncates public IDs or changes
 vector values. MORK's variable notation (`$` and `_N`) is compared by structure
 and variable sharing; original variable names remain in the linked metadata.
 
-Native terms must fit the deployed server's capabilities. The current adapter
-rejects symbols exceeding 63 UTF-8 bytes, arity above 63 and native expressions
-exceeding its conservative export-size budget. Unsupported terms are not replaced
-by opaque payloads. Larger native structures require a compatible server build.
+Constants exceeding 63 UTF-8 bytes, or beginning with the reserved `BankSym_`
+prefix, are mapped to deterministic bounded symbols. Collision checks apply
+within each bank; linked payloads retain the original constants and template.
+The native expression tree and variable sharing remain intact.
+
+Native terms must fit the deployed server's capabilities. The adapter rejects
+arity above 63 and native expressions exceeding its conservative export-size
+budget. Unsupported terms are not replaced by opaque payloads. Larger native
+structures require a compatible server build.
 
 The existing `residual/symbolic_head/mork_client.py` interface is independent
 of this application-layer representation.
