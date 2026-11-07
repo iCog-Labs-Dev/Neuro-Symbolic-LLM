@@ -19,7 +19,7 @@ def test_prompt_uses_general_catalog_signatures_and_examples():
         catalog=load_ontology_catalog(),
     )
 
-    assert prompt.version.startswith("general-v3+sha256.")
+    assert prompt.version.startswith("general-v1+sha256.")
     assert len(prompt.version.split("+sha256.")[1]) == 64
 
     # General ontology versions are included.
@@ -31,12 +31,14 @@ def test_prompt_uses_general_catalog_signatures_and_examples():
     assert "Causes(" in prompt.text
     assert "Evaluation" in prompt.text
 
-    # General worked examples are embedded in the prompt.
-    assert "Nora sang." in prompt.text
-    assert "Nora did not open the gate." in prompt.text
-    assert "The parcel was carried by Ivo." in prompt.text
-    assert "If it rains, Nora will leave." in prompt.text
-    assert "All red things are nice." in prompt.text
+    # General extraction instructions are included.
+    assert "semantic roles" in prompt.text
+    assert "agentless passive" in prompt.text
+    assert "factuality" in prompt.text
+    assert "hypothetical" in prompt.text
+
+    # The supplied source is included.
+    assert "Source text:\nNora sang." in prompt.text
 
 
 def test_prompt_excludes_discourse_predicate_signatures():
@@ -66,14 +68,11 @@ def test_prompt_preserves_source_context_and_current_contract():
         catalog=load_ontology_catalog(),
     )
 
-    extracted_source = prompt.text.split("<source_text>\n", 1)[1].split(
-        "\n</source_text>", 1
-    )[0]
+    extracted_source = prompt.text.rsplit("Source text:\n", 1)[1]
 
     assert extracted_source == source
 
-    assert f"<reference_context>\n{context}\n</reference_context>" in prompt.text
-
+    assert f"Background context:\n{context}" in prompt.text
     # General semantic guidance remains present.
     assert "semantic roles" in prompt.text
     assert "agentless passive" in prompt.text
@@ -110,19 +109,23 @@ def test_prompt_uses_only_selected_general_ontology_modules():
     assert "Concession(statement:" not in prompt.text
 
 
-def test_prompt_keeps_general_examples_without_external_jsonl():
+def test_prompt_keeps_general_guidance_without_discourse_examples():
     prompt = build_catalog_document_prompt(
         "Mira left.",
         catalog=load_ontology_catalog(modules=("upper",)),
     )
 
-    assert "Nora sang." in prompt.text
-    assert "Nora did not open the gate." in prompt.text
-    assert "If it rains, Nora will leave." in prompt.text
-    assert "All red things are nice." in prompt.text
+    # General semantic extraction remains available.
+    assert "Evaluation" in prompt.text
+    assert "Entity(" in prompt.text
 
-    # Old discourse worked example is not part of general examples.
-    assert "Although it snowed, Nora sang." not in prompt.text
+    # The current source is included.
+    assert "Source text:\nMira left." in prompt.text
+
+    # Discourse-specific predicates are excluded.
+    assert "Concession(statement:" not in prompt.text
+    assert "EvokesExpectation(trigger:" not in prompt.text
+    assert "Defeats(defeating_outcome:" not in prompt.text
 
 
 def test_prompt_rejects_empty_source_text():

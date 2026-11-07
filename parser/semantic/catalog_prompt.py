@@ -357,3 +357,127 @@ def build_router_prompt(source_text: str) -> CatalogDocumentPrompt:
         version=f"{version}+sha256.{_prompt_fingerprint(template)}",
         text=template.replace("{source_text}", source_text),
     )
+
+
+def build_routed_extraction_prompt(
+    source_text: str,
+    *,
+    catalog: OntologyCatalog,
+    run_discourse: bool,
+    context: str = "",
+) -> CatalogDocumentPrompt:
+    """Build one extraction prompt for the selected route."""
+
+    general = build_catalog_document_prompt(
+        source_text,
+        catalog=catalog,
+        context=context,
+    )
+
+    if not run_discourse:
+        return general
+
+    discourse_version, discourse_template = _load_prompt_config(
+        _DISCOURSE_PROMPT_PATH,
+        "discourse",
+    )
+
+    _require_placeholders(
+        discourse_template,
+        ("{discourse_catalog_guide}",),
+        "discourse",
+    )
+
+    discourse_guidance = discourse_template.replace(
+        "{discourse_catalog_guide}",
+        _discourse_catalog_guide(catalog),
+    ).strip()
+
+    # Keep the shared general instructions in one place.
+    # Insert the discourse extension before the source input
+    # so the source is not sent twice.
+    source_marker = "## 13. INPUT"
+
+    if source_marker not in general.text:
+        raise ValueError("General prompt must contain an INPUT section")
+
+    general_instructions, input_section = general.text.rsplit(source_marker, 1)
+
+    combined = (
+        discourse_guidance
+        + "\n\n"
+        + general_instructions.rstrip()
+        + "\n\n"
+        + """
+    ## FINAL COMBINED EXTRACTION REQUIREMENTS
+
+    You must perform BOTH stages in this single generation.
+
+    STAGE 1: DISCOURSE ANALYSIS
+    - Identify all relevant clauses.
+    - Extract all supported discourse relationships.
+    - Identify supported implicit propositions.
+    - Preserve shared entity and proposition IDs.
+
+    STAGE 2: GENERAL SEMANTIC EXTRACTION
+    - Extract the semantic content of EVERY relevant clause.
+    - Include actions, participants, semantic roles, and polarity.
+    - Preserve negation independently of discourse relations.
+    - Do not omit general assertions because discourse
+    assertions already describe the relationship between clauses.
+    - Reuse the entities and IDs identified in Stage 1.
+
+    FINAL OUTPUT:
+    Return exactly ONE SemanticExtraction JSON object containing:
+    - entities (BOTH general and discourse entities)
+    - assertions (BOTH discourse and general assertions)
+    - rules
+
+    ENTITY COMPLETENESS IS MANDATORY:
+
+    The entities array MUST include every entity referenced
+    by any assertion.
+
+    When discourse analysis identifies clauses:
+    - Include each clause as an explicit Clause entity.
+    - Include exact source-grounded clause mentions.
+    - Reuse those clause IDs in discourse assertions.
+
+    When discourse analysis identifies an implicit expectation:
+    - Include a Proposition entity with origin="implicit".
+    - Include natural-language content and source evidence.
+    - Include hypothetical symbolic_content.
+    - Reference that Proposition entity from EvokesExpectation
+      and Defeats.
+    - Never generate predicate="Proposition" as an assertion.
+
+    Before returning the JSON:
+    1. Collect every entity_id used in assertions.
+    2. Check that each ID exists in entities.
+    3. Check that every implicit Proposition has symbolic_content.
+    4. Check that Evaluation assertions use fallback=true.
+    5. Check that catalog assertions use fallback=false.
+    6. Check that all referenced entity IDs are consistent.
+
+    Never return an extraction with undeclared entity IDs.
+
+    Before returning, verify that every clause containing an
+    explicit action or semantic relationship has its corresponding
+    general semantic assertion or rule representation.
+
+    Do not return only discourse assertions.
+    Do not return a separate DiscourseExtraction object.
+    """
+        + "\n\n"
+        + source_marker
+        + input_section
+    )
+
+    return CatalogDocumentPrompt(
+        version=(
+            f"{general.version}|"
+            f"{discourse_version}+sha256."
+            f"{_prompt_fingerprint(discourse_guidance)}"
+        ),
+        text=combined,
+    )

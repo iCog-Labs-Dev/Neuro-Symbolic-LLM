@@ -50,6 +50,33 @@ class SourceQuote(SemanticSchemaModel):
 # ── Model output ─────────────────────────────────────────────────────────────
 
 
+class PropositionSymbolicContent(SemanticSchemaModel):
+    """Symbolic meaning of an implicit proposition.
+
+    This describes an expected or inferred proposition,
+    not a fact asserted by the source.
+    """
+
+    predicate: str = Field(pattern=_NO_WHITESPACE)
+    relation: str | None = Field(default=None, pattern=_SNAKE_CASE)
+    arguments: list[SemanticArgument] = Field(default_factory=list)
+    fallback: bool = False
+    polarity: Literal["positive", "negative"] = "positive"
+    factuality: Literal["hypothetical"] = "hypothetical"
+
+    @model_validator(mode="after")
+    def validate_symbolic_content(self):
+        if self.predicate == "Evaluation":
+            if not self.relation:
+                raise ValueError("Evaluation symbolic content requires a relation")
+            if not self.fallback:
+                raise ValueError("Evaluation symbolic content requires fallback=true")
+        elif not self.arguments:
+            raise ValueError("Catalog predicates require symbolic arguments")
+
+        return self
+
+
 class SemanticEntity(SemanticSchemaModel):
     """A document-local semantic entity, explicitly mentioned or implicitly
     extracted as a proposition.
@@ -76,18 +103,22 @@ class SemanticEntity(SemanticSchemaModel):
     mention: SourceQuote | None = None
     content: str | None = None
     evidence: list[SourceQuote] = Field(default_factory=list)
+    symbolic_content: PropositionSymbolicContent | None = None
 
     @model_validator(mode="after")
     def validate_origin(self) -> SemanticEntity:
-        """Validate source grounding according to entity origin."""
-
         if self.origin == "explicit":
             if self.mention is None:
                 raise ValueError("Explicit entities require a source mention")
 
-            if self.content is not None or self.evidence:
+            if (
+                self.content is not None
+                or self.evidence
+                or self.symbolic_content is not None
+            ):
                 raise ValueError(
-                    "Explicit entities cannot use implicit content/evidence fields"
+                    "Explicit entities cannot contain implicit "
+                    "content, evidence, or symbolic_content"
                 )
 
         elif self.origin == "implicit":
@@ -101,9 +132,10 @@ class SemanticEntity(SemanticSchemaModel):
                 raise ValueError("Implicit propositions require supporting evidence")
 
             if self.mention is not None:
-                raise ValueError(
-                    "Implicit propositions cannot have a fabricated mention"
-                )
+                raise ValueError("Implicit propositions cannot have a source mention")
+
+            if self.symbolic_content is None:
+                raise ValueError("Implicit propositions require symbolic_content")
 
         return self
 
@@ -171,9 +203,11 @@ class SemanticAssertion(SemanticSchemaModel):
         the parser against the predicate catalog.
         """
 
-        if self.predicate != "Evaluation" and not self.arguments:
+        if self.predicate == "Proposition":
             raise ValueError(
-                f"{self.predicate} must contain at least one semantic argument"
+                "Proposition is an entity type, not an assertion predicate. "
+                "Represent implicit propositions as SemanticEntity "
+                "with entity_type='Proposition' and symbolic_content."
             )
 
         if self.predicate == "Evaluation" and not self.relation:
@@ -255,6 +289,15 @@ class SemanticExtraction(SemanticSchemaModel):
             raise ValueError("Entity IDs must be unique")
 
         known = set(entity_ids)
+        for entity in self.entities:
+            if entity.symbolic_content is not None:
+                for argument in entity.symbolic_content.arguments:
+                    if argument.entity_id not in known:
+                        raise ValueError(
+                            f"Implicit proposition {entity.id!r} "
+                            f"references unknown entity "
+                            f"{argument.entity_id!r}"
+                        )
         for assertion in self.assertions:
             _require_known_arguments(assertion, known)
 
@@ -300,10 +343,9 @@ class DiscourseExtraction(SemanticSchemaModel):
 
 
 class ParserRoute(SemanticSchemaModel):
-    """Validated router decision; general extraction is mandatory."""
+    """Whether discourse-aware extraction is required."""
 
-    run_general: Literal[True] = True
-    run_discourse: bool = False
+    run_discourse: bool
 
 
 def _require_known_arguments(assertion: SemanticAssertion, allowed: set[str]) -> None:

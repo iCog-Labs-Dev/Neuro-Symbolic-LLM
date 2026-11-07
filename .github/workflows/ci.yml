@@ -8,6 +8,8 @@ on:
     branches:
       - main
       - Base
+      - A2
+      - a2-final
       - symbolic_head
   workflow_dispatch:
 

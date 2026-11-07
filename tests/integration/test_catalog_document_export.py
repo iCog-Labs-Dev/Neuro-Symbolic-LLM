@@ -42,7 +42,14 @@ def _source_line(
 
 
 def _source_text(prompt: str) -> str:
-    return prompt.rsplit("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
+    marker = "Source text:\n"
+
+    if marker not in prompt:
+        raise AssertionError(
+            "Current parser prompt does not contain the source-text section"
+        )
+
+    return prompt.rsplit(marker, 1)[1]
 
 
 def _answer(*, prompt: str, model: str) -> str:

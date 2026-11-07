@@ -9,7 +9,7 @@ description = "PC residual with symbolic head on frozen LLM"
 requires-python = ">=3.11"
 dependencies = [
     # FabricPC: pinned release — only upgrade deliberately
-    "fabricpc @ git+https://github.com/trueagi-io/FabricPC.git@v0.3.0",
+    "fabricpc @ git+https://github.com/trueagi-io/FabricPC.git@v0.6.0",
 
     # JAX ecosystem
     "jax>=0.4.30",
@@ -91,6 +91,7 @@ include = [
     "substrate*",
     "configs.parser_config",
     "residual*",
+    "losses*",
     "stages*",
     "metrics*",
 ]
@@ -145,9 +146,13 @@ known-first-party = [
     "tiers",
     "symbolic_pipeline",
     "residual",
+    "losses",
     "stages",
     "metrics",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"stages/stage_A/A3_model.py" = ["N999"]
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
 [tool.mypy]

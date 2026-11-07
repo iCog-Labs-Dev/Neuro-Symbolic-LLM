@@ -138,3 +138,6 @@ htmlcov/
 Thumbs.db
 .DS_Store
 runs/
+models/
+.local-tools/
+.review-notes/

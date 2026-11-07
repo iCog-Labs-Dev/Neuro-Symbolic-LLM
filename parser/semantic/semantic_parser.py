@@ -26,7 +26,7 @@ from parser.ontology.catalog import OntologyCatalog, load_ontology_catalog
 from parser.semantic.backends import ModelBackend, OutputTruncatedError
 from parser.semantic.catalog_prompt import (
     build_catalog_document_prompt,
-    build_discourse_prompt,
+    build_routed_extraction_prompt,
     build_router_prompt,
 )
 from parser.semantic.metta_renderer import MettaRenderError
@@ -42,7 +42,6 @@ from parser.semantic.normalization import (
 )
 from parser.semantic.output_cleanup import clean_model_output
 from parser.semantic.schema import (
-    DiscourseExtraction,
     ParserRoute,
     SemanticAssertion,
     SemanticExtraction,
@@ -359,7 +358,38 @@ class _BaseSemanticParser:
 
         for assertion in extraction.assertions:
             self._validate_signature(assertion, entity_types)
+        for entity in extraction.entities:
+            symbolic = entity.symbolic_content
 
+            if symbolic is None:
+                continue
+
+            if (
+                symbolic.predicate != "Evaluation"
+                and symbolic.predicate not in self._catalog.relations
+            ):
+                raise SemanticParseError(
+                    f"Implicit proposition {entity.id!r} uses "
+                    f"unknown predicate {symbolic.predicate!r}"
+                )
+
+            symbolic_assertion = SemanticAssertion(
+                predicate=symbolic.predicate,
+                relation=symbolic.relation,
+                arguments=symbolic.arguments,
+                fallback=symbolic.fallback,
+                polarity=symbolic.polarity,
+                factuality="hypothetical",
+                modality="none",
+                confidence=1.0,
+                evidence=entity.evidence,
+                alternatives=[],
+            )
+
+            self._validate_signature(
+                symbolic_assertion,
+                entity_types,
+            )
         for rule in extraction.rules:
             rule_types = dict(entity_types)
             for variable in rule.variables:
@@ -434,7 +464,7 @@ class _BaseSemanticParser:
         catalog_predicates = sorted(
             predicate
             for predicate in self._catalog.relations
-            if predicate != "Evaluation"
+            if predicate not in {"Evaluation", "Proposition"}
         )
 
         evaluation_branch = {
@@ -706,34 +736,100 @@ class _BaseSemanticParser:
         return self.clean_model_output(output)
 
     def generate_extraction_payload(
-        self, document: SourceDocument, *, catalog: OntologyCatalog
+        self,
+        document: SourceDocument,
+        *,
+        catalog: OntologyCatalog,
+        run_discourse: bool = False,
     ) -> tuple[dict[str, Any], str]:
-        """Ask the model for the raw extraction of one document.
+        """Generate one routed semantic extraction."""
 
-        Returns the decoded JSON object and the prompt version. The payload is
-        a draft: parse_document normalizes and validates it.
-        """
-        prompt = build_catalog_document_prompt(
-            document.source_text, catalog=catalog, context=document.context
+        prompt = build_routed_extraction_prompt(
+            document.source_text,
+            catalog=catalog,
+            context=document.context,
+            run_discourse=run_discourse,
         )
+
         cleaned = self._generate_json_text(
-            prompt.text, output_schema=self._build_extraction_output_schema()
+            prompt.text,
+            output_schema=self._build_extraction_output_schema(),
         )
-        print(
-            "\n--- GENERAL EXTRACTION RAW OUTPUT ---\n",
-            cleaned,
-            "\n------------------------------------\n",
-            file=sys.stderr,
-        )
+
         if not cleaned:
             raise SemanticParseError("The model returned an empty response")
+
         try:
             payload = json.loads(cleaned)
         except json.JSONDecodeError as error:
             raise SemanticParseError("The model returned invalid JSON") from error
+
         if not isinstance(payload, dict):
             raise SemanticParseError("Model output must be a JSON object")
+
         return payload, prompt.version
+
+    def repair_extraction_payload(
+        self,
+        document: SourceDocument,
+        payload: dict[str, Any],
+        validation_error: Exception,
+        *,
+        catalog: OntologyCatalog,
+        run_discourse: bool,
+    ) -> dict[str, Any]:
+        """Ask the teacher to correct an invalid extraction once."""
+
+        original_prompt = build_routed_extraction_prompt(
+            document.source_text,
+            catalog=catalog,
+            context=document.context,
+            run_discourse=run_discourse,
+        )
+
+        repair_prompt = (
+            original_prompt.text
+            + "\n\n## VALIDATION CORRECTION\n"
+            + "Your previous extraction failed validation.\n"
+            + "Correct the JSON while preserving all supported "
+            "semantic information.\n"
+            + "Do not invent unsupported entities or assertions.\n"
+            + "Every assertion argument must reference a declared "
+            "entity or valid rule variable.\n"
+            + "Declare all referenced Clause entities with exact "
+            "source mentions.\n"
+            + "Declare implicit Proposition entities with content, "
+            "evidence, and hypothetical symbolic_content.\n"
+            + "Never use Proposition as an assertion predicate.\n"
+            + "Evaluation assertions must use fallback=true.\n"
+            + "Catalog assertions must use fallback=false.\n"
+            + "Return the complete corrected SemanticExtraction "
+            "JSON only.\n\n"
+            + "Validation errors:\n"
+            + str(validation_error)
+            + "\n\nPrevious JSON:\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+        )
+
+        cleaned = self._generate_json_text(
+            repair_prompt,
+            output_schema=self._build_extraction_output_schema(),
+        )
+
+        if not cleaned:
+            raise SemanticParseError("Teacher returned an empty correction")
+
+        try:
+            corrected = json.loads(cleaned)
+        except json.JSONDecodeError as error:
+            raise SemanticParseError(
+                "Teacher returned invalid correction JSON"
+            ) from error
+
+        if not isinstance(corrected, dict):
+            raise SemanticParseError("Corrected extraction must be a JSON object")
+
+        return corrected
 
     def route_document(self, document: SourceDocument) -> tuple[ParserRoute, str]:
         """Decide whether a discourse pass is needed."""
@@ -751,260 +847,103 @@ class _BaseSemanticParser:
 
         return route, prompt.version
 
-    @staticmethod
-    def _validate_discourse_payload(
-        discourse: DiscourseExtraction,
-    ) -> None:
-        """Validate discourse entity references and expectation propositions."""
-
-        entities = {entity.id: entity for entity in discourse.entities}
-
-        for assertion in discourse.assertions:
-            for argument in assertion.arguments:
-                if argument.entity_id not in entities:
-                    raise SemanticParseError(
-                        f"{assertion.predicate} references undeclared entity "
-                        f"{argument.entity_id!r}"
-                    )
-
-            expected_roles = {
-                "EvokesExpectation": "expected_result",
-                "Defeats": "prior_expectation",
-            }
-
-            expected_role = expected_roles.get(assertion.predicate)
-
-            if expected_role is None:
-                continue
-
-            matching = [
-                argument
-                for argument in assertion.arguments
-                if argument.role == expected_role
-            ]
-
-            if len(matching) != 1:
-                raise SemanticParseError(
-                    f"{assertion.predicate} must contain exactly one "
-                    f"{expected_role!r} argument"
-                )
-
-            proposition_id = matching[0].entity_id
-            proposition = entities[proposition_id]
-
-            if proposition.entity_type != "Proposition":
-                raise SemanticParseError(
-                    f"{assertion.predicate} {expected_role!r} must reference "
-                    f"a Proposition, got {proposition.entity_type!r} "
-                    f"for {proposition_id!r}"
-                )
-
-    def generate_discourse_payload(
-        self,
-        document: SourceDocument,
-        general: SemanticExtraction,
-    ) -> tuple[DiscourseExtraction, str]:
-        """Generate and validate discourse semantics, retrying once on invalid output."""
-
-        prompt = build_discourse_prompt(
-            document.source_text,
-            clause_context=json.dumps(
-                [
-                    entity.model_dump(mode="json")
-                    for entity in general.entities
-                    if entity.entity_type == "Clause"
-                ],
-                ensure_ascii=False,
-            ),
-            general_semantics=general.model_dump_json(),
-            catalog=self._catalog,
-        )
-
-        output_schema = DiscourseExtraction.model_json_schema()
-        generation_prompt = prompt.text
-        last_error: Exception | None = None
-
-        for attempt in range(2):
-            raw = self._generate_json_text(
-                generation_prompt,
-                output_schema=output_schema,
-            )
-
-            try:
-                discourse = DiscourseExtraction.model_validate_json(raw)
-
-                self._validate_discourse_payload(discourse)
-
-                return discourse, prompt.version
-
-            except (ValidationError, SemanticParseError) as error:
-                last_error = error
-
-                if attempt == 0:
-                    generation_prompt = (
-                        prompt.text
-                        + "\n\n"
-                        + "CORRECTION REQUIRED:\n"
-                        + f"Your previous response failed validation: {error}\n\n"
-                        + "Return a complete corrected DiscourseExtraction JSON.\n"
-                        + "Every assertion argument must reference an entity "
-                        "declared in the entities array.\n"
-                        + "EvokesExpectation.expected_result must reference "
-                        "a declared Proposition.\n"
-                        + "Defeats.prior_expectation must reference "
-                        "a declared Proposition.\n"
-                        + "For an implicit expectation, declare its Proposition "
-                        "with origin='implicit', mention=null, nonempty "
-                        "canonical content, and supporting source evidence.\n"
-                        + "If the expectation is not sufficiently supported, "
-                        "omit EvokesExpectation and Defeats rather than "
-                        "inventing a proposition.\n"
-                        + "Reuse the same proposition ID when both relations "
-                        "refer to the same expectation.\n"
-                    )
-
-        raise SemanticParseError(
-            f"Discourse extraction failed validation after one retry: {last_error}"
-        ) from last_error
-
-    @staticmethod
-    def merge_discourse(
-        general: SemanticExtraction,
-        discourse: DiscourseExtraction,
-    ) -> SemanticExtraction:
-        """Merge discourse semantics without duplicating general assertions."""
-
-        entities = {entity.id: entity for entity in general.entities}
-
-        for entity in discourse.entities:
-            previous = entities.get(entity.id)
-
-            if previous is not None and previous != entity:
-                raise SemanticParseError(
-                    f"Discourse entity {entity.id!r} conflicts "
-                    "with general extraction"
-                )
-
-            entities[entity.id] = entity
-
-        known = set(entities)
-        print("\n--- DISCOURSE MERGER DEBUG ---")
-        print("General entity IDs:", sorted(entity.id for entity in general.entities))
-        print(
-            "Discourse entity IDs:", sorted(entity.id for entity in discourse.entities)
-        )
-        print(
-            "Discourse predicates:",
-            [assertion.predicate for assertion in discourse.assertions],
-        )
-        print("------------------------------\n")
-        for assertion in discourse.assertions:
-            for argument in assertion.arguments:
-                if argument.entity_id not in known:
-                    raise SemanticParseError(
-                        "Discourse assertion references unknown entity "
-                        f"{argument.entity_id!r}"
-                    )
-
-        def key(assertion: SemanticAssertion) -> tuple:
-            return (
-                assertion.predicate,
-                assertion.relation,
-                tuple((arg.entity_id, arg.role) for arg in assertion.arguments),
-                assertion.polarity,
-                assertion.factuality,
-                assertion.modality,
-            )
-
-        assertions = list(general.assertions)
-        seen = {key(assertion) for assertion in assertions}
-
-        for assertion in discourse.assertions:
-            signature = key(assertion)
-
-            if signature not in seen:
-                assertions.append(assertion)
-                seen.add(signature)
-
-        return SemanticExtraction(
-            entities=list(entities.values()),
-            assertions=assertions,
-            rules=general.rules,
-        )
-
     def parse_document(
         self,
         document: SourceDocument,
         *,
         aliases: Mapping[str, str] | None = None,
     ) -> SemanticParseResult:
-        """Parse one identified source document into a SemanticParseResult."""
-        catalog = self._catalog
-        payload, prompt_version = self.generate_extraction_payload(
-            document, catalog=catalog
-        )
-        try:
-            extraction = SemanticExtraction.model_validate(
-                normalize_extraction_payload(payload, aliases=aliases)
-            )
-            result = SemanticParseResult(
-                document=document,
-                provenance=SemanticParseProvenance(
-                    provider=self.provider_name,
-                    model=self.model_name,
-                    model_revision=self._model_revision,
-                    parser_version=PARSER_VERSION,
-                    prompt_version=prompt_version,
-                    ontology_versions=list(catalog.versions),
-                ),
-                extraction=extraction,
-            )
-            result = self._apply_repairs(result)
-            self.validate_predicates(result)
-            self.validate_arguments(result)
+        """Parse with one bounded correction attempt for invalid teacher output."""
 
+        catalog = self._catalog
+
+        try:
+            prompt_versions: list[str] = []
+            run_discourse = False
+
+            # Call 1: route the document when routing is enabled.
             if self._config.enable_routing:
                 route, router_version = self.route_document(document)
+                run_discourse = route.run_discourse
+                prompt_versions.append(router_version)
 
-                prompt_versions = [
-                    router_version,
-                    prompt_version,
-                ]
+            # Call 2: extract general semantics, optionally with discourse.
+            payload, extraction_version = self.generate_extraction_payload(
+                document,
+                catalog=catalog,
+                run_discourse=run_discourse,
+            )
+            prompt_versions.append(extraction_version)
 
-                if route.run_discourse:
-                    discourse, discourse_version = self.generate_discourse_payload(
-                        document,
-                        result.extraction,
-                    )
+            def validate_payload(
+                candidate: dict[str, Any],
+            ) -> SemanticParseResult:
+                """Normalize, validate, and apply existing repairs."""
 
-                    merged = self.merge_discourse(
-                        result.extraction,
-                        discourse,
-                    )
+                normalized = normalize_extraction_payload(
+                    candidate,
+                    aliases=aliases,
+                )
 
-                    prompt_versions.append(discourse_version)
+                extraction = SemanticExtraction.model_validate(normalized)
 
-                    result = SemanticParseResult(
-                        document=document,
-                        provenance=result.provenance.model_copy(
-                            update={"prompt_version": "|".join(prompt_versions)}
-                        ),
-                        extraction=merged,
-                    )
+                result = SemanticParseResult(
+                    document=document,
+                    provenance=SemanticParseProvenance(
+                        provider=self.provider_name,
+                        model=self.model_name,
+                        model_revision=self._model_revision,
+                        parser_version=PARSER_VERSION,
+                        prompt_version="|".join(prompt_versions),
+                        ontology_versions=list(catalog.versions),
+                    ),
+                    extraction=extraction,
+                )
 
-                    validate_against_catalog(
-                        result,
-                        self._catalog,
-                    )
+                # Existing post-validation repairs.
+                result = self._apply_repairs(result)
 
-                else:
-                    result = result.model_copy(
-                        update={
-                            "provenance": result.provenance.model_copy(
-                                update={"prompt_version": "|".join(prompt_versions)}
-                            )
-                        }
-                    )
+                # Existing semantic and ontology validation.
+                self.validate_predicates(result)
+                self.validate_arguments(result)
+                validate_against_catalog(result, catalog)
+
+                return result
+
+            try:
+                return validate_payload(payload)
+
+            except (
+                SemanticNormalizationError,
+                SemanticParseError,
+                ValidationError,
+            ) as first_error:
+                # The distilled student does not perform teacher retries.
+                if self.parser_role != "reference":
+                    raise
+
+                # Call 3 (only on failure): request corrected extraction.
+                corrected_payload = self.repair_extraction_payload(
+                    document,
+                    payload,
+                    first_error,
+                    catalog=catalog,
+                    run_discourse=run_discourse,
+                )
+
+                try:
+                    return validate_payload(corrected_payload)
+
+                except (
+                    SemanticNormalizationError,
+                    SemanticParseError,
+                    ValidationError,
+                ) as second_error:
+                    raise SemanticParseError(
+                        "Extraction failed after one correction attempt. "
+                        f"Original error: {first_error}; "
+                        f"Correction error: {second_error}"
+                    ) from second_error
 
         except (
             SemanticNormalizationError,
@@ -1014,7 +953,6 @@ class _BaseSemanticParser:
             raise SemanticParseError(
                 f"Document {document.document_id!r}: {error}"
             ) from error
-        return result
 
     def parse(self, sentence: str, context: str = "") -> SemanticParseResult:
         """Parse one sentence, using optional reference-only background."""
@@ -1148,6 +1086,85 @@ class DistilledSemanticParser(_BaseSemanticParser):
             f"  Base model: {self.metadata.get('base_model', 'unknown')}",
             file=sys.stderr,
         )
+
+    def parse_document(
+        self,
+        document: SourceDocument,
+        *,
+        aliases: Mapping[str, str] | None = None,
+    ) -> SemanticParseResult:
+        """Run one combined student extraction for a source document.
+
+        Unlike the teacher, the student does not call the router or
+        perform a separate discourse generation.
+
+        It predicts one SemanticExtraction containing general and
+        discourse semantics, followed by deterministic validation.
+        """
+        from parser.student.student_prompt import build_student_prompt_spec
+
+        catalog = self._catalog
+
+        prompt = build_student_prompt_spec(
+            document.source_text,
+            context=document.context,
+            catalog=catalog,
+        )
+
+        # Exactly one model generation.
+        cleaned = self._generate_json_text(
+            prompt.text,
+            output_schema=self._build_extraction_output_schema(),
+        )
+
+        if not cleaned:
+            raise SemanticParseError("The student returned an empty extraction")
+
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError as error:
+            raise SemanticParseError("The student returned invalid JSON") from error
+
+        if not isinstance(payload, dict):
+            raise SemanticParseError("Student extraction must be a JSON object")
+
+        try:
+            extraction = SemanticExtraction.model_validate(
+                normalize_extraction_payload(
+                    payload,
+                    aliases=aliases,
+                )
+            )
+
+            result = SemanticParseResult(
+                document=document,
+                provenance=SemanticParseProvenance(
+                    provider=self.provider_name,
+                    model=self.model_name,
+                    model_revision=self._model_revision,
+                    parser_version=PARSER_VERSION,
+                    prompt_version=prompt.version,
+                    ontology_versions=list(catalog.versions),
+                ),
+                extraction=extraction,
+            )
+
+            # Deterministic repairs, not additional model calls.
+            result = self._apply_repairs(result)
+
+            # Validate the complete extraction.
+            validate_against_catalog(result, catalog)
+
+        except (
+            SemanticNormalizationError,
+            SemanticParseError,
+            ValidationError,
+        ) as error:
+            raise SemanticParseError(
+                f"Student document {document.document_id!r}: {error}"
+            ) from error
+
+        return result
 
     @classmethod
     def from_pretrained(
