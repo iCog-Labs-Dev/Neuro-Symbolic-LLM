@@ -1,8 +1,10 @@
 """A4 optimizer ownership and frozen-residual invariance."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import jax
 import jax.numpy as jnp
@@ -13,10 +15,10 @@ import pytest
 from residual.symbolic_head.jax_head import SymbolicHead
 from stages.results import RunWriter, load_params
 from stages.stage_A.A3_model import A3Config, A3Model
-from stages.stage_A.a4.config import A4Config
+from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config
 from stages.stage_A.a4.data import A4Data
 from stages.stage_A.a4.model import A4Model
-from stages.stage_A.a4.settlement import infer_latents
+from stages.stage_A.a4.objective import AlignmentLabels, objective_at_latents
 from stages.stage_A.a4.training import (
     init_params,
     make_train_step,
@@ -74,40 +76,59 @@ def test_optimizer_tree_contains_only_symbolic_parameters(env):
     assert set(params["value"]["layer_7"]) == {"V_pred"}
 
 
-def test_latent_inference_matches_a3_without_weight_gradient_computation(env):
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("jit", [False, True])
+def test_training_reuses_a3_predictions_without_settlement(
+    env, monkeypatch, masked, jit
+):
     ids = jnp.array([[1, 2, 3, 4, 5]])
-    key = jax.random.PRNGKey(1)
-    actual = infer_latents(env.model.continuous, env.frozen, ids, key)
-    _, aux = env.model.continuous.train_grads(env.frozen, ids, key)
-    np.testing.assert_array_equal(actual[7], aux["z_star"][7])
-
-
-@pytest.mark.parametrize("steps", [1, 2])
-def test_masked_settlement_matches_fabricpc_when_all_tokens_are_real(env, steps):
-    model = A3Model(
-        env.model.continuous.sub,
-        layers=(7,),
-        rank=4,
-        seq_len=5,
-        config=A3Config(infer_steps=steps),
+    mask = jnp.array([[True, True, True, False, False]]) if masked else None
+    positions, targets = jnp.array([[0, 2]]), jnp.array([0])
+    params = init_params(env.model, 0)
+    continuous = env.model.continuous
+    clean, _ = continuous.clean_pass(ids)
+    predicted = continuous.predict_latents(env.frozen, clean)
+    _, expected = objective_at_latents(
+        env.model,
+        env.frozen,
+        params["symbolic"],
+        params["value"],
+        ids,
+        predicted,
+        {7: AlignmentLabels(positions, targets)},
+        env.keys,
+        env.values,
+        token_mask=mask,
     )
-    frozen = model.init_params(jax.random.PRNGKey(0))
-    ids = jnp.array([[1, 2, 3, 4, 5]])
-    key = jax.random.PRNGKey(1)
-    expected = infer_latents(model, frozen, ids, key)
-    actual = jax.jit(lambda *args: infer_latents(model, *args))(
-        frozen, ids, key, jnp.ones_like(ids, dtype=bool)
+    prediction = Mock(wraps=continuous.predict_latents)
+    monkeypatch.setattr(continuous, "predict_latents", prediction)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A4 must reuse prediction, not run A3 settlement")
+
+    for method in ("make_batch", "_refresh_state", "train_grads"):
+        monkeypatch.setattr(continuous, method, forbidden)
+    original_config = continuous.cfg
+
+    class PredictionOnlyConfig:
+        def __getattr__(self, name):
+            if name in {"infer_steps", "eta_z", "sigma2", "lambda_kl"}:
+                raise AssertionError("A4 must not read A3 settlement settings")
+            return getattr(original_config, name)
+
+    monkeypatch.setattr(continuous, "cfg", PredictionOnlyConfig())
+    config = replace(env.config, training=replace(env.config.training, jit=jit))
+    optimizer = optax.adam(1e-4)
+    step = make_train_step(
+        env.model, env.frozen, optimizer, env.keys, env.values, config
     )
-    np.testing.assert_allclose(actual[7], expected[7], rtol=3e-4, atol=3e-4)
-
-
-def test_masked_settlement_cannot_learn_from_padding_token_values(env):
-    mask = jnp.array([[True, True, True, False, False]])
-    key = jax.random.PRNGKey(1)
-    settle = jax.jit(lambda *args: infer_latents(env.model.continuous, *args))
-    left = settle(env.frozen, jnp.array([[1, 2, 3, 4, 5]]), key, mask)
-    right = settle(env.frozen, jnp.array([[1, 2, 3, 9, 11]]), key, mask)
-    np.testing.assert_allclose(left[7][:, :3], right[7][:, :3], rtol=3e-4, atol=3e-4)
+    _, _, terms, finite = step(
+        params, optimizer.init(params), ids, positions, targets, mask
+    )
+    assert bool(finite)
+    prediction.assert_called_once()
+    for name in ("task", "key", "value", "total"):
+        np.testing.assert_allclose(terms[name], expected[name], rtol=3e-4, atol=3e-4)
 
 
 def test_head_step_with_short_context_has_finite_masked_losses(env):
@@ -120,7 +141,6 @@ def test_head_step_with_short_context_has_finite_masked_losses(env):
         params,
         optimizer.init(params),
         jnp.array([[1, 2, 3, 0, 0]]),
-        jax.random.PRNGKey(1),
         jnp.array([[0, 2]]),
         jnp.array([0]),
         jnp.array([[True, True, True, False, False]]),
@@ -132,7 +152,6 @@ def test_head_step_with_short_context_has_finite_masked_losses(env):
         params,
         optimizer.init(params),
         jnp.array([[1, 2, 3, 9, 11]]),
-        jax.random.PRNGKey(1),
         jnp.array([[0, 2]]),
         jnp.array([0]),
         jnp.array([[True, True, True, False, False]]),
@@ -159,7 +178,6 @@ def test_head_update_keeps_both_inherited_matrices_frozen(env, monkeypatch):
         params,
         optimizer.init(params),
         jnp.array([[1, 2, 3, 4, 5]]),
-        jax.random.PRNGKey(1),
         jnp.array([[0, 3]]),
         jnp.array([0]),
     )
@@ -187,7 +205,6 @@ def test_rejects_continuous_parameters_in_optimizer(env):
             params,
             optimizer.init(params),
             jnp.array([[1, 2, 3, 4, 5]]),
-            jax.random.PRNGKey(1),
             jnp.array([[0, 3]]),
             jnp.array([0]),
         )
@@ -202,6 +219,10 @@ def test_training_checkpoint_separates_frozen_and_trainable_weights(env, tmp_pat
     assert set(weights) == {"symbolic.layer_7", "value.layer_7"}
     assert (tmp_path / "a4/params/a3-frozen.npz").is_file()
     assert result["updates"] == 1
+    assert result["training_state_source"] == TRAINING_STATE_SOURCE
+    with np.load(tmp_path / "a4/checkpoints/a4-final.npz", allow_pickle=False) as saved:
+        metadata = json.loads(str(saved["__metadata__"]))
+    assert metadata["training_state_source"] == TRAINING_STATE_SOURCE
     assert result["frozen"]["params_unchanged"]
     assert result["frozen_residual_sha256"] == residual_fingerprint(
         env.model, env.frozen
@@ -219,7 +240,6 @@ def test_eager_train_step_uses_same_parameter_groups(env):
         params,
         optimizer.init(params),
         jnp.array([[1, 2, 3, 4, 5]]),
-        jax.random.PRNGKey(1),
         jnp.array([[0, 3]]),
         jnp.array([0]),
     )

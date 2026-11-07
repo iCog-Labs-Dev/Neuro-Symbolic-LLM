@@ -10,8 +10,56 @@ from stages.stage_A.a4.benchmark import (
     _paired_samples,
     measure_latency,
     require_idle_gpu,
+    training_state_comparison,
 )
-from stages.stage_A.a4.replay import digest, source_changes, training_arguments
+from stages.stage_A.a4.config import TRAINING_STATE_SOURCE
+from stages.stage_A.a4.replay import (
+    digest,
+    recorded_training_state_source,
+    source_changes,
+    training_arguments,
+)
+
+
+def test_unmarked_runs_do_not_acquire_the_new_training_protocol():
+    assert recorded_training_state_source({}, {}) == "unspecified-legacy"
+    assert training_state_comparison(
+        {}, {}, mode="deployment", allow_source_change=False
+    ) == {
+        "recorded": "unspecified-legacy",
+        "runtime": TRAINING_STATE_SOURCE,
+        "matches": False,
+    }
+
+
+@pytest.mark.parametrize("mode", ["training", "both"])
+def test_legacy_training_comparison_requires_explicit_opt_in(mode):
+    with pytest.raises(ValueError, match="Recorded training state source differs"):
+        training_state_comparison({}, {}, mode=mode, allow_source_change=False)
+    assert not training_state_comparison({}, {}, mode=mode, allow_source_change=True)[
+        "matches"
+    ]
+
+
+def test_new_training_protocol_is_recorded_consistently():
+    record = {"training_state_source": TRAINING_STATE_SOURCE}
+    assert training_state_comparison(
+        record, record, mode="both", allow_source_change=False
+    )["matches"]
+
+
+@pytest.mark.parametrize(
+    "meta,result",
+    [
+        ({"training_state_source": TRAINING_STATE_SOURCE}, {}),
+        ({}, {"training_state_source": TRAINING_STATE_SOURCE}),
+        ({"training_state_source": ""}, {"training_state_source": ""}),
+        ({"training_state_source": 1}, {"training_state_source": 1}),
+    ],
+)
+def test_inconsistent_training_protocol_is_rejected(meta, result):
+    with pytest.raises(ValueError, match="Training state source"):
+        recorded_training_state_source(meta, result)
 
 
 def test_recorded_inputs_resolve_against_training_directory(tmp_path):

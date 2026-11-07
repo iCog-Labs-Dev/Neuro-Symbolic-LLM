@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+TRAINING_STATE_SOURCE = "frozen-a3-prediction-v1"
+
 if TYPE_CHECKING:
     from stages.stage_base import TrainingConfig
 

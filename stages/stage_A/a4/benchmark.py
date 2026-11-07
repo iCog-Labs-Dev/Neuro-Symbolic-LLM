@@ -15,7 +15,28 @@ from metrics.a4.latency import (
     summarize_latency,
     summarize_transfers,
 )
-from stages.stage_A.a4.replay import checkpoint_replay, digest
+from stages.stage_A.a4.config import TRAINING_STATE_SOURCE
+from stages.stage_A.a4.replay import (
+    checkpoint_replay,
+    digest,
+    recorded_training_state_source,
+)
+
+
+def training_state_comparison(meta, result, *, mode, allow_source_change):
+    """Keep historical training protocols distinct from the current kernel."""
+    recorded = recorded_training_state_source(meta, result)
+    matches = recorded == TRAINING_STATE_SOURCE
+    if mode in {"training", "both"} and not matches and not allow_source_change:
+        raise ValueError(
+            "Recorded training state source differs from frozen A3 prediction; "
+            "use --allow-source-change for an explicit current-protocol comparison"
+        )
+    return {
+        "recorded": recorded,
+        "runtime": TRAINING_STATE_SOURCE,
+        "matches": matches,
+    }
 
 
 def require_idle_gpu() -> None:
@@ -197,6 +218,12 @@ def measure_latency(
             )
         )
         config = replay.config
+        state_comparison = training_state_comparison(
+            replay.metadata,
+            replay.result,
+            mode=mode,
+            allow_source_change=allow_source_change,
+        )
         batch_size = config.training.batch_size
         if len(replay.data.train) < batches * batch_size:
             raise ValueError("Not enough examples for the requested distinct batches")
@@ -239,12 +266,11 @@ def measure_latency(
                 )
             )
         jax.block_until_ready((replay.params, replay.state, selected))
-        key = jax.random.PRNGKey(config.training.seed + replay.result["updates"])
 
         def invoke(phase, batch):
             ids, positions, targets, mask = batch
             value = (
-                step(replay.params, replay.state, ids, key, positions, targets, mask)
+                step(replay.params, replay.state, ids, positions, targets, mask)
                 if phase == "training"
                 else deploy(replay.params, ids, mask)
             )
@@ -259,6 +285,7 @@ def measure_latency(
             writer.write_config(
                 {
                     "source_run": str(run),
+                    "training_state_source": state_comparison,
                     "samples": samples,
                     "batches": batches,
                     "warmups": warmups,
@@ -323,6 +350,7 @@ def measure_latency(
                     "stage": "A4",
                     "status": "completed",
                     "run": str(run),
+                    "training_state_source": state_comparison,
                     "checkpoint_sha256": replay.checkpoint_sha256,
                     "bank_snapshot": replay.bank.input_snapshot_sha256,
                     "bank_records": len(replay.bank.records),
@@ -352,7 +380,7 @@ def measure_latency(
                     "frozen_weights_verified_unchanged": True,
                     "reports": reports,
                     "samples": observations,
-                    "scope": "Fixed-checkpoint native replay; shares of complete A4 training or deployment CE steps, not incremental head overhead or autoregressive generation latency",
+                    "scope": "Fixed-checkpoint current-runtime measurement; training uses frozen A3 predictions. Shares of complete A4 training or deployment CE steps, not incremental head overhead or autoregressive generation latency. A different recorded training protocol is an explicit comparison, not historical-step replay.",
                 }
                 runtime.close()
                 writer.write_json("result.json", summary)

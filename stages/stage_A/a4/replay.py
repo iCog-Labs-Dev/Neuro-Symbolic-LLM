@@ -25,6 +25,18 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def recorded_training_state_source(meta: dict[str, Any], result: dict[str, Any]) -> str:
+    """Validate an explicit protocol identity without guessing for old runs."""
+    source = meta.get("training_state_source")
+    if source != result.get("training_state_source"):
+        raise ValueError("Training state source differs between metadata and results")
+    if source is None:
+        return "unspecified-legacy"
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("Training state source must be a nonempty string")
+    return source
+
+
 def training_arguments(
     meta: dict[str, Any], *, native_library: Path | None = None
 ) -> argparse.Namespace:
@@ -116,6 +128,7 @@ def checkpoint_replay(
     ):
         raise ValueError("A completed Stage A4 run is required")
     meta = read_json(run / "meta.json")
+    training_state_source = recorded_training_state_source(meta, result)
     changed = source_changes(meta)
     if changed and not allow_source_change:
         raise ValueError(
@@ -262,9 +275,11 @@ def checkpoint_replay(
                     for record in (checkpoint_meta, result)
                 )
                 or checkpoint_meta["updates"] != result["updates"]
+                or checkpoint_meta.get("training_state_source", "unspecified-legacy")
+                != training_state_source
             ):
                 raise ValueError(
-                    "Checkpoint bank, frozen residual or update identity mismatch"
+                    "Checkpoint bank, frozen residual, update or training-state identity mismatch"
                 )
             state = jax.tree.unflatten(tree, saved)
             before = [

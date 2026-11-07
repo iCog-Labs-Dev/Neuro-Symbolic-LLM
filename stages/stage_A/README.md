@@ -359,8 +359,9 @@ residual. The optimizer contains `W_sym`, `b_sym`, `U_out` and `V_pred` only.
 Its objective is CE plus weighted key-space and value-space alignment.
 
 This is a head-only isolation condition. Joint A3/A4 learning is a separate
-experiment. Continuous-state settlement still runs with fixed A3 weights; its
-inference energy is not added to the symbolic-head optimizer objective.
+experiment. Both training and evaluation reuse A3's existing `clean_pass` and
+`predict_latents` methods with frozen parameters. A4 does not run additional
+target-conditioned state settlement or compute A3 parameter gradients.
 `V_pred` maps hidden states into value space, while `U_out` maps attended values
 back into hidden space. They are independent: value alignment directly trains
 `V_pred`; CE trains the writeback through the model's predictions.
@@ -378,10 +379,9 @@ python -m experiments.run_stage_a4 \
 ```
 
 The configuration's `residual_config` resolves relative to the A4 YAML file and
-specifies the inherited A3 architecture and PC-settlement settings. It must
-match the checkpoint's model, rank, layers, activation and scale. Training settles
-PC latents without updating A3 weights; evaluation uses predicted latents without
-target-conditioned settlement.
+specifies the inherited A3 architecture. It must match the checkpoint's model,
+rank, layers, activation and scale. A3's `infer_steps` setting does not add
+settlement steps to A4: both paths consume the frozen predictor's states.
 
 In an existing Python session, pass the initialized `FrozenSubstrate` to the
 runner to reuse its model and tokenizer without loading another copy:
@@ -397,6 +397,11 @@ supplied substrate must match the configured model and inherited checkpoint.
 A standalone command starts a new process and loads through the existing shared
 loader; it cannot reuse an instance from another process. A4 does not change
 the shared loader or TorchAX's loading modes.
+
+For pinned local dataset snapshots, `scripts/prepare_symbolic_corpus.py` exports
+complete source documents, annotation sidecars and provenance without running
+the parser. Use `python -m scripts.prepare_symbolic_corpus --help` for its inputs;
+preserve parent/group identities and dataset splits.
 
 Prepare source-linked examples with `python -m scripts.prepare_alignment_labels`.
 The command accepts `--config preparation.yaml`, or explicit input flags. A
@@ -418,7 +423,7 @@ The `alignment-occurrences-v2` JSON manifest references adjacent compressed toke
 mask and target arrays. Admission checks bank/source/array identity, re-tokenizes
 the source windows, verifies evidence endpoints, and rejects duplicate pairs.
 The runner's `--minimum-examples` defaults to 5,000. Padding is excluded from CE
-and from the inherited A3 settlement energy. Right-padded causal inputs cannot
+and padded positions cannot be alignment targets. Right-padded causal inputs cannot
 expose future padding to real-token queries. A4 parameter training remains CE
 plus key/value alignment; no KL or spring term is added to that objective.
 
@@ -438,7 +443,6 @@ remain readable, subject to the runner's example-count floor.
 | `a4/model.py` | Continuous-residual and symbolic-head forward composition |
 | `a4/objective.py` | Cross-entropy and key/value alignment |
 | `a4/training.py` | Head-only optimizer steps, evaluation and checkpointing |
-| `a4/settlement.py` | Frozen continuous-state inference without changing A3 |
 
 Defaults require 10,000 bank records and retrieve top-8. Native retrieval requires
 a separately built Linux CUDA/JAX library and its matching manifest. Use
@@ -449,6 +453,12 @@ results, `params/a3-frozen.npz`, and `checkpoints/a4-final.npz`. The A4 checkpoi
 contains only symbolic-head weights and their optimizer state; the frozen A3
 weights are saved separately. Mining inspections, benchmarks and historical
 comparisons are local tools under ignored `data/check/`.
+
+Run metadata, results and checkpoint metadata identify this training protocol as
+`frozen-a3-prediction-v1`. Earlier runs using target-conditioned settling are
+historical experiments, not measurements of this protocol. Their training losses,
+quality and latency denominators must not be relabelled; train and benchmark a
+fresh run to qualify the current path.
 
 `results.json` includes initial and final validation loss/perplexity, validation
 CE change, training-example and alignment-coverage counts. Initial validation
@@ -542,6 +552,11 @@ it does not bypass data, bank or checkpoint checks. `--native-library` explicitl
 selects a replacement compiled library. The runtime can also accept an existing
 substrate through the Python `measure_latency(..., substrate=...)` API without
 changing the shared loader.
+
+Training benchmarks additionally report the recorded and runtime state-source
+protocols. A legacy or different protocol requires explicit
+`--allow-source-change` for training-step measurement and is labelled as a
+current-protocol comparison, not exact historical-step replay.
 
 Measurement orchestration lives in `a4/benchmark.py`, checkpoint restoration in
 `a4/replay.py`, and pure timing calculations in `metrics/a4/latency.py`. GPU

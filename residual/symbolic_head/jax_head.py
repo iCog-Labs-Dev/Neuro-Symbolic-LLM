@@ -21,7 +21,7 @@ class SymbolicHead:
     Row-vector equations: q = h @ W_sym + b_sym, context = softmax(q K^T) V,
     and h_out = h + context @ U_out. W_sym has shape [d, k] and U_out [k, d].
 
-    Inputs are settled hidden states and a retriever bound to a fixed bank.
+    Inputs are post-A3 hidden states and a retriever bound to a fixed bank.
     Model loading, latent inference and alignment losses are external.
     """
 

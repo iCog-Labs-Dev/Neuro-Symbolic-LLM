@@ -15,11 +15,10 @@ import optax
 
 from residual.symbolic_head.alignment import ValuePredictor
 from stages.results import RunWriter
-from stages.stage_A.a4.config import A4Config
+from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config
 from stages.stage_A.a4.data import A4Data
 from stages.stage_A.a4.model import A4Model
 from stages.stage_A.a4.objective import AlignmentLabels, objective_at_latents
-from stages.stage_A.a4.settlement import infer_latents
 from stages.stage_base import make_eval_set
 
 log = logging.getLogger("stage_a4")
@@ -51,12 +50,16 @@ def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, c
     """Build an optimizer step over symbolic-head parameters only."""
     frozen_residual = jax.tree.map(jax.lax.stop_gradient, frozen_residual)
 
-    def step(params, state, ids, key, positions, targets, token_mask=None):
+    def step(params, state, ids, positions, targets, token_mask=None):
         if set(params) != {"symbolic", "value"}:
             raise ValueError(
                 "A4 optimizer parameters must contain only symbolic and value groups"
             )
-        latents = infer_latents(model.continuous, frozen_residual, ids, key, token_mask)
+        clean, _ = model.continuous.clean_pass(ids)
+        latents = jax.tree.map(
+            jax.lax.stop_gradient,
+            model.continuous.predict_latents(frozen_residual, clean),
+        )
 
         def loss(candidate):
             return objective_at_latents(
@@ -184,7 +187,6 @@ def train(
                 params,
                 state,
                 jnp.asarray(data.train[indices]),
-                jax.random.PRNGKey(training.seed + updates),
                 jnp.asarray(positions),
                 jnp.asarray(targets),
                 None
@@ -227,6 +229,7 @@ def train(
         raise RuntimeError("Frozen language model changed")
     results = {
         "stage": "A4",
+        "training_state_source": TRAINING_STATE_SOURCE,
         "updates": updates,
         "frozen_residual_sha256": fingerprint,
         "frozen": frozen,
@@ -250,6 +253,7 @@ def train(
         },
         opt_state=state,
         updates=updates,
+        training_state_source=TRAINING_STATE_SOURCE,
         frozen_residual_sha256=fingerprint,
         bank_snapshot_sha256=bank.input_snapshot_sha256,
     )

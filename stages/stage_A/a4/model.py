@@ -72,13 +72,13 @@ class A4Model:
         states: dict[int, jax.Array] = {}
 
         def modify(hidden: jax.Array, layer: int) -> jax.Array:
-            settled = continuous_modify(hidden, layer)
+            adapted = continuous_modify(hidden, layer)
             if layer in self.symbolic.layers:
-                states[layer] = settled
+                states[layer] = adapted
             return (
-                self.symbolic.apply(symbolic_params, settled, layer)
+                self.symbolic.apply(symbolic_params, adapted, layer)
                 if symbolic_enabled
-                else settled
+                else adapted
             )
 
         result = self.continuous.sub.run_with_interception(

@@ -5,25 +5,27 @@ services:
     container_name: neuro-symbolic-llm-runner
     working_dir: /app
     volumes:
-    - .:/app
-    - nsllm-hf-cache:/root/.cache/huggingface
+      - .:/app
+      - nsllm-hf-cache:/root/.cache/huggingface
     environment:
-    - PYTHONUNBUFFERED=1
-    - TF_CPP_MIN_LOG_LEVEL=3
-    - GLOG_minloglevel=3
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
     command: bash
+
   test:
     build: .
     image: neuro-symbolic-llm:latest
     working_dir: /app
     volumes:
-    - .:/app
-    - nsllm-hf-cache:/root/.cache/huggingface
+      - .:/app
+      - nsllm-hf-cache:/root/.cache/huggingface
     environment:
-    - PYTHONUNBUFFERED=1
-    - TF_CPP_MIN_LOG_LEVEL=3
-    - GLOG_minloglevel=3
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
     command: pytest
+
   mork-server:
     build:
       context: ./docker/mork
@@ -31,34 +33,35 @@ services:
     container_name: mork-server
     restart: unless-stopped
     ports:
-    - 8000:8000
+      - "8000:8000"
     environment:
-    - MORK_SERVER_ADDR=0.0.0.0
-    - MORK_SERVER_PORT=8000
-    - RUST_LOG=info
+      - MORK_SERVER_ADDR=0.0.0.0
+      - MORK_SERVER_PORT=8000
+      - RUST_LOG=info
     volumes:
-    - ./data/mork_data:/app/data
+      - ./data/mork_data:/app/data
     healthcheck:
       test:
-      - CMD-SHELL
-      - curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ | grep -Eq '^(200|404)$'
+        [
+          "CMD-SHELL",
+          "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ | grep -Eq '^(200|404)$'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 3
+
   redis-queue:
     image: redis:7-alpine
     container_name: redis-queue
     restart: unless-stopped
     ports:
-    - 6379:6379
+      - "6379:6379"
     healthcheck:
-      test:
-      - CMD
-      - redis-cli
-      - ping
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 3
+
 volumes:
   nsllm-hf-cache:
     name: nsllm-hf-cache

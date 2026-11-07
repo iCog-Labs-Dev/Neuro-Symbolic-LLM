@@ -1,10 +1,10 @@
 tier2_cpu:
-  host: localhost
+  host: "localhost"
   port: 8000
   dim: 256
-  space: cosine
+  space: "cosine"
   max_capacity: 100000
-  index_backend: hnsw
+  index_backend: "hnsw"
   hnsw:
     M: 16
     ef_construction: 200

@@ -12,6 +12,39 @@ templates in MORK and builds a FAISS retrieval index.
 The package does not start MORK or run parsing, mining, embedding generation,
 training or candidate promotion.
 
+## Docker deployment
+
+`docker/mork/Dockerfile` builds the MORK Rust server using only the
+`docker/mork/` directory as its build context. Its entrypoint is in the same
+directory. The root `Dockerfile` and `make build` retain Base's Python CPU
+application/testing image.
+
+```bash
+docker compose up -d --build mork-server
+docker compose ps mork-server
+```
+
+The MORK endpoint on the host is `http://127.0.0.1:8000`; containers on the
+Compose network use `http://mork-server:8000`. Pass this endpoint explicitly to
+the bank CLI's `--server-url` or the A4 runner's `--mork-url`. The A4 runner's
+JupyterHub-oriented default port 18000 is a different deployment configuration.
+`./data/mork_data` is mounted at `/app/data`. The HTTP health check accepts 200
+or 404 at the root; bank installation/readback is a separate functional check.
+
+The original deployment also defines `redis-queue`; fixed-bank A4 does not use
+it, and starting the explicit `mork-server` service does not start Redis.
+
+```bash
+docker compose run --rm app bash
+docker compose run --rm test
+```
+
+The Python image is CPU tooling, not a qualified CUDA training environment. The
+MORK recipe currently uses an unpinned Rust image and upstream branches; a
+successful configuration check is not a successful build or an end-to-end
+qualification. Pin source/image revisions and verify native bank operations
+before treating this recipe as a reproducible release deployment.
+
 ## Input contract
 
 | Artifact | Required content |

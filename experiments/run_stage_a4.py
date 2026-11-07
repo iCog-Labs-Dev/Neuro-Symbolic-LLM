@@ -126,7 +126,7 @@ def main(
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
     from stages.stage_A.A3_model import A3Config, A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
-    from stages.stage_A.a4.config import load_config
+    from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, load_config
     from stages.stage_A.a4.data import load_data
     from stages.stage_A.a4.model import A4Model
     from stages.stage_A.a4.training import train
@@ -223,6 +223,7 @@ def main(
                 {
                     **run_metadata(),
                     "stage": "A4",
+                    "training_state_source": TRAINING_STATE_SOURCE,
                     "working_directory": str(Path.cwd().resolve()),
                     "training_arguments": {
                         key: str(value.resolve()) if isinstance(value, Path) else value
@@ -239,7 +240,7 @@ def main(
                             "stages/stage_A/a4/model.py",
                             "stages/stage_A/a4/objective.py",
                             "stages/stage_A/a4/training.py",
-                            "stages/stage_A/a4/settlement.py",
+                            "stages/stage_A/a4/config.py",
                             "residual/symbolic_head/alignment.py",
                             "frozenllm/substrate/loader.py",
                             "frozenllm/substrate/substrate.py",
