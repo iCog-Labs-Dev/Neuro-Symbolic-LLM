@@ -79,6 +79,7 @@ class _SemanticDocumentBuilder:
     assertions: list[MinerAssertion] = field(default_factory=list)
     entity_types: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
+    conditional_clauses: dict[tuple, str] = field(default_factory=dict)
 
     def _span(self, quote: SourceQuote) -> SourceSpan:
         """Convert a quote into a character span of the source text."""
@@ -104,12 +105,20 @@ class _SemanticDocumentBuilder:
         return identifier
 
     def add_entities(self) -> None:
-        """Copy the entities written by the model."""
+        """Copy explicit and implicit entities from the parser."""
 
         for entity in self.result.extraction.entities:
-            self._record_entity(
-                entity.id, entity.entity_type, self._span(entity.mention)
+            span = self._span(entity.mention) if entity.mention is not None else None
+
+            self.entities.append(
+                EntityRecord(
+                    id=entity.id,
+                    type=entity.entity_type,
+                    span=span,
+                )
             )
+
+            self.entity_types[entity.id] = entity.entity_type
 
     def add_fact(
         self,
@@ -203,22 +212,57 @@ class _SemanticDocumentBuilder:
             )
 
     def add_specific_rule(self, rule: SemanticRule) -> None:
-        """Add a Clause for the antecedents and make the consequents depend on it."""
+        """Add a conditional Clause and associate its consequents with it.
 
-        spans = [
-            self._span(quote) for part in rule.antecedents for quote in part.evidence
-        ]
-        clause = self._mint(
-            "clause",
-            "Clause",
-            SourceSpan(
-                start=min(span.start for span in spans),
-                end=max(span.end for span in spans),
-            ),
+        Rules sharing the same semantic antecedents reuse the same
+        conditional Clause and do not duplicate antecedent events.
+        """
+
+        antecedent_key = tuple(
+            sorted(
+                (
+                    part.predicate,
+                    part.relation,
+                    tuple(
+                        (argument.entity_id, argument.role)
+                        for argument in part.arguments
+                    ),
+                    part.fallback,
+                    part.polarity,
+                    part.factuality,
+                    part.modality,
+                )
+                for part in rule.antecedents
+            )
         )
 
-        for part in rule.antecedents:
-            self.add_assertion(part)
+        clause = self.conditional_clauses.get(antecedent_key)
+
+        if clause is None:
+            spans = [
+                self._span(quote)
+                for part in rule.antecedents
+                for quote in part.evidence
+            ]
+
+            if not spans:
+                raise MinerAdapterError(
+                    "Specific rule antecedents must have source evidence"
+                )
+
+            clause = self._mint(
+                "clause",
+                "Clause",
+                SourceSpan(
+                    start=min(span.start for span in spans),
+                    end=max(span.end for span in spans),
+                ),
+            )
+
+            self.conditional_clauses[antecedent_key] = clause
+
+            for part in rule.antecedents:
+                self.add_assertion(part)
 
         for part in rule.consequents:
             self.add_assertion(part, conditional_on=clause)
@@ -238,8 +282,13 @@ class _SemanticDocumentBuilder:
                 )
 
         for entity in extraction.entities:
-            if entity.kind is None or entity.id not in confidences:
+            if (
+                entity.kind is None
+                or entity.id not in confidences
+                or entity.mention is None
+            ):
                 continue
+
             self.assertions.append(
                 MinerAssertion(
                     predicate=_PROVISIONAL,

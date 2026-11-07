@@ -72,3 +72,15 @@ relations:
         type: Event|Proposition
     confidence_range: [0.0, 1.0]
     extraction_instruction: "Link two events/propositions where the first explicitly brings about or is directly responsible for the second."
+  Expresses:
+    arity: 2
+    arguments:
+      - name: clause
+        type: Clause
+      - name: content
+        type: Event|Proposition
+    confidence_range: [0.0, 1.0]
+    extraction_instruction: >
+      Link a source clause to the event or proposition it expresses.
+      Preserve clause and event identity. Do not create duplicate
+      semantic content for the same occurrence.

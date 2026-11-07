@@ -147,3 +147,135 @@ def test_specific_rule_preserves_literal_evidence_and_clause_span() -> None:
         source.index("Mira is nice."),
         len(source),
     )
+
+
+def test_rules_with_shared_antecedent_reuse_conditional_clause() -> None:
+    source = "If the alarm rings, Alice will leave, " "but Bob will remain."
+    first_clause = "If the alarm rings, Alice will leave"
+    second_clause = "but Bob will remain"
+
+    result = SemanticParseResult.model_validate(
+        {
+            "document": {
+                "document_id": "shared-antecedent",
+                "corpus_id": "unit-tests",
+                "source_text": source,
+            },
+            "provenance": _provenance(),
+            "extraction": {
+                "entities": [
+                    {
+                        "id": "alarm",
+                        "entity_type": "Entity",
+                        "mention": {"text": "alarm"},
+                    },
+                    {
+                        "id": "alice",
+                        "entity_type": "Entity",
+                        "mention": {"text": "Alice"},
+                    },
+                    {
+                        "id": "bob",
+                        "entity_type": "Entity",
+                        "mention": {"text": "Bob"},
+                    },
+                ],
+                "assertions": [],
+                "rules": [
+                    {
+                        "scope": "specific",
+                        "antecedents": [
+                            {
+                                "predicate": "Evaluation",
+                                "relation": "ring",
+                                "arguments": [{"entity_id": "alarm", "role": "theme"}],
+                                "fallback": True,
+                                "factuality": "hypothetical",
+                                "confidence": 0.95,
+                                "evidence": [{"text": first_clause}],
+                            }
+                        ],
+                        "consequents": [
+                            {
+                                "predicate": "Evaluation",
+                                "relation": "leave",
+                                "arguments": [{"entity_id": "alice", "role": "agent"}],
+                                "fallback": True,
+                                "factuality": "hypothetical",
+                                "confidence": 0.95,
+                                "evidence": [{"text": "Alice will leave"}],
+                            }
+                        ],
+                        "evidence": [{"text": first_clause}],
+                    },
+                    {
+                        "scope": "specific",
+                        "antecedents": [
+                            {
+                                "predicate": "Evaluation",
+                                "relation": "ring",
+                                "arguments": [{"entity_id": "alarm", "role": "theme"}],
+                                "fallback": True,
+                                "factuality": "hypothetical",
+                                "confidence": 0.95,
+                                "evidence": [{"text": second_clause}],
+                            }
+                        ],
+                        "consequents": [
+                            {
+                                "predicate": "Evaluation",
+                                "relation": "remain",
+                                "arguments": [{"entity_id": "bob", "role": "agent"}],
+                                "fallback": True,
+                                "factuality": "hypothetical",
+                                "confidence": 0.95,
+                                "evidence": [{"text": second_clause}],
+                            }
+                        ],
+                        "evidence": [{"text": second_clause}],
+                    },
+                ],
+            },
+        }
+    )
+
+    document = _adapt(result)
+
+    conditional_clauses = [
+        entity
+        for entity in document.entities
+        if entity.type == "Clause" and entity.id.startswith("clause-")
+    ]
+
+    assert len(conditional_clauses) == 1
+
+    clause = conditional_clauses[0]
+
+    ring_facts = [
+        assertion
+        for assertion in document.assertions
+        if assertion.provisional_relation_id == "ring"
+    ]
+
+    assert len(ring_facts) == 1
+
+    consequent_facts = {
+        assertion.provisional_relation_id: assertion
+        for assertion in document.assertions
+        if assertion.provisional_relation_id in {"leave", "remain"}
+    }
+
+    assert set(consequent_facts) == {"leave", "remain"}
+
+    assert consequent_facts["leave"].conditional_on == clause.id
+    assert consequent_facts["remain"].conditional_on == clause.id
+
+    assert all(
+        assertion.factuality == "hypothetical"
+        for assertion in consequent_facts.values()
+    )
+
+    assert (
+        clause.span.start,
+        clause.span.end,
+    ) == (0, len(first_clause))

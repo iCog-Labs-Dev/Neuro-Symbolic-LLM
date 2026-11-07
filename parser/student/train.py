@@ -67,11 +67,13 @@ def load_pairs(
     return pairs
 
 
-def _catalog_training_prompt_version(catalog: OntologyCatalog) -> str:
-    from parser.semantic.catalog_prompt import build_catalog_document_prompt
+def _catalog_training_prompt_version(catalog):
+    """Return the active combined student prompt version."""
+    from parser.student.student_prompt import build_student_prompt_spec
 
-    return build_catalog_document_prompt(
-        "Training provenance.", catalog=catalog
+    return build_student_prompt_spec(
+        "Checkpoint compatibility.",
+        catalog=catalog,
     ).version
 
 
@@ -300,7 +302,11 @@ def train(
         device_map="auto",
     )
     print(f"  Parameters: {model.num_parameters() / 1e9:.2f}B")
+    model.config.use_cache = False
 
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
     # Step 6: Apply method
     if method == "lora":
         print("\nSTEP 5: Applying LoRA adapters")

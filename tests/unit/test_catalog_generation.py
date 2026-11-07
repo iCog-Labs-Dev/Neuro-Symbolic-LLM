@@ -37,7 +37,10 @@ def _parser(
     )
     return ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="teacher-model"),
+        config=SemanticParserConfig(
+            model_name="teacher-model",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
 
@@ -46,9 +49,9 @@ def test_parser_exposes_current_prompt_without_generation() -> None:
     parser = _parser('{"entities": [], "assertions": [], "rules": []}')
     prompt = ReferenceSemanticParser.build_prompt("Alice opened the door.")
 
-    assert parser.prompt_version.startswith("catalog-document-v15+sha256.")
-    assert "<worked_example>" in prompt
-    assert "Shared source interpretation rules:" in prompt
+    assert parser.prompt_version.startswith("general-v1+sha256.")
+    assert "You are an ontology-constrained semantic parser." in prompt
+    assert "Source text:\nAlice opened the door." in prompt
 
 
 def test_instance_prompt_and_generation_use_the_selected_catalog() -> None:
@@ -57,7 +60,10 @@ def test_instance_prompt_and_generation_use_the_selected_catalog() -> None:
     backend = RecordingBackend(json.dumps(target(source)))
     parser = ReferenceSemanticParser(
         backend=backend,
-        config=SemanticParserConfig(model_name="review"),
+        config=SemanticParserConfig(
+            model_name="review",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
 
@@ -78,10 +84,8 @@ def test_reference_context_is_not_added_to_the_extraction_source() -> None:
     result = parser.parse(source, context="Nora arrived yesterday.")
 
     assert result.document.source_text == source
-    assert (
-        "<reference_context>\nNora arrived yesterday.\n</reference_context>"
-        in backend.calls[0][0]
-    )
+    assert "Background context:\nNora arrived yesterday." in backend.calls[0][0]
+    assert "Source text:\nShe left." in backend.calls[0][0]
     quote = result.extraction.assertions[0].evidence[0]
     assert result.locate(quote) == (0, len(source))
 
@@ -111,7 +115,7 @@ def test_generation_returns_extraction_and_prompt_version() -> None:
         prompt_version == build_catalog_document_prompt(source, catalog=catalog).version
     )
     assert backend.calls[0][1] == "teacher-model"
-    assert f"<source_text>\n{source}\n</source_text>" in backend.calls[0][0]
+    assert f"Source text:\n{source}" in backend.calls[0][0]
 
 
 @pytest.mark.parametrize(

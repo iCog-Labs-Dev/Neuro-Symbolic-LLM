@@ -7,12 +7,12 @@ from typing import Any
 import pytest
 
 from parser.ontology.catalog import load_ontology_catalog
-from parser.semantic.catalog_prompt import build_catalog_document_prompt
 from parser.semantic.catalog_student import (
     validate_catalog_student_checkpoint,
     validate_catalog_student_pair,
 )
 from parser.semantic.schema import SEMANTIC_CONTRACT_VERSION
+from parser.student.student_prompt import build_student_prompt_spec
 from tests.semantic_fixtures import pair as canonical_pair
 
 
@@ -29,18 +29,23 @@ def test_pair_rebuilds_the_current_extraction_target() -> None:
         pair, catalog=load_ontology_catalog()
     )
 
-    assert "<source_text>\nMira left.\n</source_text>" in prompt
+    assert "SOURCE TEXT\nMira left." in prompt
     assert json.loads(label) == result.extraction.model_dump(mode="json")
     assert result.document.source_text == "Mira left."
     assert result.provenance.provider == "fixture"
 
 
-def test_pair_rejects_stale_prompt_provenance() -> None:
+def test_pair_preserves_teacher_prompt_provenance() -> None:
     pair = _pair()
-    pair["parser"]["prompt_version"] = "catalog-document-v2"
+    teacher_prompt_version = "parser-router-v2|general-v1+sha256.teacher"
+    pair["parser"]["prompt_version"] = teacher_prompt_version
 
-    with pytest.raises(ValueError, match="prompt version"):
-        validate_catalog_student_pair(pair, catalog=load_ontology_catalog())
+    _, _, result = validate_catalog_student_pair(
+        pair,
+        catalog=load_ontology_catalog(),
+    )
+
+    assert result.provenance.prompt_version == teacher_prompt_version
 
 
 def test_pair_rejects_mismatched_ontology_versions() -> None:
@@ -85,19 +90,39 @@ def test_pair_preserves_original_parser_provenance() -> None:
     assert result.provenance.parser_version == "catalog-semantic-parser-v3"
 
 
-def test_pair_rejects_changed_guidance_with_stale_recorded_version(monkeypatch) -> None:
-    from parser.semantic import catalog_prompt
+def test_student_prompt_changes_when_student_guidance_changes(
+    monkeypatch,
+) -> None:
+    from parser.student import student_prompt
 
     pair = _pair()
-    original = catalog_prompt.load_shared_extraction_guidance
-    monkeypatch.setattr(
-        catalog_prompt,
-        "load_shared_extraction_guidance",
-        lambda: original() + "\nChanged role guidance.",
+
+    original_instructions = student_prompt._instructions
+
+    prompt_before, _, _ = validate_catalog_student_pair(
+        pair,
+        catalog=load_ontology_catalog(),
     )
 
-    with pytest.raises(ValueError, match="prompt version"):
-        validate_catalog_student_pair(pair, catalog=load_ontology_catalog())
+    def modified_instructions(catalog):
+        return (
+            original_instructions(catalog) + "\nAdditional student-specific guidance."
+        )
+
+    monkeypatch.setattr(
+        student_prompt,
+        "_instructions",
+        modified_instructions,
+    )
+
+    prompt_after, _, result = validate_catalog_student_pair(
+        pair,
+        catalog=load_ontology_catalog(),
+    )
+
+    assert prompt_before != prompt_after
+    assert "Additional student-specific guidance." in prompt_after
+    assert result.provenance.prompt_version == pair["parser"]["prompt_version"]
 
 
 def test_checkpoint_requires_matching_contract_prompt_and_ontology(
@@ -105,30 +130,46 @@ def test_checkpoint_requires_matching_contract_prompt_and_ontology(
 ) -> None:
     catalog = load_ontology_catalog()
     metadata_path = tmp_path / "training_metadata.json"
-    metadata = {
+
+    valid_metadata = {
         "target_contract_version": SEMANTIC_CONTRACT_VERSION,
-        "prompt_version": build_catalog_document_prompt(
-            "Checkpoint compatibility.", catalog=catalog
+        "prompt_version": build_student_prompt_spec(
+            "Checkpoint compatibility.",
+            catalog=catalog,
         ).version,
         "ontology_versions": list(catalog.versions),
     }
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
-    validate_catalog_student_checkpoint(tmp_path, catalog=catalog)
+    metadata = dict(valid_metadata)
+    metadata_path.write_text(
+        json.dumps(metadata),
+        encoding="utf-8",
+    )
 
-    for key, value, expected_error in (
+    # A compatible student checkpoint must pass.
+    validate_catalog_student_checkpoint(
+        tmp_path,
+        catalog=catalog,
+    )
+
+    # Each incompatible field must be rejected independently.
+    invalid_cases = [
         ("target_contract_version", "old-contract", "target contract"),
-        ("prompt_version", "catalog-document-v2", "prompt version"),
+        ("prompt_version", "old-student-prompt", "prompt version"),
         ("ontology_versions", ["old-ontology-v1"], "ontology versions"),
-    ):
+    ]
+
+    for key, value, expected_error in invalid_cases:
+        metadata = dict(valid_metadata)
         metadata[key] = value
-        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        metadata_path.write_text(
+            json.dumps(metadata),
+            encoding="utf-8",
+        )
+
         with pytest.raises(ValueError, match=expected_error):
-            validate_catalog_student_checkpoint(tmp_path, catalog=catalog)
-        metadata[key] = {
-            "target_contract_version": SEMANTIC_CONTRACT_VERSION,
-            "prompt_version": build_catalog_document_prompt(
-                "Checkpoint compatibility.", catalog=catalog
-            ).version,
-            "ontology_versions": list(catalog.versions),
-        }[key]
+            validate_catalog_student_checkpoint(
+                tmp_path,
+                catalog=catalog,
+            )

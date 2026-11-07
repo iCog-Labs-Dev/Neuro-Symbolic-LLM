@@ -1,7 +1,4 @@
-"""Tests for catalog-guided semantic-extraction prompt construction."""
-
-import json
-import re
+"""Tests for general ontology-guided prompt construction."""
 
 import pytest
 import yaml
@@ -10,177 +7,241 @@ from parser.ontology.catalog import load_ontology_catalog
 from parser.semantic import catalog_prompt
 from parser.semantic.backends import CallableBackend
 from parser.semantic.catalog_prompt import build_catalog_document_prompt
-from parser.semantic.schema import (
-    SEMANTIC_CONTRACT_VERSION,
-    SemanticExtraction,
-    SemanticParseProvenance,
-    SemanticParseResult,
-    SourceDocument,
-)
 from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParserConfig,
-    validate_against_catalog,
 )
 
 
-def test_prompt_uses_catalog_signatures_versions_and_current_examples() -> None:
+def test_prompt_uses_general_catalog_signatures_and_examples():
     prompt = build_catalog_document_prompt(
-        "Although it rained, Mira left.", catalog=load_ontology_catalog()
+        "Nora sang.",
+        catalog=load_ontology_catalog(),
     )
 
-    assert prompt.version.startswith("catalog-document-v15+sha256.")
+    assert prompt.version.startswith("general-v1+sha256.")
     assert len(prompt.version.split("+sha256.")[1]) == 64
-    assert "general-v1" in prompt.text
+
+    # General ontology versions are included.
     assert "upper-v1" in prompt.text
-    assert "Concession(statement: Clause, counter_statement: Clause)" in prompt.text
-    assert "Causes(cause: Event|Proposition, effect: Event|Proposition)" in prompt.text
-    assert "Near(entity: Entity, nearby_entity: Entity)" in prompt.text
-    assert "Nora sang." in prompt.text
-    assert "Although it snowed, Nora sang." in prompt.text
-    assert "If it rains, Nora will leave." in prompt.text
+    assert "general-v1" in prompt.text
+
+    # General ontology predicates are available.
+    assert "LocatedIn(" in prompt.text
+    assert "Causes(" in prompt.text
+    assert "Evaluation" in prompt.text
+
+    # General extraction instructions are included.
+    assert "semantic roles" in prompt.text
+    assert "agentless passive" in prompt.text
+    assert "factuality" in prompt.text
+    assert "hypothetical" in prompt.text
+
+    # The supplied source is included.
+    assert "Source text:\nNora sang." in prompt.text
 
 
-def test_prompt_preserves_source_context_and_current_contract_guidance() -> None:
+def test_prompt_excludes_discourse_predicate_signatures():
+    prompt = build_catalog_document_prompt(
+        "Although it rained, Mira left.",
+        catalog=load_ontology_catalog(),
+    )
+
+    # Discourse ontology version is not advertised as a general module.
+    assert "discourse-v1" not in prompt.text
+
+    # Discourse predicates are not injected into the general catalog guide.
+    assert "Concession(statement:" not in prompt.text
+    assert "Contrast(item1:" not in prompt.text
+    assert "EvokesExpectation(trigger:" not in prompt.text
+    assert "Defeats(defeating_outcome:" not in prompt.text
+    assert "DiscourseFocus(focal_item:" not in prompt.text
+
+
+def test_prompt_preserves_source_context_and_current_contract():
     source = "  The door was opened by Alice.\nCafé ☕ remained open.  "
     context = "Alice is the caretaker."
 
     prompt = build_catalog_document_prompt(
-        source, context=context, catalog=load_ontology_catalog()
+        source,
+        context=context,
+        catalog=load_ontology_catalog(),
     )
 
-    assert (
-        prompt.text.split("<source_text>\n", 1)[1].split("\n</source_text>", 1)[0]
-        == source
-    )
-    assert f"<reference_context>\n{context}\n</reference_context>" in prompt.text
-    assert "Active and\n  passive descriptions" in prompt.text
-    assert "Do not invent an agent for an agentless passive" in prompt.text
-    assert "Return exactly the SemanticExtraction object" in prompt.text
-    assert "Evidence is a nonempty list of exact source quotes" in prompt.text
-    assert "Every entity must have a source-grounded mention" in prompt.text
+    extracted_source = prompt.text.rsplit("Source text:\n", 1)[1]
+
+    assert extracted_source == source
+
+    assert f"Background context:\n{context}" in prompt.text
+    # General semantic guidance remains present.
+    assert "semantic roles" in prompt.text
+    assert "agentless passive" in prompt.text
+    assert "Evaluation" in prompt.text
+    assert "factuality" in prompt.text
+    assert "hypothetical" in prompt.text
+
+    # Current output contract.
+    assert '"entities": []' in prompt.text
+    assert '"assertions": []' in prompt.text
+    assert '"rules": []' in prompt.text
+
+    # Evidence and source-grounding requirements.
+    assert "source evidence" in prompt.text
+    assert "original source" in prompt.text
 
 
-def test_prompt_uses_only_selected_ontology_modules() -> None:
+def test_prompt_uses_only_selected_general_ontology_modules():
     catalog = load_ontology_catalog(modules=("upper", "discourse"))
+
     prompt = build_catalog_document_prompt(
-        "Mira left despite the rain.", catalog=catalog
+        "Mira left despite the rain.",
+        catalog=catalog,
     )
 
-    assert "Ontology versions: discourse-v1, upper-v1" in prompt.text
-    assert "Concession(statement: Clause, counter_statement: Clause)" in prompt.text
-    assert "Kick(" not in prompt.text
-    assert "lexical-v1" not in prompt.text
+    assert "upper-v1" in prompt.text
+    assert "discourse-v1" not in prompt.text
+
+    # General predicates from upper remain available.
+    assert "Evaluation" in prompt.text
+    assert "Entity(" in prompt.text
+
+    # Discourse signatures are excluded.
+    assert "Concession(statement:" not in prompt.text
 
 
-def test_prompt_excludes_examples_requiring_unselected_modules() -> None:
+def test_prompt_keeps_general_guidance_without_discourse_examples():
     prompt = build_catalog_document_prompt(
-        "Mira left.", catalog=load_ontology_catalog(modules=("upper",))
+        "Mira left.",
+        catalog=load_ontology_catalog(modules=("upper",)),
     )
 
-    assert "Nora sang." in prompt.text
-    assert "Although it snowed, Nora sang." not in prompt.text
-    assert "Concession(" not in prompt.text
+    # General semantic extraction remains available.
+    assert "Evaluation" in prompt.text
+    assert "Entity(" in prompt.text
+
+    # The current source is included.
+    assert "Source text:\nMira left." in prompt.text
+
+    # Discourse-specific predicates are excluded.
+    assert "Concession(statement:" not in prompt.text
+    assert "EvokesExpectation(trigger:" not in prompt.text
+    assert "Defeats(defeating_outcome:" not in prompt.text
 
 
-def test_prompt_rejects_empty_source_text() -> None:
+def test_prompt_rejects_empty_source_text():
     with pytest.raises(ValueError, match="source_text"):
-        build_catalog_document_prompt(" \t ", catalog=load_ontology_catalog())
+        build_catalog_document_prompt(
+            " \t ",
+            catalog=load_ontology_catalog(),
+        )
 
 
-def test_prompt_identity_excludes_source_text_and_reference_context() -> None:
+def test_prompt_rejects_invalid_context_type():
+    with pytest.raises(ValueError, match="context"):
+        build_catalog_document_prompt(
+            "Nora left.",
+            context=None,
+            catalog=load_ontology_catalog(),
+        )
+
+
+def test_prompt_identity_excludes_source_text_and_reference_context():
     catalog = load_ontology_catalog()
-    first = build_catalog_document_prompt("Nora left.", catalog=catalog)
+
+    first = build_catalog_document_prompt(
+        "Nora left.",
+        catalog=catalog,
+    )
+
     second = build_catalog_document_prompt(
-        "Ivo arrived.", context="Nora arrived yesterday.", catalog=catalog
+        "Ivo arrived.",
+        context="Nora arrived yesterday.",
+        catalog=catalog,
     )
 
     assert first.version == second.version
     assert first.text != second.text
 
 
-def test_prompt_identity_tracks_all_guidance_components(monkeypatch) -> None:
+def test_prompt_identity_tracks_ontology_version_changes(monkeypatch):
     catalog = load_ontology_catalog()
-    components = (
-        "_catalog_guide",
-        "load_shared_extraction_guidance",
-        "_worked_examples",
+
+    first = build_catalog_document_prompt(
+        "Nora left.",
+        catalog=catalog,
     )
 
-    for component in components:
-        first = build_catalog_document_prompt("Nora left.", catalog=catalog)
-        original = getattr(catalog_prompt, component)
-        monkeypatch.setattr(
-            catalog_prompt,
-            component,
-            lambda *args, _original=original, **kwargs: _original(*args, **kwargs)
-            + "\nChanged guidance.",
-        )
-        second = build_catalog_document_prompt("Nora left.", catalog=catalog)
-        assert second.version != first.version
-        monkeypatch.setattr(catalog_prompt, component, original)
+    original = catalog_prompt._general_catalog_versions
+
+    monkeypatch.setattr(
+        catalog_prompt,
+        "_general_catalog_versions",
+        lambda selected: original(selected) + ("test-version",),
+    )
+
+    second = build_catalog_document_prompt(
+        "Nora left.",
+        catalog=catalog,
+    )
+
+    assert first.version != second.version
 
 
-def test_prompt_identity_tracks_changes_to_system_prompt(tmp_path, monkeypatch) -> None:
+def test_prompt_identity_tracks_changes_to_system_prompt(
+    tmp_path,
+    monkeypatch,
+):
     catalog = load_ontology_catalog()
-    first = build_catalog_document_prompt("Nora left.", catalog=catalog)
+
+    first = build_catalog_document_prompt(
+        "Nora left.",
+        catalog=catalog,
+    )
+
     config = yaml.safe_load(
-        catalog_prompt._PROMPT_CONFIG_PATH.read_text(encoding="utf-8")
-    )
-    config["system_prompt"] += "\nChanged instruction."
-    path = tmp_path / "catalog_document_prompt.yaml"
-    path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    monkeypatch.setattr(catalog_prompt, "_PROMPT_CONFIG_PATH", path)
-
-    second = build_catalog_document_prompt("Nora left.", catalog=catalog)
-
-    assert second.version != first.version
-
-
-def test_every_worked_example_matches_schema_catalog_and_source_quotes() -> None:
-    catalog = load_ontology_catalog()
-    prompt = build_catalog_document_prompt("The door opened.", catalog=catalog)
-    example_outputs = re.findall(
-        r"<example_output_json>\n(.*?)\n</example_output_json>", prompt.text, re.S
-    )
-    sources = re.findall(
-        r"<example_source_text>\n(.*?)\n</example_source_text>", prompt.text, re.S
+        catalog_prompt._GENERAL_PROMPT_PATH.read_text(encoding="utf-8")
     )
 
-    assert example_outputs
-    for index, (source, output) in enumerate(
-        zip(sources, example_outputs, strict=True)
-    ):
-        payload = json.loads(output)
-        extraction = SemanticExtraction.model_validate(payload)
-        result = SemanticParseResult(
-            document=SourceDocument(
-                document_id=f"example-{index}",
-                corpus_id="prompt-examples",
-                source_text=source,
-            ),
-            provenance=SemanticParseProvenance(
-                provider="test",
-                model="fixture",
-                parser_version="test-v1",
-                prompt_version=prompt.version,
-                ontology_versions=list(catalog.versions),
-            ),
-            extraction=extraction,
-        )
-        assert result.contract_version == SEMANTIC_CONTRACT_VERSION
-        validate_against_catalog(result, catalog)
+    config["system_prompt"] += "\nAdditional test instruction."
+
+    path = tmp_path / "general_prompt.yaml"
+
+    path.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        catalog_prompt,
+        "_GENERAL_PROMPT_PATH",
+        path,
+    )
+
+    second = build_catalog_document_prompt(
+        "Nora left.",
+        catalog=catalog,
+    )
+
+    assert first.version != second.version
 
 
-def test_parser_exposes_active_prompt_identity_without_generation() -> None:
+def test_parser_exposes_active_prompt_identity_without_generation():
     catalog = load_ontology_catalog(modules=("upper",))
+
     parser = ReferenceSemanticParser(
         backend=CallableBackend(
             lambda **_: pytest.fail("Prompt identity lookup must not generate"),
         ),
-        config=SemanticParserConfig(model_name="identity-test"),
+        config=SemanticParserConfig(
+            model_name="identity-test",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
-    expected = build_catalog_document_prompt("Any source.", catalog=catalog).version
+
+    expected = build_catalog_document_prompt(
+        "Any source.",
+        catalog=catalog,
+    ).version
 
     assert parser.prompt_version == expected

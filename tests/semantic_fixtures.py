@@ -4,7 +4,6 @@ import json
 
 from parser.ontology.catalog import load_ontology_catalog
 from parser.semantic.backends import CallableBackend
-from parser.semantic.catalog_prompt import build_catalog_document_prompt
 from parser.semantic.catalog_student import make_student_pair
 from parser.semantic.schema import (
     SEMANTIC_CONTRACT_VERSION,
@@ -15,6 +14,7 @@ from parser.semantic.semantic_parser import (
     ReferenceSemanticParser,
     SemanticParserConfig,
 )
+from parser.student.student_prompt import build_student_prompt_spec
 
 
 def target(text):
@@ -37,34 +37,47 @@ def target(text):
 
 
 def result(text="Mira left.", *, catalog=None) -> SemanticParseResult:
-    """Parse ``text`` with a fixed model answer, as the export would."""
+    """Parse text with a fixed general-extraction response."""
     parser = ReferenceSemanticParser(
         backend=CallableBackend(
-            lambda **_: json.dumps(target(text)), provider_name="fixture"
+            lambda **_: json.dumps(target(text)),
+            provider_name="fixture",
         ),
-        config=SemanticParserConfig(model_name="fixture"),
+        config=SemanticParserConfig(
+            model_name="fixture",
+            enable_routing=False,
+        ),
         catalog=catalog,
     )
     return parser.parse_document(
-        SourceDocument(document_id="fixture", corpus_id="fixtures", source_text=text)
+        SourceDocument(
+            document_id="fixture",
+            corpus_id="fixtures",
+            source_text=text,
+        )
     )
 
 
 def pair(text="Mira left.", *, catalog=None):
-    """Return the student pair the export writes for ``text``."""
+    """Return the student pair the export writes for text."""
     return make_student_pair(result(text, catalog=catalog))
 
 
 def write_checkpoint_metadata(path):
-    """Write the training metadata a compatible student checkpoint carries."""
+    """Write metadata for a compatible combined-prompt student checkpoint."""
     catalog = load_ontology_catalog()
+
+    prompt = build_student_prompt_spec(
+        "Checkpoint.",
+        catalog=catalog,
+    )
+
     (path / "training_metadata.json").write_text(
         json.dumps(
             {
                 "target_contract_version": SEMANTIC_CONTRACT_VERSION,
-                "prompt_version": build_catalog_document_prompt(
-                    "Checkpoint.", catalog=catalog
-                ).version,
+                "prompt_format": "catalog-combined-compact-v1",
+                "prompt_version": prompt.version,
                 "ontology_versions": list(catalog.versions),
             }
         ),

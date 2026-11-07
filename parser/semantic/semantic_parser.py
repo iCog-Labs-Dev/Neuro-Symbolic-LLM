@@ -24,10 +24,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from parser.grammar.atomese import LinkAtom
 from parser.ontology.catalog import OntologyCatalog, load_ontology_catalog
 from parser.semantic.backends import ModelBackend, OutputTruncatedError
-from parser.semantic.catalog_prompt import build_catalog_document_prompt
-from parser.semantic.metta_renderer import (
-    MettaRenderError,
+from parser.semantic.catalog_prompt import (
+    build_catalog_document_prompt,
+    build_routed_extraction_prompt,
+    build_router_prompt,
 )
+from parser.semantic.metta_renderer import MettaRenderError
 from parser.semantic.metta_renderer import (
     render_metta as render_semantic_result,
 )
@@ -40,6 +42,7 @@ from parser.semantic.normalization import (
 )
 from parser.semantic.output_cleanup import clean_model_output
 from parser.semantic.schema import (
+    ParserRoute,
     SemanticAssertion,
     SemanticExtraction,
     SemanticParseProvenance,
@@ -82,6 +85,7 @@ class SemanticParserConfig:
     """Configuration shared by both semantic parser roles."""
 
     model_name: str
+    enable_routing: bool = True
 
     def __post_init__(self) -> None:
         if not self.model_name.strip():
@@ -114,7 +118,7 @@ class _BaseSemanticParser:
         model_revision: str | None = None,
         require_structured_output: bool = False,
     ) -> None:
-        """Create a parser with either backend or a loaded model."""
+        """Create a parser with either backend or loaded model."""
         self._backend = backend
         self._config = config
         self._model = model
@@ -139,11 +143,17 @@ class _BaseSemanticParser:
     def prompt_version(self) -> str:
         """Return the active prompt identity without invoking the model."""
         catalog = self._catalog
-        return build_catalog_document_prompt("prompt identity", catalog=catalog).version
+        return build_catalog_document_prompt(
+            "prompt identity",
+            catalog=catalog,
+        ).version
 
     @staticmethod
     def build_prompt(
-        sentence: str, context: str = "", *, catalog: OntologyCatalog | None = None
+        sentence: str,
+        context: str = "",
+        *,
+        catalog: OntologyCatalog | None = None,
     ) -> str:
         """Build the same catalog-constrained prompt used for document labels."""
         if not sentence.strip():
@@ -179,10 +189,23 @@ class _BaseSemanticParser:
         repaired = result.model_copy(deep=True)
         repairs: list[SemanticRepair] = []
         for assertion in _iter_all_assertions(repaired):
+            if assertion.predicate == "Evaluation":
+                if not assertion.fallback:
+                    repairs.append(
+                        SemanticRepair(
+                            kind="predicate_contract",
+                            detail="set fallback=true on Evaluation",
+                        )
+                    )
+                    assertion.fallback = True
+                continue
+
             if assertion.predicate not in self._catalog.relations:
                 continue
+
             if assertion.relation is None and not assertion.fallback:
                 continue
+
             repairs.append(
                 SemanticRepair(
                     kind="predicate_contract",
@@ -228,7 +251,11 @@ class _BaseSemanticParser:
         pronouns = {
             entity.id: entity.mention.text.casefold()
             for entity in extraction.entities
-            if entity.kind is None and entity.mention.text.casefold() in _PRONOUNS
+            if (
+                entity.kind is None
+                and entity.mention is not None
+                and entity.mention.text.casefold() in _PRONOUNS
+            )
         }
 
         def binds(part: SemanticAssertion, entity_id: str) -> bool:
@@ -331,7 +358,38 @@ class _BaseSemanticParser:
 
         for assertion in extraction.assertions:
             self._validate_signature(assertion, entity_types)
+        for entity in extraction.entities:
+            symbolic = entity.symbolic_content
 
+            if symbolic is None:
+                continue
+
+            if (
+                symbolic.predicate != "Evaluation"
+                and symbolic.predicate not in self._catalog.relations
+            ):
+                raise SemanticParseError(
+                    f"Implicit proposition {entity.id!r} uses "
+                    f"unknown predicate {symbolic.predicate!r}"
+                )
+
+            symbolic_assertion = SemanticAssertion(
+                predicate=symbolic.predicate,
+                relation=symbolic.relation,
+                arguments=symbolic.arguments,
+                fallback=symbolic.fallback,
+                polarity=symbolic.polarity,
+                factuality="hypothetical",
+                modality="none",
+                confidence=1.0,
+                evidence=entity.evidence,
+                alternatives=[],
+            )
+
+            self._validate_signature(
+                symbolic_assertion,
+                entity_types,
+            )
         for rule in extraction.rules:
             rule_types = dict(entity_types)
             for variable in rule.variables:
@@ -382,6 +440,115 @@ class _BaseSemanticParser:
                     f"{'|'.join(spec.allowed_types)}, got {actual!r} "
                     f"for {argument.entity_id!r}"
                 )
+
+    def _build_extraction_output_schema(self) -> dict[str, Any]:
+        """Build a generation schema with predicate- and rule-specific constraints."""
+
+        schema = SemanticExtraction.model_json_schema()
+        assertion_schema = schema["$defs"]["SemanticAssertion"]
+
+        # Every assertion must explicitly provide its predicate contract fields.
+        assertion_required = set(assertion_schema["required"])
+        assertion_required.update(
+            {
+                "relation",
+                "fallback",
+                "arguments",
+                "polarity",
+                "factuality",
+                "modality",
+            }
+        )
+        assertion_schema["required"] = sorted(assertion_required)
+
+        catalog_predicates = sorted(
+            predicate
+            for predicate in self._catalog.relations
+            if predicate not in {"Evaluation", "Proposition"}
+        )
+
+        evaluation_branch = {
+            "type": "object",
+            "properties": {
+                "predicate": {"const": "Evaluation"},
+                "relation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[a-z][a-z0-9_]*$",
+                },
+                "fallback": {"const": True},
+            },
+            "required": ["predicate", "relation", "fallback"],
+        }
+
+        assertion_branches = [evaluation_branch]
+
+        if catalog_predicates:
+            assertion_branches.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "predicate": {"enum": catalog_predicates},
+                        "relation": {"type": "null"},
+                        "fallback": {"const": False},
+                    },
+                    "required": ["predicate", "relation", "fallback"],
+                }
+            )
+
+        assertion_schema["allOf"] = [{"anyOf": assertion_branches}]
+
+        # Inline rule-literal schemas instead of relying on a nested $ref
+        # combined with allOf. This makes the hypothetical constraint explicit
+        # at the antecedent/consequent item level for Ollama's JSON decoder.
+        rule_schema = schema["$defs"]["SemanticRule"]
+        # Require variables to be explicitly provided for every rule.
+        # Universal rules must provide at least one variable.
+        # Specific rules must explicitly provide an empty list.
+        rule_required = set(rule_schema["required"])
+        rule_required.add("variables")
+        rule_schema["required"] = sorted(rule_required)
+        for field in ("antecedents", "consequents"):
+            item_schema = {
+                **assertion_schema,
+                "properties": {
+                    **assertion_schema["properties"],
+                    "factuality": {
+                        "type": "string",
+                        "const": "hypothetical",
+                    },
+                },
+                "required": sorted(
+                    set(assertion_schema["required"]) | {"arguments", "factuality"}
+                ),
+            }
+
+            rule_schema["properties"][field]["items"] = item_schema
+
+        # Universal rules require at least one variable; specific rules
+        # must not declare universal variables.
+        rule_schema["allOf"] = [
+            {
+                "anyOf": [
+                    {
+                        "properties": {
+                            "scope": {"const": "universal"},
+                            "variables": {"minItems": 1},
+                        },
+                        "required": ["scope", "variables"],
+                    },
+                    {
+                        "properties": {
+                            "scope": {"const": "specific"},
+                            "variables": {"maxItems": 0},
+                        },
+                        "required": ["scope", "variables"],
+                    },
+                ]
+            }
+        ]
+
+        return schema
 
     @staticmethod
     def repair_rule_duplication(
@@ -569,28 +736,116 @@ class _BaseSemanticParser:
         return self.clean_model_output(output)
 
     def generate_extraction_payload(
-        self, document: SourceDocument, *, catalog: OntologyCatalog
+        self,
+        document: SourceDocument,
+        *,
+        catalog: OntologyCatalog,
+        run_discourse: bool = False,
     ) -> tuple[dict[str, Any], str]:
-        """Ask the model for the raw extraction of one document.
+        """Generate one routed semantic extraction."""
 
-        Returns the decoded JSON object and the prompt version. The payload is
-        a draft: parse_document normalizes and validates it.
-        """
-        prompt = build_catalog_document_prompt(
-            document.source_text, catalog=catalog, context=document.context
+        prompt = build_routed_extraction_prompt(
+            document.source_text,
+            catalog=catalog,
+            context=document.context,
+            run_discourse=run_discourse,
         )
+
         cleaned = self._generate_json_text(
-            prompt.text, output_schema=SemanticExtraction.model_json_schema()
+            prompt.text,
+            output_schema=self._build_extraction_output_schema(),
         )
+
         if not cleaned:
             raise SemanticParseError("The model returned an empty response")
+
         try:
             payload = json.loads(cleaned)
         except json.JSONDecodeError as error:
             raise SemanticParseError("The model returned invalid JSON") from error
+
         if not isinstance(payload, dict):
             raise SemanticParseError("Model output must be a JSON object")
+
         return payload, prompt.version
+
+    def repair_extraction_payload(
+        self,
+        document: SourceDocument,
+        payload: dict[str, Any],
+        validation_error: Exception,
+        *,
+        catalog: OntologyCatalog,
+        run_discourse: bool,
+    ) -> dict[str, Any]:
+        """Ask the teacher to correct an invalid extraction once."""
+
+        original_prompt = build_routed_extraction_prompt(
+            document.source_text,
+            catalog=catalog,
+            context=document.context,
+            run_discourse=run_discourse,
+        )
+
+        repair_prompt = (
+            original_prompt.text
+            + "\n\n## VALIDATION CORRECTION\n"
+            + "Your previous extraction failed validation.\n"
+            + "Correct the JSON while preserving all supported "
+            "semantic information.\n"
+            + "Do not invent unsupported entities or assertions.\n"
+            + "Every assertion argument must reference a declared "
+            "entity or valid rule variable.\n"
+            + "Declare all referenced Clause entities with exact "
+            "source mentions.\n"
+            + "Declare implicit Proposition entities with content, "
+            "evidence, and hypothetical symbolic_content.\n"
+            + "Never use Proposition as an assertion predicate.\n"
+            + "Evaluation assertions must use fallback=true.\n"
+            + "Catalog assertions must use fallback=false.\n"
+            + "Return the complete corrected SemanticExtraction "
+            "JSON only.\n\n"
+            + "Validation errors:\n"
+            + str(validation_error)
+            + "\n\nPrevious JSON:\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+        )
+
+        cleaned = self._generate_json_text(
+            repair_prompt,
+            output_schema=self._build_extraction_output_schema(),
+        )
+
+        if not cleaned:
+            raise SemanticParseError("Teacher returned an empty correction")
+
+        try:
+            corrected = json.loads(cleaned)
+        except json.JSONDecodeError as error:
+            raise SemanticParseError(
+                "Teacher returned invalid correction JSON"
+            ) from error
+
+        if not isinstance(corrected, dict):
+            raise SemanticParseError("Corrected extraction must be a JSON object")
+
+        return corrected
+
+    def route_document(self, document: SourceDocument) -> tuple[ParserRoute, str]:
+        """Decide whether a discourse pass is needed."""
+        prompt = build_router_prompt(document.source_text)
+
+        raw = self._generate_json_text(
+            prompt.text,
+            output_schema=ParserRoute.model_json_schema(),
+        )
+
+        try:
+            route = ParserRoute.model_validate_json(raw)
+        except ValidationError as error:
+            raise SemanticParseError("Invalid router response") from error
+
+        return route, prompt.version
 
     def parse_document(
         self,
@@ -598,30 +853,98 @@ class _BaseSemanticParser:
         *,
         aliases: Mapping[str, str] | None = None,
     ) -> SemanticParseResult:
-        """Parse one identified source document into a SemanticParseResult."""
+        """Parse with one bounded correction attempt for invalid teacher output."""
+
         catalog = self._catalog
-        payload, prompt_version = self.generate_extraction_payload(
-            document, catalog=catalog
-        )
+
         try:
-            extraction = SemanticExtraction.model_validate(
-                normalize_extraction_payload(payload, aliases=aliases)
+            prompt_versions: list[str] = []
+            run_discourse = False
+
+            # Call 1: route the document when routing is enabled.
+            if self._config.enable_routing:
+                route, router_version = self.route_document(document)
+                run_discourse = route.run_discourse
+                prompt_versions.append(router_version)
+
+            # Call 2: extract general semantics, optionally with discourse.
+            payload, extraction_version = self.generate_extraction_payload(
+                document,
+                catalog=catalog,
+                run_discourse=run_discourse,
             )
-            result = SemanticParseResult(
-                document=document,
-                provenance=SemanticParseProvenance(
-                    provider=self.provider_name,
-                    model=self.model_name,
-                    model_revision=self._model_revision,
-                    parser_version=PARSER_VERSION,
-                    prompt_version=prompt_version,
-                    ontology_versions=list(catalog.versions),
-                ),
-                extraction=extraction,
-            )
-            result = self._apply_repairs(result)
-            self.validate_predicates(result)
-            self.validate_arguments(result)
+            prompt_versions.append(extraction_version)
+
+            def validate_payload(
+                candidate: dict[str, Any],
+            ) -> SemanticParseResult:
+                """Normalize, validate, and apply existing repairs."""
+
+                normalized = normalize_extraction_payload(
+                    candidate,
+                    aliases=aliases,
+                )
+
+                extraction = SemanticExtraction.model_validate(normalized)
+
+                result = SemanticParseResult(
+                    document=document,
+                    provenance=SemanticParseProvenance(
+                        provider=self.provider_name,
+                        model=self.model_name,
+                        model_revision=self._model_revision,
+                        parser_version=PARSER_VERSION,
+                        prompt_version="|".join(prompt_versions),
+                        ontology_versions=list(catalog.versions),
+                    ),
+                    extraction=extraction,
+                )
+
+                # Existing post-validation repairs.
+                result = self._apply_repairs(result)
+
+                # Existing semantic and ontology validation.
+                self.validate_predicates(result)
+                self.validate_arguments(result)
+                validate_against_catalog(result, catalog)
+
+                return result
+
+            try:
+                return validate_payload(payload)
+
+            except (
+                SemanticNormalizationError,
+                SemanticParseError,
+                ValidationError,
+            ) as first_error:
+                # The distilled student does not perform teacher retries.
+                if self.parser_role != "reference":
+                    raise
+
+                # Call 3 (only on failure): request corrected extraction.
+                corrected_payload = self.repair_extraction_payload(
+                    document,
+                    payload,
+                    first_error,
+                    catalog=catalog,
+                    run_discourse=run_discourse,
+                )
+
+                try:
+                    return validate_payload(corrected_payload)
+
+                except (
+                    SemanticNormalizationError,
+                    SemanticParseError,
+                    ValidationError,
+                ) as second_error:
+                    raise SemanticParseError(
+                        "Extraction failed after one correction attempt. "
+                        f"Original error: {first_error}; "
+                        f"Correction error: {second_error}"
+                    ) from second_error
+
         except (
             SemanticNormalizationError,
             SemanticParseError,
@@ -630,7 +953,6 @@ class _BaseSemanticParser:
             raise SemanticParseError(
                 f"Document {document.document_id!r}: {error}"
             ) from error
-        return result
 
     def parse(self, sentence: str, context: str = "") -> SemanticParseResult:
         """Parse one sentence, using optional reference-only background."""
@@ -764,6 +1086,85 @@ class DistilledSemanticParser(_BaseSemanticParser):
             f"  Base model: {self.metadata.get('base_model', 'unknown')}",
             file=sys.stderr,
         )
+
+    def parse_document(
+        self,
+        document: SourceDocument,
+        *,
+        aliases: Mapping[str, str] | None = None,
+    ) -> SemanticParseResult:
+        """Run one combined student extraction for a source document.
+
+        Unlike the teacher, the student does not call the router or
+        perform a separate discourse generation.
+
+        It predicts one SemanticExtraction containing general and
+        discourse semantics, followed by deterministic validation.
+        """
+        from parser.student.student_prompt import build_student_prompt_spec
+
+        catalog = self._catalog
+
+        prompt = build_student_prompt_spec(
+            document.source_text,
+            context=document.context,
+            catalog=catalog,
+        )
+
+        # Exactly one model generation.
+        cleaned = self._generate_json_text(
+            prompt.text,
+            output_schema=self._build_extraction_output_schema(),
+        )
+
+        if not cleaned:
+            raise SemanticParseError("The student returned an empty extraction")
+
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError as error:
+            raise SemanticParseError("The student returned invalid JSON") from error
+
+        if not isinstance(payload, dict):
+            raise SemanticParseError("Student extraction must be a JSON object")
+
+        try:
+            extraction = SemanticExtraction.model_validate(
+                normalize_extraction_payload(
+                    payload,
+                    aliases=aliases,
+                )
+            )
+
+            result = SemanticParseResult(
+                document=document,
+                provenance=SemanticParseProvenance(
+                    provider=self.provider_name,
+                    model=self.model_name,
+                    model_revision=self._model_revision,
+                    parser_version=PARSER_VERSION,
+                    prompt_version=prompt.version,
+                    ontology_versions=list(catalog.versions),
+                ),
+                extraction=extraction,
+            )
+
+            # Deterministic repairs, not additional model calls.
+            result = self._apply_repairs(result)
+
+            # Validate the complete extraction.
+            validate_against_catalog(result, catalog)
+
+        except (
+            SemanticNormalizationError,
+            SemanticParseError,
+            ValidationError,
+        ) as error:
+            raise SemanticParseError(
+                f"Student document {document.document_id!r}: {error}"
+            ) from error
+
+        return result
 
     @classmethod
     def from_pretrained(

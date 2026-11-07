@@ -29,14 +29,38 @@ class TinyModel(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
         self.device = torch.device("cpu")
+        self.config = SimpleNamespace(use_cache=True)
+        self.gradient_checkpointing_enabled = False
+        self.gradient_checkpointing_kwargs = None
 
     def num_parameters(self):
         return 1
 
+    def gradient_checkpointing_enable(
+        self,
+        gradient_checkpointing_kwargs=None,
+    ):
+        self.gradient_checkpointing_enabled = True
+        self.gradient_checkpointing_kwargs = gradient_checkpointing_kwargs
+
     def forward(self, input_ids, attention_mask, labels):
-        targets = labels[:, 1:]
-        loss = ((self.weight - targets[targets != -100].float()) ** 2).mean()
-        return SimpleNamespace(loss=loss, logits=torch.zeros((*input_ids.shape, 8)))
+        targets = labels[:, 1:].float()
+        mask = targets != -100
+
+        safe_targets = torch.where(
+            mask,
+            targets,
+            torch.zeros_like(targets),
+        )
+
+        squared_error = (self.weight - safe_targets) ** 2
+
+        loss = (squared_error * mask.float()).sum() / mask.sum().clamp_min(1)
+
+        return SimpleNamespace(
+            loss=loss,
+            logits=torch.zeros((*input_ids.shape, 8)),
+        )
 
 
 @pytest.fixture
@@ -70,9 +94,26 @@ def run_training(monkeypatch, tmp_path):
         }
         for i in range(5)
     ]
+
+    class FakeStudentDataset(list):
+        def __init__(
+            self,
+            examples,
+            tokenizer=None,
+            max_length=None,
+            *,
+            catalog=None,
+        ):
+            super().__init__(examples)
+
+            self.required_max_length = max(
+                (len(example["input_ids"]) for example in examples),
+                default=0,
+            )
+
     monkeypatch.setattr(training, "load_config", lambda _: config)
     monkeypatch.setattr(training, "load_pairs", lambda _, **kwargs: examples)
-    monkeypatch.setattr(training, "StudentDataset", lambda pairs, *_, **kwargs: pairs)
+    monkeypatch.setattr(training, "StudentDataset", FakeStudentDataset)
     monkeypatch.setattr(training, "save_model", lambda *args: None)
     monkeypatch.setattr(
         training.AutoTokenizer,
