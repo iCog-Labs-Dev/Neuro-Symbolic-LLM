@@ -1,9 +1,4 @@
-"""Symbolic forward composition at final predictive-coding latents.
-
-Accepts final ``aux['z_star']`` latents from ``A3Model.train_grads`` and applies
-symbolic attention after continuous residual injection. Latent inference,
-alignment losses and optimizer updates are outside this forward interface.
-"""
+"""Symbolic attention after continuous residual injection."""
 
 from __future__ import annotations
 
@@ -19,12 +14,7 @@ from stages.stage_A.a3_tail import residual_modify
 
 
 class A4Model:
-    """Compose a continuous stage with a bank-bound symbolic head.
-
-    Uses the A3 and symbolic-head parameter layouts without conversion.
-    Construction performs no I/O. Symbolic layers must be a subset of the
-    continuous stage's adapted layers.
-    """
+    """Compose a continuous residual with a bank-bound symbolic head."""
 
     def __init__(self, continuous: A3Model, symbolic: SymbolicHead) -> None:
         if symbolic.hidden_size != continuous.hidden_size:
@@ -43,18 +33,9 @@ class A4Model:
         *,
         symbolic_enabled: bool = True,
     ) -> ForwardResult:
-        """Forward at caller-supplied final latents, without further settlement.
+        """Apply the residual and symbolic head at caller-supplied latents.
 
-        At each adapted layer: h_pc = h_live + scale * z_star @ B, followed by
-        the symbolic query, retrieval, attention and writeback when enabled.
-        Earlier modified layers flow into later ones through the live model.
-
-        ``symbolic_enabled`` is a static Python bool when compiling with JAX.
-        Disabling it bypasses the head entirely: no query projection or network
-        callback is executed, and symbolic parameters are not inspected.
-
-        Returned intermediates contain the substrate's pre-hook hidden states.
-        ``z_star`` must correspond to ``input_ids`` and ``continuous_params``.
+        symbolic_enabled is static under JIT; False bypasses retrieval.
         """
         result, _ = self.forward_with_states_at_latents(
             continuous_params,
@@ -74,11 +55,7 @@ class A4Model:
         *,
         symbolic_enabled: bool = True,
     ) -> tuple[ForwardResult, dict[int, jax.Array]]:
-        """Return the forward result and live pre-symbolic post-PC states.
-
-        States are captured at head-bearing layers within the same forward pass,
-        preserving earlier-layer corrections and gradients to continuous weights.
-        """
+        """Return logits and post-residual states at symbolic-head layers."""
         if not isinstance(symbolic_enabled, bool):
             raise TypeError("symbolic_enabled must be a static Python bool")
         if input_ids.ndim != 2 or input_ids.shape[1] != self.continuous.seq_len:

@@ -1,17 +1,17 @@
-"""A4 task, predictive-coding spring and full-bank alignment at fixed latents."""
+"""A4 cross-entropy and full-bank key/value alignment at fixed latents."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
-from fabricpc.core.energy import GaussianEnergy
 
 from residual.symbolic_head.alignment import ValuePredictor, alignment_loss
 from residual.symbolic_head.jax_head import HeadParams
-from stages.stage_A.a4 import A4Model
+from stages.stage_A.a4.model import A4Model
 
 
 class AlignmentLabels(NamedTuple):
@@ -21,6 +21,34 @@ class AlignmentLabels(NamedTuple):
     template_indices: jax.Array
 
 
+def _task_terms_at_latents(
+    model: A4Model,
+    continuous_params: Any,
+    symbolic_params: HeadParams,
+    input_ids: jax.Array,
+    z_star: Mapping[int, jax.Array],
+    *,
+    symbolic_enabled: bool = True,
+    token_mask: jax.Array | None = None,
+) -> tuple[dict[str, jax.Array], dict[int, jax.Array]]:
+    z_fixed = jax.tree.map(jax.lax.stop_gradient, z_star)
+    continuous_fixed = jax.tree.map(jax.lax.stop_gradient, continuous_params)
+    result, states = model.forward_with_states_at_latents(
+        continuous_fixed,
+        symbolic_params,
+        input_ids,
+        z_fixed,
+        symbolic_enabled=symbolic_enabled,
+    )
+    labels = input_ids
+    if token_mask is not None:
+        if token_mask.shape != input_ids.shape or token_mask.dtype != jnp.bool_:
+            raise ValueError("token_mask must be boolean and match input_ids")
+        labels = jnp.where(token_mask, input_ids, -100)
+    task = model.continuous.sub.compute_loss(result.logits, labels, losses=("CE",))
+    return {"total": task, "task": task}, states
+
+
 def objective_at_latents(
     model: A4Model,
     continuous_params: Any,
@@ -28,32 +56,27 @@ def objective_at_latents(
     value_params: Mapping[str, Mapping[str, jax.Array]],
     input_ids: jax.Array,
     z_star: Mapping[int, jax.Array],
-    clean_hidden: Mapping[int, jax.Array],
     labels: Mapping[int, AlignmentLabels],
     bank_keys: jax.Array,
     bank_values: jax.Array,
     *,
-    base_logits: jax.Array | None = None,
+    key_weight: float = 1.0,
+    value_weight: float = 1.0,
+    token_mask: jax.Array | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Sum task, optional base KL, spring and per-layer alignment losses.
+    """Compute CE and key/value alignment with fixed residual weights and latents.
 
-    Final PC latents and clean-pass targets are fixed outer-step inputs. Task
-    loss is evaluated once through the symbolic forward path. No A3 task loss
-    or precomputed A3 gradient is added. The spring trains the latent predictor;
-    task/alignment losses can train the continuous projection and earlier live
-    layers. Bank vectors remain fixed. Each head layer needs explicit labels.
-
-    Invalid dynamic label positions produce NaN; callers must require finite
-    loss and gradients before applying optimizer updates.
+    Every symbolic layer requires labelled token positions. Invalid dynamic
+    positions yield NaN, which the optimizer step rejects.
     """
-    if set(clean_hidden) != set(model.continuous.layers):
-        raise ValueError("Clean hidden states must cover every continuous layer")
+    if any(
+        not math.isfinite(weight) or weight < 0 for weight in (key_weight, value_weight)
+    ):
+        raise ValueError("Alignment weights must be finite and nonnegative")
     if set(labels) != set(model.symbolic.layers) or set(value_params) != {
         f"layer_{layer}" for layer in model.symbolic.layers
     }:
         raise ValueError("Labels and value parameters must cover every symbolic layer")
-    if model.continuous.cfg.lambda_kl > 0 and base_logits is None:
-        raise ValueError("Base logits are required when the KL weight is nonzero")
     for positions, indices in labels.values():
         if (
             positions.ndim != 2
@@ -66,35 +89,13 @@ def objective_at_latents(
             raise ValueError(
                 "Each integer [count, 2] position needs one integer target"
             )
-    z_fixed = jax.tree.map(jax.lax.stop_gradient, z_star)
-    h_fixed = jax.tree.map(jax.lax.stop_gradient, clean_hidden)
-    result, states = model.forward_with_states_at_latents(
-        continuous_params, symbolic_params, input_ids, z_fixed
-    )
-    task = model.continuous.sub.compute_loss(result.logits, input_ids, losses=("CE",))
-    kl = jnp.asarray(0.0, dtype=jnp.float32)
-    if model.continuous.cfg.lambda_kl > 0:
-        assert base_logits is not None
-        kl = model.continuous.sub.compute_loss(
-            result.logits[:, :-1],
-            None,
-            losses=("KL",),
-            base_logits=jax.lax.stop_gradient(base_logits[:, :-1]),
-        )
-    predictions = model.continuous.predict_latents(continuous_params, h_fixed)
-    n_pred = input_ids.shape[0] * (input_ids.shape[1] - 1)
-    spring = (
-        sum(
-            jnp.sum(
-                GaussianEnergy.energy(
-                    z_fixed[layer],
-                    predictions[layer],
-                    {"precision": 1.0 / model.continuous.cfg.sigma2},
-                )
-            )
-            for layer in model.continuous.layers
-        )
-        / n_pred
+    terms, states = _task_terms_at_latents(
+        model,
+        continuous_params,
+        symbolic_params,
+        input_ids,
+        z_star,
+        token_mask=token_mask,
     )
     key_loss = jnp.asarray(0.0, dtype=jnp.float32)
     value_loss = jnp.asarray(0.0, dtype=jnp.float32)
@@ -109,6 +110,8 @@ def objective_at_latents(
         )
         batch = jnp.clip(positions[:, 0], 0, input_ids.shape[0] - 1)
         token = jnp.clip(positions[:, 1], 0, input_ids.shape[1] - 1)
+        if token_mask is not None:
+            valid = valid & token_mask[batch, token]
         hidden = states[layer][batch, token]
         name = f"layer_{layer}"
         aligned = alignment_loss(
@@ -120,12 +123,10 @@ def objective_at_latents(
         )
         key_loss = key_loss + jnp.where(jnp.all(valid), aligned.key, jnp.nan)
         value_loss = value_loss + jnp.where(jnp.all(valid), aligned.value, jnp.nan)
-    total = task + model.continuous.cfg.lambda_kl * kl + spring + key_loss + value_loss
+    total = terms["total"] + key_weight * key_loss + value_weight * value_loss
     return total, {
+        **terms,
         "total": total,
-        "task": task,
-        "kl": kl,
-        "spring": spring,
         "key": key_loss,
         "value": value_loss,
     }

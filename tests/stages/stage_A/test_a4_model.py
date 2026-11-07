@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import jax
@@ -11,19 +12,19 @@ import pytest
 
 pytest.importorskip("fabricpc.graph_assembly", reason="A3 requires FabricPC >= 0.6")
 
-from frozenllm.substrate import FrozenSubstrate  # noqa: E402
-from frozenllm.substrate.loader import _native_torch_loading  # noqa: E402
 from residual.symbolic_head.jax_head import SymbolicHead  # noqa: E402
 from stages.results import RunWriter, load_params  # noqa: E402
 from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
 from stages.stage_A.a3_tail import residual_modify  # noqa: E402
-from stages.stage_A.a4 import A4Model  # noqa: E402
-from stages.stage_A.a4_checkpoint import restore_a3_weights  # noqa: E402
-from stages.stage_A.a4_objective import (  # noqa: E402
+from stages.stage_A.a4.checkpoint import restore_a3_weights  # noqa: E402
+from stages.stage_A.a4.model import A4Model  # noqa: E402
+from stages.stage_A.a4.objective import (  # noqa: E402
     AlignmentLabels,
+    _task_terms_at_latents,
     objective_at_latents,
 )
-from tests.frozenllm.conftest import _torch_model  # noqa: E402
+from symbolic_memory.jax_bridge import RetrievedTemplates  # noqa: E402
+from tests.stages.stage_A.a4_fixtures import small_substrate  # noqa: E402
 
 
 def forbidden_retrieval(queries):
@@ -32,9 +33,7 @@ def forbidden_retrieval(queries):
 
 @pytest.fixture(scope="module")
 def env():
-    with _native_torch_loading():
-        native = _torch_model("gpt2")
-    sub = FrozenSubstrate(native)
+    sub = small_substrate()
     continuous = A3Model(
         sub,
         layers=(6, 7),
@@ -182,7 +181,6 @@ def test_checkpoint_rejects_invalid_weights(env, invalid):
 
 
 def test_objective_rejects_invalid_label_shape_before_retrieval(env):
-    hidden, _ = env.continuous.clean_pass(env.ids)
     with pytest.raises(ValueError, match="position needs one integer target"):
         objective_at_latents(
             env.a4,
@@ -191,8 +189,183 @@ def test_objective_rejects_invalid_label_shape_before_retrieval(env):
             {"layer_7": {}},
             env.ids,
             env.z,
-            hidden,
             {7: AlignmentLabels(jnp.zeros((1, 3), dtype=jnp.int32), jnp.array([0]))},
             jnp.ones((1, 256)),
             jnp.ones((1, 256)),
+        )
+
+
+def test_shared_task_helper_is_exactly_cross_entropy(env):
+    result = env.a4.forward_at_latents(
+        env.params, {}, env.ids, env.z, symbolic_enabled=False
+    )
+    expected = env.sub.compute_loss(result.logits, env.ids, losses=("CE",))
+    terms, _ = jax.jit(
+        lambda params: _task_terms_at_latents(
+            env.a4,
+            params,
+            {},
+            env.ids,
+            env.z,
+            symbolic_enabled=False,
+        )
+    )(env.params)
+    np.testing.assert_allclose(terms["total"], expected, rtol=3e-4, atol=3e-4)
+    np.testing.assert_array_equal(terms["total"], terms["task"])
+    assert set(terms) == {"total", "task"}
+
+
+def test_a4_ce_does_not_call_kl_or_spring_predictor(env, monkeypatch):
+    original_loss = env.sub.compute_loss
+    calls = []
+
+    def ce_only(*args, **kwargs):
+        assert kwargs["losses"] == ("CE",)
+        calls.append(kwargs["losses"])
+        return original_loss(*args, **kwargs)
+
+    def forbidden_predictor(*args, **kwargs):
+        raise AssertionError("A4 must not recompute a predictor for a spring term")
+
+    monkeypatch.setattr(
+        env.continuous, "cfg", replace(env.continuous.cfg, lambda_kl=0.7)
+    )
+    monkeypatch.setattr(env.sub, "compute_loss", ce_only)
+    monkeypatch.setattr(env.continuous, "predict_latents", forbidden_predictor)
+    terms, _ = _task_terms_at_latents(
+        env.a4, env.params, {}, env.ids, env.z, symbolic_enabled=False
+    )
+    assert calls == [("CE",)]
+    np.testing.assert_array_equal(terms["total"], terms["task"])
+    assert set(terms) == {"total", "task"}
+
+
+@pytest.fixture(scope="module")
+def aligned_env(env):
+    # Deterministic unit-test retrieval targets, not a latency/ANN qualification.
+    keys = jnp.eye(3, 256, dtype=jnp.float32)
+    values = keys * jnp.asarray([[1.0], [2.0], [3.0]])
+
+    def retrieve(queries):
+        count = queries.shape[0]
+        return RetrievedTemplates(
+            jnp.broadcast_to(keys[:2], (count, 2, 256)),
+            jnp.broadcast_to(values[:2], (count, 2, 256)),
+            jnp.zeros((count, 2), dtype=jnp.float32),
+            jnp.broadcast_to(jnp.arange(2, dtype=jnp.int32), (count, 2)),
+        )
+
+    head = SymbolicHead(32, 256, (7,), retrieve)
+    return SimpleNamespace(
+        a4=A4Model(env.continuous, head),
+        symbolic=head.init_params(2),
+        value={"layer_7": {"V_pred": jnp.full((32, 256), 0.01)}},
+        labels={7: AlignmentLabels(jnp.array([[0, 1], [0, 3]]), jnp.array([0, 2]))},
+        keys=keys,
+        values=values,
+    )
+
+
+@pytest.mark.parametrize(
+    "key_weight,value_weight", [(1.0, 1.0), (0.0, 0.0), (0.25, 2.0)]
+)
+def test_aligned_objective_is_exactly_ce_plus_key_and_value(
+    env, aligned_env, monkeypatch, key_weight, value_weight
+):
+    aligned = aligned_env
+    monkeypatch.setattr(
+        env.continuous, "cfg", replace(env.continuous.cfg, lambda_kl=0.7)
+    )
+    result, states = aligned.a4.forward_with_states_at_latents(
+        env.params, aligned.symbolic, env.ids, env.z
+    )
+    hidden = states[7][0, jnp.array([1, 3])]
+    queries = aligned.a4.symbolic.project(aligned.symbolic["layer_7"], hidden)
+    scores = queries @ aligned.keys.T
+    expected_key = jnp.mean(
+        jax.nn.logsumexp(scores, axis=-1) - scores[jnp.arange(2), jnp.array([0, 2])]
+    )
+    predictions = hidden @ aligned.value["layer_7"]["V_pred"]
+    expected_value = jnp.mean(
+        jnp.sum((predictions - aligned.values[jnp.array([0, 2])]) ** 2, axis=-1)
+    )
+    expected_ce = env.sub.compute_loss(result.logits, env.ids, losses=("CE",))
+
+    total, terms = jax.jit(
+        lambda params: objective_at_latents(
+            aligned.a4,
+            params,
+            aligned.symbolic,
+            aligned.value,
+            env.ids,
+            env.z,
+            aligned.labels,
+            aligned.keys,
+            aligned.values,
+            key_weight=key_weight,
+            value_weight=value_weight,
+        )
+    )(env.params)
+    assert set(terms) == {"total", "task", "key", "value"}
+    for actual, expected in (
+        (terms["task"], expected_ce),
+        (terms["key"], expected_key),
+        (terms["value"], expected_value),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=3e-4, atol=3e-4)
+    np.testing.assert_allclose(
+        total,
+        terms["task"] + key_weight * terms["key"] + value_weight * terms["value"],
+        rtol=1e-6,
+    )
+
+
+def test_a4_objective_freezes_residual_weights_and_latents(env, aligned_env):
+    aligned = aligned_env
+
+    def loss(continuous, symbolic, value, z):
+        return objective_at_latents(
+            aligned.a4,
+            continuous,
+            symbolic,
+            value,
+            env.ids,
+            z,
+            aligned.labels,
+            aligned.keys,
+            aligned.values,
+        )[0]
+
+    continuous, symbolic, value, latents = jax.jit(
+        jax.grad(loss, argnums=(0, 1, 2, 3))
+    )(env.params, aligned.symbolic, aligned.value, env.z)
+    for layer in env.continuous.layers:
+        predictor_gradient = env.continuous.predictor_weight(continuous, layer)
+        np.testing.assert_array_equal(
+            predictor_gradient, jnp.zeros_like(predictor_gradient)
+        )
+        projection_gradient = env.continuous.projection(continuous, layer)
+        np.testing.assert_array_equal(
+            projection_gradient, jnp.zeros_like(projection_gradient)
+        )
+        np.testing.assert_array_equal(latents[layer], jnp.zeros_like(latents[layer]))
+    for gradients in (symbolic, value):
+        assert all(np.isfinite(leaf).all() for leaf in jax.tree.leaves(gradients))
+        assert any(np.linalg.norm(leaf) > 0 for leaf in jax.tree.leaves(gradients))
+
+
+@pytest.mark.parametrize("weight", [-1.0, float("nan"), float("inf")])
+def test_alignment_rejects_invalid_weight_before_forward(env, weight):
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        objective_at_latents(
+            env.a4,
+            env.params,
+            {},
+            {},
+            env.ids,
+            env.z,
+            {},
+            jnp.ones((1, 256)),
+            jnp.ones((1, 256)),
+            key_weight=weight,
         )

@@ -16,12 +16,7 @@ def restore_a3_weights(
     model: A3Model,
     weights: Mapping[str, Mapping[str, Any]],
 ) -> Any:
-    """Restore both predictor A and projection B without modifying source weights.
-
-    Accepts the mapping returned by stages.results.load_params. The caller must
-    construct the model with the checkpoint's base-model identity, activation,
-    scale and PC configuration. This restores weights, not optimizer state.
-    """
+    """Restore predictor A and projection B into a matching continuous model."""
     if set(weights) != {f"layer_{layer}" for layer in model.layers}:
         raise ValueError("Checkpoint layers do not match the continuous model")
     arrays: dict[int, dict[str, jax.Array]] = {}
