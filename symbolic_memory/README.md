@@ -39,11 +39,25 @@ docker compose run --rm app bash
 docker compose run --rm test
 ```
 
-The Python image is CPU tooling, not a qualified CUDA training environment. The
-MORK recipe currently uses an unpinned Rust image and upstream branches; a
-successful configuration check is not a successful build or an end-to-end
-qualification. Pin source/image revisions and verify native bank operations
-before treating this recipe as a reproducible release deployment.
+The Python image is CPU tooling, not a qualified CUDA training environment.
+The MORK recipe pins the Rust image by version and digest and the upstream MORK
+revision. `docker/mork/dependencies.patch` pins compatible PathMap, Freeze and
+gxhash Git revisions in the downloaded workspace manifest. Cargo generates its
+lockfile inside the image, then builds the server with `--locked`; no local
+`Cargo.lock` is required or copied into the image. Cargo builds PathMap as a
+dependency, without a separate standalone build.
+
+Registry dependencies are resolved during lockfile generation and can vary
+between uncached builds. Registry and system package versions are not fully
+pinned, so this recipe does not guarantee an identical dependency graph or
+binary across builds. Retain the generated lockfile and image digest with build
+artifacts when recording results. A successful build still requires server
+startup and native bank installation/readback checks before qualification.
+
+`MORK_SERVER_DIR` is temporary request storage: the pinned server clears that
+directory at startup. Use a dedicated scratch directory, never a source, bank,
+checkpoint or results directory. The `/app/data` mount alone does not configure
+persistence of the in-memory bank; reinstall and verify the bank after restart.
 
 ## Input contract
 

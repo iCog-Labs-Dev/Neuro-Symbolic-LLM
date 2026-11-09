@@ -1,1 +1,2 @@
 docker/mork/entrypoint.sh text eol=lf
+docker/mork/dependencies.patch text eol=lf

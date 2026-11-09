@@ -1,5 +1,6 @@
 """Static A4 deployment wiring; no image build or live-server qualification."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,40 @@ def test_mork_ports_environment_healthcheck_and_mount_agree():
     assert (
         "MORK_SERVER_URL=http://127.0.0.1:8000" in (ROOT / ".env.example").read_text()
     )
+
+
+def test_mork_build_pins_source_toolchain_and_git_dependencies():
+    context = ROOT / "docker/mork"
+    dockerfile = (context / "Dockerfile").read_text()
+    assert re.match(r"FROM rust:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}\n", dockerfile)
+    assert "ARG MORK_REVISION=2d6730be5032cacdd86dcf6aa8015ec4d8635d84" in dockerfile
+    assert "fetch --depth=1 origin ${MORK_REVISION}" in dockerfile
+    assert "COPY dependencies.patch /app/dependencies.patch" in dockerfile
+    assert "git apply --check /app/dependencies.patch" in dockerfile
+    assert "git apply /app/dependencies.patch" in dockerfile
+    assert "cargo generate-lockfile" in dockerfile
+    assert "cargo build --release --locked --package mork-server" in dockerfile
+    assert dockerfile.index("cargo generate-lockfile") < dockerfile.index(
+        "cargo build --release --locked"
+    )
+    assert "COPY Cargo.lock" not in dockerfile
+    assert "||" not in dockerfile
+    assert "chown mork:mork /app/data /app/reports /app/benchmarks" in dockerfile
+    assert "chown -R" not in dockerfile
+    patch = (context / "dependencies.patch").read_text()
+    additions = "\n".join(line for line in patch.splitlines() if line.startswith("+"))
+    for revision in (
+        "c0923ed8a0651155b93de54810f1564b136d5c47",
+        "55bde471dc2e395dd17eb4e7055f323c0c29c19d",
+        "64f295eb0234f39905aea4385fb36568927ba8dd",
+    ):
+        assert re.search(rf'rev\s*=\s*"{revision}"', additions)
+    assert b"\r" not in (context / "dependencies.patch").read_bytes()
+    assert (
+        "docker/mork/dependencies.patch text eol=lf"
+        in (ROOT / ".gitattributes").read_text()
+    )
+    assert "/docker/mork/Cargo.lock" in (ROOT / ".gitignore").read_text().splitlines()
 
 
 def test_fixed_bank_mork_service_does_not_require_redis_or_application():
