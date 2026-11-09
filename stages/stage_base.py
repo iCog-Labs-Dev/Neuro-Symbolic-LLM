@@ -154,7 +154,14 @@ class RunConfig:
         }
 
 
-def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
+def load_configs(
+    path: Path,
+    objective_cls: type[Any],
+    objective_section: str = "objective",
+) -> RunConfig:
+    if objective_section not in {"objective", "a3_hybrid"}:
+        raise ValueError(f"Unsupported objective section: {objective_section}")
+
     raw = yaml.safe_load(path.read_text()) or {}
 
     unknown = sorted(set(raw) - set(SECTIONS))
@@ -176,7 +183,7 @@ def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
 
     return RunConfig(
         adapter=ResidualConfig.from_dict(raw.get("adapter") or {}),
-        objective=objective_cls.from_dict(raw.get("objective") or {}),
+        objective=objective_cls.from_dict(raw.get(objective_section) or {}),
         training=TrainingConfig.from_dict(raw.get("training") or {}),
         domains=domains,
     )

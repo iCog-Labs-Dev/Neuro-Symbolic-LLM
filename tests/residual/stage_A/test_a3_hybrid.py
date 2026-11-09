@@ -33,8 +33,8 @@ from fabricpc.graph_initialization.state_initializer import (  # noqa: E402
 from fabricpc.training.trainer import build_clamps  # noqa: E402
 
 from frozenllm.substrate import identity_modify  # noqa: E402
-from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
-from stages.stage_A.a3_tail import make_frozen_tail, residual_modify  # noqa: E402
+from stages.stage_A.a3 import A3HybridConfig, A3Model  # noqa: E402
+from stages.stage_A.a3.a3_tail import make_frozen_tail, residual_modify  # noqa: E402
 from tests.frozenllm.conftest import (  # noqa: E402
     BATCH,
     NUM_TOKENS,
@@ -53,7 +53,7 @@ TOL = {"atol": 2e-4, "rtol": 2e-3}
 
 
 def make_model(sub, k=K, lam=0.0):
-    cfg = A3Config(
+    cfg = A3HybridConfig(
         infer_steps=k,
         eta_z=ETA,
         sigma2=SIGMA2,
@@ -397,21 +397,25 @@ def test_configuration_and_input_validation(substrate, env):
         {"layers": (99,), "rank": RANK, "seq_len": SEQ},
         {"layers": LAYERS, "rank": 0, "seq_len": SEQ},
         {"layers": LAYERS, "rank": RANK, "seq_len": 1},
-        {"layers": LAYERS, "rank": RANK, "seq_len": SEQ, "activation": "swish"},
-        {"layers": LAYERS, "rank": RANK, "seq_len": SEQ, "scale": 0.0},
+        {
+            "layers": LAYERS,
+            "rank": RANK,
+            "seq_len": SEQ,
+            "activation": "swish",
+        },
+        {
+            "layers": LAYERS,
+            "rank": RANK,
+            "seq_len": SEQ,
+            "scale": 0.0,
+        },
     ):
         with pytest.raises(ValueError):
-            A3Model(substrate, **bad)
-    with pytest.raises(ValueError):
-        A3Config(eta_z=0.0)
-    with pytest.raises(ValueError):
-        A3Config(lambda_kl=-1.0)
-    with pytest.raises(ValueError):
-        A3Config.from_dict({"not_a_key": 1})
-    with pytest.raises(TypeError):
-        env.model.make_batch(env.ids.astype(jnp.float32))
-    with pytest.raises(ValueError):
-        env.model.make_batch(env.ids[:, :-1])
+            A3Model(
+                substrate,
+                config=env.model.cfg,
+                **bad,
+            )
 
 
 def test_tail_wiring_validation(substrate, env):

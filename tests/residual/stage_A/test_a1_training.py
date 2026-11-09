@@ -254,7 +254,7 @@ def test_objective_skips_base_forward_when_kl_unused(
     def no_base(*args: Any, **kwargs: Any) -> jax.Array:
         raise AssertionError("base forward must be skipped when lambda_kl == 0")
 
-    monkeypatch.setattr("stages.stage_A.a1.base_logits", no_base)
+    monkeypatch.setattr("stages.stage_A.a1.a1.base_logits", no_base)
     total, terms = a1_objective(
         params, substrate=substrate, adapter=adapter, config=cfg, input_ids=input_ids
     )
