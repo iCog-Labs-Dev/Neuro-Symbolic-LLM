@@ -178,7 +178,7 @@ def test_module_cli_needs_no_numeric_runtime(command):
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=Path(__file__).resolve().parents[2],
+        cwd=Path(__file__).resolve().parents[4],
         capture_output=True,
         text=True,
         timeout=30,

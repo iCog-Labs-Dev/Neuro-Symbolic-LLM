@@ -106,9 +106,11 @@ def interval_breakdown(
         "cpu_normalization_search_gather": counters["cpu_index_seconds"],
         "cpu_thread_setup_and_metadata": counters["host_search_seconds"]
         - counters["cpu_index_seconds"],
-        "cpu_to_gpu_enqueue_only"
-        if return_mode == "event"
-        else "cpu_to_gpu_enqueue_and_wait": counters["h2d_seconds"],
+        (
+            "cpu_to_gpu_enqueue_only"
+            if return_mode == "event"
+            else "cpu_to_gpu_enqueue_and_wait"
+        ): counters["h2d_seconds"],
         "outside_native_interval": seconds
         - counters["d2h_seconds"]
         - counters["host_search_seconds"]

@@ -189,9 +189,11 @@ def train(
                 jnp.asarray(data.train[indices]),
                 jnp.asarray(positions),
                 jnp.asarray(targets),
-                None
-                if data.train_mask is None
-                else jnp.asarray(data.train_mask[indices]),
+                (
+                    None
+                    if data.train_mask is None
+                    else jnp.asarray(data.train_mask[indices])
+                ),
             )
             jax.block_until_ready((params, state, terms, finite))
             if not bool(finite):

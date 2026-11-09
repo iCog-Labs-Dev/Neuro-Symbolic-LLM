@@ -108,7 +108,7 @@ def test_native_requires_library_and_manifest():
 
 
 def test_help_does_not_import_numeric_runtime():
-    path = Path(__file__).resolve().parents[2] / "experiments/run_stage_a4.py"
+    path = Path(__file__).resolve().parents[3] / "experiments/run_stage_a4.py"
     code = (
         "import runpy, sys\n"
         "class Guard:\n"
@@ -127,7 +127,7 @@ def test_help_does_not_import_numeric_runtime():
 
 
 def test_inspection_tools_are_outside_experiments():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     for name in (
         "audit_mining_depth",
         "benchmark_mining_depth",

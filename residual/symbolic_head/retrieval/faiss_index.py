@@ -13,9 +13,10 @@ from residual.symbolic_head.contracts.template_record import (
     validate_template_record,
 )
 
-faiss: Any
 try:
-    import faiss
+    import faiss as _faiss
+
+    faiss: Any = _faiss
 except ImportError:
     faiss = None
 

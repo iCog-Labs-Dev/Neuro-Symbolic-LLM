@@ -35,6 +35,16 @@ def make_index(backend="flat", count=2, dim=2):
     return index
 
 
+def assert_templates_match(actual, expected, ids):
+    np.testing.assert_array_equal(actual.keys, expected.keys)
+    np.testing.assert_array_equal(actual.values, expected.values)
+    np.testing.assert_allclose(actual.scores, expected.scores, rtol=2e-5, atol=2e-6)
+    np.testing.assert_array_equal(
+        actual.template_indices,
+        [[ids.index(name) for name in row] for row in expected.template_ids],
+    )
+
+
 class ControlLibrary:
     """Handle protocol only; does not simulate native search or CUDA."""
 
@@ -48,7 +58,9 @@ class ControlLibrary:
         self.return_modes = []
         self.timing_calls = []
 
-    def NativeCreateBank(self, serialized, _size, keys, values, mapping, *_args):  # noqa: N802
+    def NativeCreateBank(  # noqa: N802
+        self, serialized, _size, keys, values, mapping, *_args
+    ):
         self.banks += 1
         self.valid[self.banks] = True
         self.snapshot = tuple(v.copy() for v in (serialized, keys, values, mapping))
@@ -60,7 +72,9 @@ class ControlLibrary:
         self.issued += 1
         return self.issued
 
-    def NativeCreateWithReturnMode(self, bank, count, matches, device, mode):  # noqa: N802
+    def NativeCreateWithReturnMode(  # noqa: N802
+        self, bank, count, matches, device, mode
+    ):
         self.return_modes.append(mode)
         return self.NativeCreate(bank, count, matches, device)
 
@@ -160,15 +174,16 @@ def test_direct_outputs_have_typed_shapes_without_unpacking(bound):
         assert direct.info["output_layout"] == "direct"
 
 
-def test_invalid_output_layout_is_rejected(bound):
+@pytest.mark.parametrize("option", ["output_layout", "return_mode"])
+def test_invalid_options_are_rejected(bound, option):
     _retriever, index, _library = bound
-    with pytest.raises(ValueError, match="output_layout"):
+    with pytest.raises(ValueError, match=option):
         native_bridge.NativeJaxRetriever(
             index,
             ["id-1", "id-0"],
             snapshot_sha256="a" * 64,
             library_path=Path("unused.so"),
-            output_layout="invalid",
+            **{option: "invalid"},
         )
 
 
@@ -187,18 +202,6 @@ def test_event_return_is_explicit_and_bound_to_each_shape(bound):
         assert library.return_modes == [1, 1]
         assert event.info["return_mode"] == "event"
         assert event.info["h2d_counter_scope"] == "enqueue-and-event-record"
-
-
-def test_invalid_return_mode_is_rejected(bound):
-    _retriever, index, _library = bound
-    with pytest.raises(ValueError, match="return_mode"):
-        native_bridge.NativeJaxRetriever(
-            index,
-            ["id-1", "id-0"],
-            snapshot_sha256="a" * 64,
-            library_path=Path("unused.so"),
-            return_mode="invalid",
-        )
 
 
 def test_shapes_are_distinct_and_close_releases_bank_last(bound):
@@ -484,15 +487,7 @@ def test_real_cuda_runtime_queries_capture_gradients_and_stale_handles(
             gpu = jax.device_put(query)
             actual = jax.block_until_ready(call(gpu))
             assert actual.template_indices.dtype == jnp.int32
-            np.testing.assert_array_equal(actual.keys, reference.keys)
-            np.testing.assert_array_equal(actual.values, reference.values)
-            np.testing.assert_allclose(
-                actual.scores, reference.scores, rtol=2e-5, atol=2e-6
-            )
-            np.testing.assert_array_equal(
-                actual.template_indices,
-                [[ids.index(name) for name in row] for row in reference.template_ids],
-            )
+            assert_templates_match(actual, reference, ids)
         with retriever.capture_queries() as captured:
             jax.block_until_ready(call(jax.device_put(queries[1])))
         assert len(captured) == 1
@@ -593,15 +588,7 @@ def test_real_cuda_event_return_reuses_buffers_with_gpu_consumers(
         for i, output in outputs:
             result, context = jax.device_get(output)
             reference = references[i]
-            np.testing.assert_array_equal(result.keys, reference.keys)
-            np.testing.assert_array_equal(result.values, reference.values)
-            np.testing.assert_allclose(
-                result.scores, reference.scores, rtol=2e-5, atol=2e-6
-            )
-            np.testing.assert_array_equal(
-                result.template_indices,
-                [[ids.index(name) for name in row] for row in reference.template_ids],
-            )
+            assert_templates_match(result, reference, ids)
             sync_result, sync_context = sync_outputs[i]
             np.testing.assert_array_equal(sync_result.keys, reference.keys)
             np.testing.assert_array_equal(sync_result.values, reference.values)

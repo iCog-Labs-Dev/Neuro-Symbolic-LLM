@@ -436,9 +436,11 @@ class NativeJaxRetriever:
             "native_abi": _ABI,
             "output_layout": output_layout,
             "return_mode": return_mode,
-            "h2d_counter_scope": "enqueue-and-event-record"
-            if return_mode == "event"
-            else "enqueue-and-wait",
+            "h2d_counter_scope": (
+                "enqueue-and-event-record"
+                if return_mode == "event"
+                else "enqueue-and-wait"
+            ),
             "cpu_engine": "faiss-cpp",
             "cpu_threads": cpu_threads,
             "faiss_compile_options": library.NativeFaissCompileOptions().decode(),

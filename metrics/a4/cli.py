@@ -1,4 +1,4 @@
-"""Inspect A4 metrics or measure a completed A4 checkpoint's latency."""
+"""Inspect A4 runs and evaluate retrieval quality or latency."""
 
 from __future__ import annotations
 
@@ -132,9 +132,9 @@ def score_probes(path: Path) -> dict[str, Any]:
     )
     return {
         "stage": "A4",
-        "measurement": "semantic_retrieval"
-        if kind == "semantic_firing"
-        else "ann_agreement",
+        "measurement": (
+            "semantic_retrieval" if kind == "semantic_firing" else "ann_agreement"
+        ),
         "split": split,
         "metrics": asdict(result),
         "source": _source(path),

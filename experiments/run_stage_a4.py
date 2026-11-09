@@ -122,7 +122,7 @@ def main(
     import torch
 
     from residual import ResidualAdapter
-    from residual.symbolic_head.jax_head import SymbolicHead
+    from residual.symbolic_head.jax_head import Retriever, SymbolicHead
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
     from stages.stage_A.A3_model import A3Config, A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
@@ -178,6 +178,7 @@ def main(
     )
     frozen_residual = restore_a3_weights(continuous, load_params(args.warm_start))
     data = load_data(args, substrate.tokenizer, bank, config.training)
+    retriever: Retriever
     with ExitStack() as stack:
         if args.retrieval_backend == "native":
             from symbolic_memory.native_bridge import NativeJaxRetriever
@@ -265,11 +266,11 @@ def main(
                     "residual_config_sha256": hashlib.sha256(
                         config.residual_config.read_bytes()
                     ).hexdigest(),
-                    "native_library_sha256": hashlib.sha256(
-                        args.native_library.read_bytes()
-                    ).hexdigest()
-                    if args.retrieval_backend == "native"
-                    else None,
+                    "native_library_sha256": (
+                        hashlib.sha256(args.native_library.read_bytes()).hexdigest()
+                        if args.retrieval_backend == "native"
+                        else None
+                    ),
                 },
             )
             writer.write_json("status.json", {"stage": "A4", "status": "running"})
