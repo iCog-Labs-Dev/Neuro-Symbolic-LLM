@@ -23,9 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from frozenllm.substrate.memory import get_memory_status  # noqa: E402
-from residual.stability import (  # noqa: E402
-    StabilityMonitor,
-)
+from residual.stability import StabilityMonitor  # noqa: E402
 from stages.results import (  # noqa: E402
     RunWriter,
     default_run_name,
@@ -46,6 +44,7 @@ from stages.stage_A.a2 import (  # noqa: E402
     param_counts,
     predictor_bank,
 )
+from stages.stage_A.a2.a2_reporting import internal_metrics  # noqa: E402
 from stages.stage_base import (  # noqa: E402
     Domain,
     RunConfig,
@@ -55,6 +54,7 @@ from stages.stage_base import (  # noqa: E402
     initialize_stage,
     load_configs,
     load_token_blocks,
+    log_experiment_header,
     log_final_summary,
     make_eval_set,
     prepare_domain,
@@ -93,6 +93,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--eval-batches", type=int, default=None)
     parser.add_argument("--no-jit", action="store_true", default=False)
+
     # Local predictor
     parser.add_argument("--lambda-hid", type=float, default=None)
     parser.add_argument(
@@ -117,6 +118,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Detach the causal CPC input from column parameters (config default: false).",
     )
     parser.add_argument("--predictor-lr-mult", type=float, default=None)
+
     # Stability
     parser.add_argument("--stability-mode", choices=("off", "diagnostic"), default=None)
     parser.add_argument("--audit", action="store_true", default=False)
@@ -126,23 +128,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Include checkpoint internal metrics; requires --eval-checkpoint and the saved config.",
     )
+
     return parser.parse_args(argv)
 
 
 def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
     cfg = apply_run_overrides(cfg, args)
+
     adapter, training, domains = cfg.adapter, cfg.training, cfg.domains
     obj: A2Config = cfg.objective
+
     if args.arm is not None:
         obj = apply_arm(obj, args.arm)
+
     if args.seed is not None:
         adapter = replace(adapter, seed=args.seed)
         training = replace(training, seed=args.seed)
         obj = replace(
             obj,
             seed=args.seed,
-            hid=replace(obj.hid, predictor=replace(obj.predictor, seed=args.seed)),
+            hid=replace(
+                obj.hid,
+                predictor=replace(obj.hid.predictor, seed=args.seed),
+            ),
         )
+
     obj = replace(
         obj,
         lambda_kl=args.lambda_kl if args.lambda_kl is not None else obj.lambda_kl,
@@ -158,6 +168,7 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
             ),
         ),
     )
+
     hid = {
         k: v
         for k, v in {
@@ -167,6 +178,7 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         }.items()
         if v is not None
     }
+
     pred = {
         k: v
         for k, v in {
@@ -176,6 +188,7 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         }.items()
         if v is not None
     }
+
     stab = {
         k: v
         for k, v in {
@@ -183,6 +196,7 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         }.items()
         if v is not None
     }
+
     obj = replace(
         obj,
         hid_detach_input=(
@@ -200,20 +214,29 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         ),
         monitor=replace(obj.monitor, **stab),
     )
+
     return replace(
-        cfg, adapter=adapter, objective=obj, training=training, domains=domains
+        cfg,
+        adapter=adapter,
+        objective=obj,
+        training=training,
+        domains=domains,
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     start_time = time.time()
     configure_logging(level=logging.INFO)
+
     args = parse_args(argv)
     cfg = apply_overrides(load_configs(args.config, A2Config), args)
+
     train_cfg = cfg.training
     obj: A2Config = cfg.objective
+
     if args.report_internals and args.eval_checkpoint is None:
         raise ValueError("--report-internals requires --eval-checkpoint.")
+
     if obj.cpc.enabled and args.eval_checkpoint is None:
         if train_cfg.batch_size < 2:
             raise ValueError(
@@ -221,6 +244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if max(obj.cpc.offsets) >= train_cfg.seq_len:
             raise ValueError("Every CPC offset must be smaller than training.seq_len.")
+
     log.info("adapter=%s", cfg.adapter)
     log.info("objective=%s", obj)
     log.info("training=%s", train_cfg)
@@ -229,21 +253,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     substrate = FrozenSubstrate(train_cfg.model)
     arch = substrate.architecture
     adapter = initialize_stage(substrate, cfg)
+
     bank = (
         predictor_bank(obj, adapter, train_cfg.seq_len)
         if obj.uses_hidden_pred
         else None
     )
+
     monitor = (
         StabilityMonitor(obj.stability, adapter.layers)
         if obj.stability.enabled
         else None
     )
+
     params = init_a2_params(obj, adapter, train_cfg.seq_len)
     counts = param_counts(params)
+
     n_adapter = counts["adapter"]
     n_pred = counts["pred"]
     n_frozen = sum(p.numel() for p in substrate.params.values())
+
     log.info(
         "model=%s L=%d d=%d adapter_layers=%s predictor_layers=%s rank=%d "
         "adapter_params=%d predictor_params=%d frozen=%d",
@@ -260,9 +289,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.eval_checkpoint is not None:
         log.info(
-            "Evaluating checkpoint %s on split=%s", args.eval_checkpoint, args.split
+            "Evaluating checkpoint %s on split=%s",
+            args.eval_checkpoint,
+            args.split,
         )
+
         saved = load_params(args.eval_checkpoint)
+
         results = evaluate_checkpoint(
             substrate,
             adapter,
@@ -274,10 +307,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             eval_batches=train_cfg.eval_batches,
             jit=train_cfg.jit,
         )
-        if args.report_internals:
-            from stages.stage_A.a2_reporting import internal_metrics
 
+        if args.report_internals:
             reports = {}
+
             for d_cfg in cfg.domains:
                 blocks = load_token_blocks(
                     substrate,
@@ -285,10 +318,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     resolve_split(d_cfg, args.split),
                     train_cfg.seq_len,
                 )
-                batches = make_eval_set(
-                    blocks, train_cfg.batch_size, train_cfg.eval_batches
+
+                eval_batches = make_eval_set(
+                    blocks,
+                    train_cfg.batch_size,
+                    train_cfg.eval_batches,
                 )
-                row = internal_metrics(substrate, adapter, saved, obj, batches)
+
+                row = internal_metrics(
+                    substrate,
+                    adapter,
+                    saved,
+                    obj,
+                    eval_batches,
+                )
+
                 if bank is not None:
                     row.update(
                         a2_diagnostics(
@@ -297,11 +341,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                             bank,
                             obj,
                             saved,
-                            batches,
+                            eval_batches,
                             jit=train_cfg.jit,
                         )
                     )
+
                 reports[d_cfg.name] = row
+
             print(
                 json.dumps(
                     {
@@ -314,19 +360,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print(json.dumps(results, indent=2))
+
         return 0
 
     # Shared data preparation; fail before creating a run directory.
-    domains = [prepare_domain(substrate, d, train_cfg) for d in cfg.domains]
+    domains = [prepare_domain(substrate, domain, train_cfg) for domain in cfg.domains]
 
     audit_data = None
+
     if args.audit or args.audit_only:
         audit_data = audit_to_dict(
             a2_audit(substrate, adapter, obj, domains[0].eval_set[0])
         )
+
         if args.audit_only:
             print(json.dumps(audit_data, indent=2))
             return 0 if audit_data["ok"] else 1
+
         if not audit_data["ok"]:
             print(json.dumps(audit_data, indent=2))
             return 1
@@ -334,6 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def diagnostics(p: dict, domain: Domain) -> dict[str, float]:
         if bank is None:
             return {}
+
         return a2_diagnostics(
             substrate,
             adapter,
@@ -345,11 +396,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     run_name = args.run_name or default_run_name("a2")
+
     with RunWriter(train_cfg.output_dir, run_name) as writer:
         log.info("run_dir=%s", writer.dir)
+
         writer.write_config(cfg.to_dict())
+
         if audit_data is not None:
             writer.write_json("audit.json", audit_data)
+
         writer.write_json(
             "meta.json",
             {
@@ -375,6 +430,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "jit": train_cfg.jit,
             },
         )
+
+        # Shared experiment header, following the A1 runner.
+        log_experiment_header(
+            log,
+            cfg=cfg,
+            arch=arch,
+            adapter=adapter,
+            n_trainable=counts["total"],
+            n_frozen=n_frozen,
+            run_dir=writer.dir,
+            domains=domains,
+        )
+
+        # A2-specific parameter groups.
+        log.info(
+            "A2 parameters: adapter=%d | predictors=%d",
+            n_adapter,
+            n_pred,
+        )
+
         init_diag = diagnostics(params, domains[0])
         writer.log("a2_diagnostics", when="init", domain=domains[0].name, **init_diag)
 
@@ -389,19 +464,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             writer,
             optimizer=make_a2_optimizer(obj, train_cfg.learning_rate),
         )
+
         frozen = substrate.verify_frozen()
         summary["params_unchanged"] = frozen["params_unchanged"]
         summary["device_memory"] = asdict(get_memory_status())
 
         final_diag = {}
+
         for domain in domains:
             final_diag[domain.name] = diagnostics(params, domain)
+
             writer.log(
                 "a2_diagnostics",
                 when="final",
                 domain=domain.name,
                 **final_diag[domain.name],
             )
+
         summary["a2_diagnostics"] = {
             "init": {domains[0].name: init_diag},
             "final": final_diag,
@@ -411,6 +490,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             d.name: test_domain(substrate, adapter, params, d, train_cfg, writer=writer)
             for d in cfg.domains
         }
+
         summary["test"] = test_results
         writer.write_json("results.json", summary)
 
@@ -418,6 +498,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not frozen["params_unchanged"]:
         log.error("Base parameters changed during training.")
         return 1
+
     return 0
 
 
