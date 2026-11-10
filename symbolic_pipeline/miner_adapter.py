@@ -12,7 +12,12 @@ records. Each SemanticParseResult becomes one SemanticDocument:
   participants, in role order: the event form cannot be used, because the
   miner forbids consequent variables that are missing from the antecedents;
 - each entity kind becomes a provisional kind fact;
-- a negative assertion becomes a negative miner fact (signed head);
+- a negative assertion becomes a negative miner fact, and an obligation or
+  permission becomes a modal miner fact, so neither looks like a done fact.
+  Both pass through unchanged, on the relation fact for an Evaluation. The
+  miner names the head in the parser's scope order, so "must not leave"
+  (Obligation (Not ...)) and "may not leave" (Not (Permission ...)) are both
+  prohibitions;
 - content the miner contract cannot express raises MinerAdapterError: modality
   inside a universal rule, and an Evaluation without participants inside a
   universal rule.
@@ -141,6 +146,7 @@ class _SemanticDocumentBuilder:
         relation: str | None = None,
         conditional_on: str | None = None,
         polarity: str = "positive",
+        modality: str = "none",
     ) -> None:
         """Add one miner fact that inherits the evidence of a parser assertion."""
 
@@ -153,6 +159,7 @@ class _SemanticDocumentBuilder:
                 factuality=source.factuality,
                 conditional_on=conditional_on,
                 polarity=polarity,
+                modality=modality,
                 confidence=source.confidence,
                 source_spans=tuple(self._span(quote) for quote in source.evidence),
                 alternatives=tuple(dict.fromkeys(source.alternatives)),
@@ -175,6 +182,7 @@ class _SemanticDocumentBuilder:
             assertion,
             conditional_on=conditional_on,
             polarity=assertion.polarity,
+            modality=assertion.modality,
         )
 
     def add_evaluation(
@@ -190,6 +198,7 @@ class _SemanticDocumentBuilder:
             relation=assertion.relation,
             conditional_on=conditional_on,
             polarity=assertion.polarity,
+            modality=assertion.modality,
         )
 
         for argument in assertion.arguments:
@@ -209,15 +218,6 @@ class _SemanticDocumentBuilder:
                     relation=f"role_{argument.role}",
                     conditional_on=conditional_on,
                 )
-
-        if assertion.modality != "none":
-            self.add_fact(
-                _PROVISIONAL,
-                [event],
-                assertion,
-                relation=assertion.modality,
-                conditional_on=conditional_on,
-            )
 
     def add_specific_rule(self, rule: SemanticRule) -> None:
         """Add a conditional Clause and associate its consequents with it.

@@ -82,6 +82,98 @@ def test_negative_evaluation_uses_signed_relation_fact() -> None:
     assert not any(fact.predicate == "Negated" for fact in document.assertions)
 
 
+def _modal_result(document_id, source, assertions, entities):
+    return SemanticParseResult.model_validate(
+        {
+            "document": {
+                "document_id": document_id,
+                "corpus_id": "unit-tests",
+                "source_text": source,
+            },
+            "provenance": _provenance(),
+            "extraction": {
+                "entities": [
+                    {"id": e, "entity_type": "Entity", "mention": {"text": m}}
+                    for e, m in entities
+                ],
+                "assertions": assertions,
+                "rules": [],
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "quote", "polarity", "modality"),
+    [
+        ("Nora may leave.", "may leave", "positive", "permission"),
+        ("Nora must leave.", "must leave", "positive", "obligation"),
+        ("Nora must not leave.", "must not leave", "negative", "obligation"),
+        (
+            "Nora is allowed not to leave.",
+            "allowed not to leave",
+            "negative",
+            "permission",
+        ),
+    ],
+)
+def test_modal_evaluation_signs_its_relation_fact(source, quote, polarity, modality):
+    result = _modal_result(
+        "modal-evaluation",
+        source,
+        [
+            {
+                "predicate": "Evaluation",
+                "relation": "leave",
+                "fallback": True,
+                "polarity": polarity,
+                "modality": modality,
+                "confidence": 0.9,
+                "arguments": [{"entity_id": "nora", "role": "agent"}],
+                "evidence": [{"text": quote}],
+            }
+        ],
+        [("nora", "Nora")],
+    )
+
+    document = _adapt(result)
+
+    relation = next(
+        fact for fact in document.assertions if fact.provisional_relation_id == "leave"
+    )
+    assert (relation.polarity, relation.modality) == (polarity, modality)
+    # no separate modality fact next to a plain "leave" fact
+    assert not any(
+        fact.provisional_relation_id in {"permission", "obligation"}
+        for fact in document.assertions
+    )
+
+
+def test_modal_catalog_fact_keeps_its_modality() -> None:
+    result = _modal_result(
+        "modal-has",
+        "The supplier must own the equipment.",
+        [
+            {
+                "predicate": "Has",
+                "modality": "obligation",
+                "confidence": 0.9,
+                "arguments": [
+                    {"entity_id": "supplier", "role": "owner"},
+                    {"entity_id": "equipment", "role": "possessed"},
+                ],
+                "evidence": [{"text": "must own"}],
+            }
+        ],
+        [("supplier", "supplier"), ("equipment", "equipment")],
+    )
+
+    document = _adapt(result)
+
+    has = next(fact for fact in document.assertions if fact.predicate == "Has")
+    assert (has.polarity, has.modality) == ("positive", "obligation")
+
+
 def test_negative_non_evaluation_assertion_is_preserved() -> None:
     result = SemanticParseResult.model_validate(
         {
