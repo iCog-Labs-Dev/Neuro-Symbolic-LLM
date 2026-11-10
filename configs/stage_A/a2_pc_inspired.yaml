@@ -24,8 +24,6 @@ objective:
   hid:
     lambda_hid: 0.1      # local predictor/hidden prediction loss weight
     # corrected_teacher (Option B): recommended by the auxiliary-loss review
-    # and October implementation clarification for a transition surrogate.
-    # base_anchor (Option A): clean-base target illustrated by research plan v8
     # Section 7.4. Report these as distinct experiments.
     hidden_target: corrected_teacher  # corrected_teacher (Option B) | base_anchor (Option A)
     predictor_lr_mult: 1.0 # predictor LR = training.learning_rate * this multiplier

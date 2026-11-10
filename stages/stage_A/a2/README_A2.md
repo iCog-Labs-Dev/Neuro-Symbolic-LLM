@@ -11,7 +11,7 @@ supplies differentiable heads and energy components. Latent settling belongs to 
 | [a2.py](a2.py) | Objective, configuration, ablation arms, optimizer, and audit |
 | [a2_reporting.py](a2_reporting.py) | Internal metrics for saved checkpoints |
 | [run_stage_a2.py](../../experiments/run_stage_a2.py) | Training and evaluation CLI |
-| [a2_pc_inspired.yaml](../../configs/stage_A/a2_pc_inspired.yaml) | Main GPT-2 experiment across three LexGLUE domains |
+| [a2_pc_inspired.yaml](../../configs/stage_A/a2/a2_pc_inspired.yaml) | Main GPT-2 experiment across three LexGLUE domains |
 | [residual/](../../residual/) | FabricPC predictors, CPC heads, and stability metrics |
 
 | [losses/a2_loss.py](../../losses/a2_loss.py) | Feedforward losses and detach controls |
