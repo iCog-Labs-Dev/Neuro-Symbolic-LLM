@@ -1,8 +1,8 @@
 
 runtime:
-  source: separate
+  source: stories
   seed: 42
-
+  max_tasks: 3       # null = use all tasks
 datasets:
   - name: eurlex
     type: separate
@@ -41,5 +41,5 @@ datasets:
     validation_split: validation
     test_split: test
     text_field: text
-    stories_per_task: 10
+    stories_per_task: 25
     shuffle_train: true

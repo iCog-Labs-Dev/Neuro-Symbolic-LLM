@@ -1,11 +1,8 @@
 """Unified runtime dataset loader for sequential A1-A4 experiments.
 
-Supported runtime modes:
+Supported modes:
     separate: Each configured dataset becomes one sequential task.
-    stories:   Complete stories are grouped into sequential tasks.
-
-The loader prepares shared Domain objects consumed by stage_base.run_sequential.
-Stage-specific training objectives and optimizers remain independent.
+    stories: Complete stories are grouped and packed into sequential tasks.
 """
 
 from __future__ import annotations
@@ -18,6 +15,7 @@ from typing import Any
 import numpy as np
 import yaml
 from datasets import load_dataset
+from tqdm.auto import tqdm
 
 from stages.stage_base import Domain, make_eval_set
 
@@ -32,13 +30,8 @@ class RuntimeData:
 
     tasks: tuple[Domain, ...]
 
-    # Test token blocks, indexed by task name.
     test_blocks: dict[str, np.ndarray]
-
-    # Actual sequential task order.
     task_order: tuple[str, ...]
-
-    # Dataset and preparation metadata.
     metadata: dict[str, Any]
 
     def get_test_sets(self, batch_size: int, eval_batches: int):
@@ -101,14 +94,12 @@ def load_dataset_split(
     if not split:
         raise ValueError("Dataset split cannot be empty.")
 
-    dataset = load_dataset(
+    return load_dataset(
         dataset_name,
         name=dataset_config,
         split=split,
         streaming=streaming,
     )
-
-    return dataset
 
 
 def extract_texts(
@@ -162,30 +153,21 @@ def load_split_texts(
 # ---------------------------------------------------------------------
 
 
-def tokenize_texts(
+def encode_texts(
     texts: list[str],
     tokenizer: Any,
     *,
-    sequence_length: int,
     separator: str,
     task_name: str,
 ) -> np.ndarray:
-    """Tokenize a collection of documents into fixed-length blocks.
-
-    Each document is preserved as part of its text stream. The separator
-    can be used to insert EOS boundaries between documents.
-    """
+    """Encode text using the frozen LLM tokenizer."""
 
     if not texts:
         raise ValueError(f"Task {task_name!r} contains no text.")
 
-    if sequence_length < 1:
-        raise ValueError("sequence_length must be >= 1.")
-
     if tokenizer is None:
         raise ValueError("A tokenizer must be supplied.")
 
-    # Avoid joining documents without an explicit boundary.
     text = separator.join(texts)
 
     encoded = tokenizer(
@@ -194,14 +176,42 @@ def tokenize_texts(
         add_special_tokens=True,
     )
 
-    input_ids = np.asarray(
+    return np.asarray(
         encoded["input_ids"][0],
         dtype=np.int32,
+    )
+
+
+def tokenize_texts(
+    texts: list[str],
+    tokenizer: Any,
+    *,
+    sequence_length: int,
+    separator: str,
+    task_name: str,
+    allow_empty: bool = False,
+) -> np.ndarray:
+    """Tokenize text into fixed-length blocks."""
+
+    if sequence_length < 1:
+        raise ValueError("sequence_length must be >= 1.")
+
+    input_ids = encode_texts(
+        texts,
+        tokenizer,
+        separator=separator,
+        task_name=task_name,
     )
 
     number_of_blocks = len(input_ids) // sequence_length
 
     if number_of_blocks == 0:
+        if allow_empty:
+            return np.empty(
+                (0, sequence_length),
+                dtype=np.int32,
+            )
+
         raise ValueError(
             f"Task {task_name!r} contains only {len(input_ids)} tokens; "
             f"sequence_length={sequence_length}."
@@ -219,7 +229,7 @@ def get_separator(
     tokenizer: Any,
     configured_separator: str | None = None,
 ) -> str:
-    """Resolve a document separator."""
+    """Resolve the document separator."""
 
     if configured_separator is not None:
         return configured_separator
@@ -228,7 +238,7 @@ def get_separator(
 
 
 # ---------------------------------------------------------------------
-# Task construction
+# Separate dataset tasks
 # ---------------------------------------------------------------------
 
 
@@ -239,87 +249,114 @@ def build_separate_tasks(
     sequence_length: int,
     batch_size: int,
     eval_batches: int,
-) -> tuple[tuple[Domain, ...], dict[str, np.ndarray]]:
+    default_epochs: int = 3,
+) -> tuple[tuple[Domain, ...], dict[str, np.ndarray], dict[str, Any]]:
     """Build one sequential task for every configured dataset."""
+
+    selected = [item for item in datasets_config if item.get("type") == "separate"]
 
     tasks: list[Domain] = []
     test_blocks: dict[str, np.ndarray] = {}
+    stats: dict[str, Any] = {}
 
-    for index, item in enumerate(datasets_config):
-        if item.get("type") != "separate":
-            continue
+    total_steps = len(selected) * 6
 
-        name = item["name"]
+    with tqdm(
+        total=total_steps,
+        desc="Preprocessing datasets",
+        unit="step",
+        dynamic_ncols=True,
+    ) as progress:
+        for item in selected:
+            name = item["name"]
 
-        print(f"\n[Runtime] Loading task {index + 1}: {name}")
+            progress.set_postfix_str("Loading training data")
+            train_texts = load_split_texts(
+                item,
+                item["train_split"],
+            )
+            progress.update(1)
 
-        train_texts = load_split_texts(
-            item,
-            item["train_split"],
-        )
+            progress.set_postfix_str("Loading validation data")
+            validation_texts = load_split_texts(
+                item,
+                item["validation_split"],
+            )
+            progress.update(1)
 
-        validation_texts = load_split_texts(
-            item,
-            item["validation_split"],
-        )
+            progress.set_postfix_str("Loading test data")
+            test_texts = load_split_texts(
+                item,
+                item["test_split"],
+            )
+            progress.update(1)
 
-        test_text = load_split_texts(
-            item,
-            item["test_split"],
-        )
+            separator = get_separator(
+                tokenizer,
+                item.get("separator"),
+            )
 
-        separator = get_separator(
-            tokenizer,
-            item.get("separator"),
-        )
+            progress.set_postfix_str("Tokenizing training data")
+            train_blocks = tokenize_texts(
+                train_texts,
+                tokenizer,
+                sequence_length=sequence_length,
+                separator=separator,
+                task_name=name,
+            )
+            progress.update(1)
 
-        train_blocks = tokenize_texts(
-            train_texts,
-            tokenizer,
-            sequence_length=sequence_length,
-            separator=separator,
-            task_name=name,
-        )
+            progress.set_postfix_str("Tokenizing validation data")
+            validation_blocks = tokenize_texts(
+                validation_texts,
+                tokenizer,
+                sequence_length=sequence_length,
+                separator=separator,
+                task_name=f"{name}_validation",
+            )
+            progress.update(1)
 
-        validation_blocks = tokenize_texts(
-            validation_texts,
-            tokenizer,
-            sequence_length=sequence_length,
-            separator=separator,
-            task_name=f"{name}_validation",
-        )
+            progress.set_postfix_str("Tokenizing test data")
+            test_blocks[name] = tokenize_texts(
+                test_texts,
+                tokenizer,
+                sequence_length=sequence_length,
+                separator=separator,
+                task_name=f"{name}_test",
+            )
+            progress.update(1)
 
-        test_blocks[name] = tokenize_texts(
-            test_text,
-            tokenizer,
-            sequence_length=sequence_length,
-            separator=separator,
-            task_name=f"{name}_test",
-        )
+            eval_set = make_eval_set(
+                validation_blocks,
+                batch_size,
+                eval_batches,
+            )
 
-        eval_set = make_eval_set(
-            validation_blocks,
-            batch_size,
-            eval_batches,
-        )
+            tasks.append(
+                Domain(
+                    name=name,
+                    train_blocks=train_blocks,
+                    eval_set=eval_set,
+                    epochs=int(item.get("epochs", default_epochs)),
+                )
+            )
 
-        task = Domain(
-            name=name,
-            train_blocks=train_blocks,
-            eval_set=eval_set,
-            epochs=int(item.get("epochs", 3)),
-        )
-
-        tasks.append(task)
-
-        print(f"  Training blocks: {len(train_blocks)}")
-        print(f"  Validation blocks: {len(validation_blocks)}")
-        print(f"  Test blocks: {len(test_blocks[name])}")
+            stats[name] = {
+                "training_blocks": len(train_blocks),
+                "validation_blocks": len(validation_blocks),
+                "test_blocks": len(test_blocks[name]),
+                "dropped_training_blocks": (len(train_blocks) % batch_size),
+            }
 
     if not tasks:
         raise ValueError("No datasets with type='separate' were configured.")
 
-    return tuple(tasks), test_blocks
+    return tuple(tasks), test_blocks, stats
+
+
+# ---------------------------------------------------------------------
+# Story grouping
+# ---------------------------------------------------------------------
 
 
 def group_stories(
@@ -329,7 +366,7 @@ def group_stories(
     seed: int,
     shuffle: bool,
 ) -> list[list[str]]:
-    """Group complete stories into sequential tasks."""
+    """Group complete stories into sequential preprocessing groups."""
 
     if stories_per_task < 1:
         raise ValueError("stories_per_task must be >= 1.")
@@ -345,6 +382,11 @@ def group_stories(
     ]
 
 
+# ---------------------------------------------------------------------
+# Story task construction with token packing and max_tasks
+# ---------------------------------------------------------------------
+
+
 def build_story_tasks(
     item: dict[str, Any],
     tokenizer: Any,
@@ -354,17 +396,47 @@ def build_story_tasks(
     eval_batches: int,
     seed: int,
     default_epochs: int,
-) -> tuple[tuple[Domain, ...], dict[str, np.ndarray]]:
-    """Build sequential tasks from complete narrative stories."""
+) -> tuple[tuple[Domain, ...], dict[str, np.ndarray], dict[str, Any]]:
+    """Build sequential story tasks with optional max_tasks limit.
+
+    Token remainders are carried across story groups.
+    Complete blocks are accumulated until a full training batch exists.
+
+    max_tasks limits the number of created training tasks.
+    Validation and test data are not restricted by max_tasks.
+    """
 
     name = item["name"]
+
     stories_per_task = int(item.get("stories_per_task", 10))
 
-    print(f"\n[Runtime] Loading story dataset: {name}")
+    max_tasks = load_runtime_config("configs/runtime_datasets.yaml")["runtime"].get(
+        "max_tasks"
+    )
+
+    if max_tasks is not None and (
+        isinstance(max_tasks, bool) or not isinstance(max_tasks, int) or max_tasks < 1
+    ):
+        raise ValueError("max_tasks must be a positive integer or null.")
+
+    if max_tasks is not None and (
+        isinstance(max_tasks, bool) or not isinstance(max_tasks, int) or max_tasks < 1
+    ):
+        raise ValueError("max_tasks must be a positive integer or null.")
+    # -------------------------------------------------------------
+    # Load all splits
+    # -------------------------------------------------------------
 
     train_stories = load_split_texts(
         item,
         item["train_split"],
+    )
+
+    groups = group_stories(
+        train_stories,
+        stories_per_task,
+        seed=seed,
+        shuffle=bool(item.get("shuffle_train", True)),
     )
 
     validation_stories = load_split_texts(
@@ -377,72 +449,180 @@ def build_story_tasks(
         item["test_split"],
     )
 
-    groups = group_stories(
-        train_stories,
-        stories_per_task,
-        seed=seed,
-        shuffle=bool(item.get("shuffle_train", True)),
-    )
-
     separator = get_separator(
         tokenizer,
         item.get("separator"),
     )
 
-    validation_blocks = tokenize_texts(
-        validation_stories,
-        tokenizer,
-        sequence_length=sequence_length,
-        separator=separator,
-        task_name=f"{name}_validation",
-    )
+    # -------------------------------------------------------------
+    # Validation and test preparation
+    # -------------------------------------------------------------
 
-    eval_set = make_eval_set(
-        validation_blocks,
-        batch_size,
-        eval_batches,
-    )
+    with tqdm(
+        total=len(groups) + 2,
+        desc="Preprocessing stories",
+        unit="group",
+        dynamic_ncols=True,
+    ) as progress:
+        progress.set_postfix_str("Tokenizing validation")
 
-    test_blocks = tokenize_texts(
-        test_stories,
-        tokenizer,
-        sequence_length=sequence_length,
-        separator=separator,
-        task_name=f"{name}_test",
-    )
-
-    tasks: list[Domain] = []
-
-    for index, story_group in enumerate(groups):
-        task_name = f"{name}_task_{index + 1}"
-
-        train_blocks = tokenize_texts(
-            story_group,
+        validation_blocks = tokenize_texts(
+            validation_stories,
             tokenizer,
             sequence_length=sequence_length,
             separator=separator,
-            task_name=task_name,
+            task_name=f"{name}_validation",
         )
 
-        task = Domain(
-            name=task_name,
-            train_blocks=train_blocks,
-            eval_set=eval_set,
-            epochs=int(item.get("epochs", default_epochs)),
+        eval_set = make_eval_set(
+            validation_blocks,
+            batch_size,
+            eval_batches,
         )
 
-        tasks.append(task)
+        progress.update(1)
 
-        print(
-            f"  {task_name}: "
-            f"{len(story_group)} stories, "
-            f"{len(train_blocks)} training blocks"
+        progress.set_postfix_str("Tokenizing test")
+
+        test_blocks = tokenize_texts(
+            test_stories,
+            tokenizer,
+            sequence_length=sequence_length,
+            separator=separator,
+            task_name=f"{name}_test",
         )
+
+        progress.update(1)
+
+        # ---------------------------------------------------------
+        # Training token and block buffers
+        # ---------------------------------------------------------
+
+        token_buffer = np.empty(
+            (0,),
+            dtype=np.int32,
+        )
+
+        block_buffer = np.empty(
+            (0, sequence_length),
+            dtype=np.int32,
+        )
+
+        tasks: list[Domain] = []
+
+        total_training_blocks = 0
+        retained_blocks = 0
+        processed_groups = 0
+        processed_stories = 0
+
+        # ---------------------------------------------------------
+        # Build tasks
+        # ---------------------------------------------------------
+
+        for index, story_group in enumerate(groups):
+            progress.set_postfix_str(f"Packing task groups {index + 1}/{len(groups)}")
+
+            group_ids = encode_texts(
+                story_group,
+                tokenizer,
+                separator=separator,
+                task_name=f"{name}_group_{index + 1}",
+            )
+
+            # Preserve token remainder from previous groups.
+            token_buffer = np.concatenate((token_buffer, group_ids))
+
+            # Extract complete fixed-length sequences.
+            number_of_blocks = len(token_buffer) // sequence_length
+
+            if number_of_blocks:
+                usable_length = number_of_blocks * sequence_length
+
+                new_blocks = token_buffer[:usable_length].reshape(
+                    number_of_blocks,
+                    sequence_length,
+                )
+
+                token_buffer = token_buffer[usable_length:]
+
+                if len(block_buffer):
+                    block_buffer = np.concatenate(
+                        (block_buffer, new_blocks),
+                        axis=0,
+                    )
+                else:
+                    block_buffer = new_blocks
+
+                total_training_blocks += number_of_blocks
+
+            # Assign only complete batches to training tasks.
+            complete_blocks = (len(block_buffer) // batch_size) * batch_size
+
+            if complete_blocks:
+                task_blocks = block_buffer[:complete_blocks]
+
+                block_buffer = block_buffer[complete_blocks:]
+
+                task_name = f"{name}_task_{len(tasks) + 1}"
+
+                tasks.append(
+                    Domain(
+                        name=task_name,
+                        train_blocks=task_blocks,
+                        eval_set=eval_set,
+                        epochs=int(item.get("epochs", default_epochs)),
+                    )
+                )
+
+                retained_blocks += len(task_blocks)
+
+            processed_groups += 1
+            processed_stories += len(story_group)
+
+            progress.update(1)
+
+            # Stop processing once max_tasks is reached.
+            if max_tasks is not None and len(tasks) >= max_tasks:
+                break
+
+        # When stopping early, adjust the progress bar total.
+        if max_tasks is not None and len(tasks) >= max_tasks:
+            progress.total = progress.n
+            progress.refresh()
+
+        # ---------------------------------------------------------
+        # Record incomplete data
+        # ---------------------------------------------------------
+
+        dropped_blocks = len(block_buffer)
+        dropped_tokens = len(token_buffer)
 
     if not tasks:
-        raise ValueError(f"No sequential story tasks were created for {name!r}.")
+        raise ValueError(
+            f"No usable training tasks were created for {name!r}. "
+            f"Each task requires at least {batch_size} blocks. "
+            "Increase stories_per_task or reduce "
+            "batch_size/sequence_length."
+        )
 
-    return tuple(tasks), {name: test_blocks}
+    stats = {
+        "dataset": name,
+        "training_stories": len(train_stories),
+        "processed_training_stories": processed_stories,
+        "original_story_groups": len(groups),
+        "processed_story_groups": processed_groups,
+        "max_tasks": max_tasks,
+        "retained_tasks": len(tasks),
+        "stories_per_group": stories_per_task,
+        "total_complete_training_blocks": total_training_blocks,
+        "retained_training_blocks": retained_blocks,
+        "dropped_incomplete_blocks": dropped_blocks,
+        "dropped_trailing_tokens": dropped_tokens,
+        "validation_blocks": len(validation_blocks),
+        "test_blocks": len(test_blocks),
+    }
+
+    return tuple(tasks), {name: test_blocks}, stats
 
 
 # ---------------------------------------------------------------------
@@ -459,12 +639,7 @@ def load_runtime_data(
     eval_batches: int = 8,
     default_epochs: int = 3,
 ) -> RuntimeData:
-    """Prepare the complete runtime dataset for A1-A4.
-
-    The selected runtime mode determines how datasets become tasks.
-    All stages should consume the same returned RuntimeData instance
-    or reproduce it from the same configuration and seed.
-    """
+    """Prepare runtime datasets for sequential training."""
 
     config = load_runtime_config(config_path)
 
@@ -474,19 +649,23 @@ def load_runtime_data(
     mode = runtime_config["source"]
     seed = int(runtime_config.get("seed", 42))
 
-    if sequence_length < 1 or batch_size < 1:
-        raise ValueError("sequence_length and batch_size must be positive.")
+    if sequence_length < 2:
+        raise ValueError("sequence_length must be >= 2 for next-token training.")
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1.")
 
     if eval_batches < 1:
-        raise ValueError("eval_batches must be positive.")
+        raise ValueError("eval_batches must be >= 1.")
 
     if mode == "separate":
-        tasks, test_blocks = build_separate_tasks(
+        tasks, test_blocks, preprocessing_stats = build_separate_tasks(
             datasets_config,
             tokenizer,
             sequence_length=sequence_length,
             batch_size=batch_size,
             eval_batches=eval_batches,
+            default_epochs=default_epochs,
         )
 
     elif mode == "stories":
@@ -499,7 +678,7 @@ def load_runtime_data(
                 "Story mode requires exactly one dataset " "with type='stories'."
             )
 
-        tasks, test_blocks = build_story_tasks(
+        tasks, test_blocks, preprocessing_stats = build_story_tasks(
             story_configs[0],
             tokenizer,
             sequence_length=sequence_length,
@@ -526,12 +705,8 @@ def load_runtime_data(
             if (mode == "separate" and item.get("type") == "separate")
             or (mode == "stories" and item.get("type") == "stories")
         ],
+        "preprocessing": preprocessing_stats,
     }
-
-    print("\n[Runtime] Dataset preparation complete.")
-    print(f"  Mode: {mode}")
-    print(f"  Number of tasks: {len(tasks)}")
-    print(f"  Task order: {task_order}")
 
     return RuntimeData(
         tasks=tasks,
@@ -539,3 +714,18 @@ def load_runtime_data(
         task_order=task_order,
         metadata=metadata,
     )
+
+
+__all__ = [
+    "RuntimeData",
+    "load_runtime_config",
+    "load_runtime_data",
+    "load_dataset_split",
+    "load_split_texts",
+    "extract_texts",
+    "encode_texts",
+    "tokenize_texts",
+    "group_stories",
+    "build_separate_tasks",
+    "build_story_tasks",
+]
