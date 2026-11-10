@@ -67,3 +67,23 @@ sources:
     field: text
     count: 150
     streaming: false
+
+  - name: rocstories
+    domain: narrative
+    kind: hf_field
+    dataset: hamishivi/ROCStories
+    split: train
+    field: text
+    count: 150
+    streaming: false
+    sentence_split: false
+
+  - name: spgc_fiction
+    domain: narrative
+    kind: local_text_dir
+    path: data/raw/spgc/english_fiction
+    glob: "**/*.txt"
+    count: 150
+    min_chars: 20
+    max_chars: 600
+    streaming: false

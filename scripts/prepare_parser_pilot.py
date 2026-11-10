@@ -1,4 +1,4 @@
-"""Prepare a multi-source raw-text manifest for semantic-parser distillation."""
+"""Prepare reproducible parser pilot corpora in separate, domain, or mixed mode."""
 
 from __future__ import annotations
 
@@ -7,129 +7,87 @@ import csv
 import json
 import random
 import re
-from collections.abc import Iterable, Iterator
+from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import yaml
 from datasets import load_dataset
 
-_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 _WHITESPACE_RE = re.compile(r"\s+")
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
+DEFAULT_CONFIG = Path("configs/parser_config/pilot_corpus.yaml")
+DEFAULT_OUTPUT = Path("data/parser_corpus")
 
 
-def normalize_text(value: str) -> str:
-    """Normalize whitespace without changing lexical content."""
-    return _WHITESPACE_RE.sub(" ", value).strip()
+def normalize_text(text: str) -> str:
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split document text into conservative sentence-like units."""
-    normalized = normalize_text(text)
-
-    if not normalized:
+    text = normalize_text(text)
+    if not text:
         return []
-
-    return [
-        sentence.strip()
-        for sentence in _SENTENCE_BOUNDARY_RE.split(normalized)
-        if sentence.strip()
-    ]
+    return [part.strip() for part in _SENTENCE_BOUNDARY_RE.split(text) if part.strip()]
 
 
 def is_usable_text(
     text: str,
-    *,
     min_chars: int,
     max_chars: int,
 ) -> bool:
-    """Return whether text is suitable for the parser pilot."""
-    length = len(text)
+    return min_chars <= len(text) <= max_chars and any(
+        character.isalpha() for character in text
+    )
 
-    if length < min_chars or length > max_chars:
-        return False
 
-    if not any(character.isalpha() for character in text):
-        return False
+def _dataset_kwargs(source: dict[str, Any]) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "split": source.get("split", "train"),
+        "streaming": bool(source.get("streaming", False)),
+    }
 
-    return True
+    if source.get("config"):
+        kwargs["name"] = source["config"]
+
+    if source.get("data_files"):
+        kwargs["data_files"] = source["data_files"]
+
+    return kwargs
 
 
 def _iter_hf_field(source: dict[str, Any]) -> Iterator[str]:
-    dataset_name = source["dataset"]
-    split = source.get("split", "train")
-    config_name = source.get("config")
+    dataset = load_dataset(source["dataset"], **_dataset_kwargs(source))
     field = source["field"]
-    streaming = bool(source.get("streaming", False))
-
-    kwargs: dict[str, Any] = {
-        "split": split,
-        "streaming": streaming,
-    }
-
-    if "data_files" in source:
-        kwargs["data_files"] = source["data_files"]
-
-    if config_name is not None:
-        kwargs["name"] = config_name
-
-    dataset = load_dataset(
-        dataset_name,
-        **kwargs,
-    )
 
     for row in dataset:
         value = row.get(field)
-
         if isinstance(value, str):
             yield value
 
 
 def _iter_hf_list_field(source: dict[str, Any]) -> Iterator[str]:
-    dataset_name = source["dataset"]
-    split = source.get("split", "train")
-    config_name = source.get("config")
+    dataset = load_dataset(source["dataset"], **_dataset_kwargs(source))
     field = source["field"]
-    streaming = bool(source.get("streaming", False))
-
-    kwargs: dict[str, Any] = {
-        "split": split,
-        "streaming": streaming,
-    }
-
-    if "data_files" in source:
-        kwargs["data_files"] = source["data_files"]
-
-    if config_name is not None:
-        kwargs["name"] = config_name
-
-    dataset = load_dataset(
-        dataset_name,
-        **kwargs,
-    )
 
     for row in dataset:
         values = row.get(field)
-
-        if not isinstance(values, list):
-            continue
-
-        for value in values:
-            if isinstance(value, str):
-                yield value
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, str):
+                    yield value
 
 
 def _iter_delimited(source: dict[str, Any]) -> Iterator[str]:
     path = Path(source["path"])
-    field = source["field"]
     delimiter = source.get("delimiter", "\t")
+    field = source["field"]
 
     with path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file, delimiter=delimiter)
-
         for row in reader:
             value = row.get(field)
-
             if isinstance(value, str):
                 yield value
 
@@ -140,9 +98,7 @@ def _iter_jsonl_field(source: dict[str, Any]) -> Iterator[str]:
 
     with path.open("r", encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
-            line = line.strip()
-
-            if not line:
+            if not line.strip():
                 continue
 
             try:
@@ -152,229 +108,328 @@ def _iter_jsonl_field(source: dict[str, Any]) -> Iterator[str]:
                     f"Invalid JSON at {path}:{line_number}: {error.msg}"
                 ) from error
 
-            if not isinstance(record, dict):
+            if isinstance(record, dict):
+                value = record.get(field)
+                if isinstance(value, str):
+                    yield value
+
+
+def _iter_local_text_dir(source: dict[str, Any]) -> Iterator[str]:
+    """Read local text files and yield paragraph-based passages.
+
+    Books are not treated as single examples. Paragraphs are packed into
+    passages up to the configured max_chars limit.
+    """
+    root = Path(source["path"])
+    if not root.exists() or not root.is_dir():
+        raise FileNotFoundError(f"Text directory does not exist: {root}")
+
+    pattern = source.get("glob", "**/*.txt")
+    max_chars = int(source.get("max_chars", 600))
+
+    for path in sorted(root.glob(pattern)):
+        paragraphs = [
+            normalize_text(p)
+            for p in path.read_text(encoding="utf-8", errors="replace").split("\n\n")
+        ]
+
+        current: list[str] = []
+        current_length = 0
+
+        for paragraph in paragraphs:
+            if not paragraph:
                 continue
 
-            value = record.get(field)
+            # Split exceptionally long paragraphs into sentence-like units.
+            pieces = (
+                split_sentences(paragraph)
+                if len(paragraph) > max_chars
+                else [paragraph]
+            )
 
-            if isinstance(value, str):
-                yield value
+            for piece in pieces:
+                if len(piece) > max_chars:
+                    continue
+
+                added_length = len(piece) + (1 if current else 0)
+
+                if current and current_length + added_length > max_chars:
+                    yield " ".join(current)
+                    current = []
+                    current_length = 0
+
+                current.append(piece)
+                current_length += len(piece) + (1 if len(current) > 1 else 0)
+
+        if current:
+            yield " ".join(current)
 
 
 def iter_source_texts(source: dict[str, Any]) -> Iterator[str]:
-    """Yield preprocessed text candidates from one configured source."""
     kind = source["kind"]
 
-    if kind == "hf_field":
-        iterator = _iter_hf_field(source)
-    elif kind == "hf_list_field":
-        iterator = _iter_hf_list_field(source)
-    elif kind == "delimited":
-        iterator = _iter_delimited(source)
-    elif kind == "jsonl_field":
-        iterator = _iter_jsonl_field(source)
-    else:
+    loaders = {
+        "hf_field": _iter_hf_field,
+        "hf_list_field": _iter_hf_list_field,
+        "delimited": _iter_delimited,
+        "jsonl_field": _iter_jsonl_field,
+        "local_text_dir": _iter_local_text_dir,
+    }
+
+    if kind not in loaders:
         raise ValueError(f"Unsupported source kind: {kind!r}")
 
-    split_into_sentences = bool(source.get("sentence_split", False))
+    iterator = loaders[kind](source)
+    sentence_split = bool(source.get("sentence_split", False))
     drop_questions = bool(source.get("drop_questions", False))
 
-    for text in iterator:
-        if split_into_sentences:
-            candidates = split_sentences(text)
+    for raw_text in iterator:
+        if sentence_split:
+            candidates = split_sentences(raw_text)
         else:
-            normalized = normalize_text(text)
+            normalized = normalize_text(raw_text)
             candidates = [normalized] if normalized else []
 
         for candidate in candidates:
-            if drop_questions and candidate.rstrip().endswith("?"):
+            if drop_questions and candidate.endswith("?"):
                 continue
-
             yield candidate
 
 
 def collect_candidates(
     source: dict[str, Any],
     *,
-    global_seen: set[str],
-    rng: random.Random,
+    seed: int,
     min_chars: int,
     max_chars: int,
 ) -> list[str]:
-    """Collect a deterministic deduplicated sample for one source."""
+    """Sample one source independently and reproducibly."""
     requested = int(source["count"])
-
     if requested <= 0:
         return []
 
-    max_scan = int(source.get("max_scan", max(requested * 50, 1000)))
+    source_seed = seed + sum(ord(c) for c in source["name"])
+    rng = random.Random(source_seed)
 
+    max_scan = int(source.get("max_scan", max(requested * 50, 1000)))
     candidates: list[str] = []
-    local_seen: set[str] = set()
+    seen: set[str] = set()
 
     for index, raw_text in enumerate(iter_source_texts(source)):
         if index >= max_scan:
             break
 
         text = normalize_text(raw_text)
-
-        if not is_usable_text(
-            text,
-            min_chars=min_chars,
-            max_chars=max_chars,
-        ):
+        if not is_usable_text(text, min_chars, max_chars):
             continue
 
-        dedup_key = text.casefold()
-
-        if dedup_key in local_seen or dedup_key in global_seen:
+        key = text.casefold()
+        if key in seen:
             continue
 
-        local_seen.add(dedup_key)
+        seen.add(key)
         candidates.append(text)
 
     if len(candidates) < requested:
         raise ValueError(
-            f"Source {source['name']!r} produced only "
-            f"{len(candidates)} usable unique examples; "
-            f"{requested} requested"
+            f"{source['name']}: requested {requested} examples, "
+            f"but found only {len(candidates)} usable unique examples "
+            f"after scanning {max_scan} candidates."
         )
 
     rng.shuffle(candidates)
-
-    selected = candidates[:requested]
-
-    for text in selected:
-        global_seen.add(text.casefold())
-
-    return selected
+    return candidates[:requested]
 
 
-def build_manifest(config: dict[str, Any]) -> list[dict[str, str]]:
-    """Build the complete provenance-tagged pilot manifest."""
+def prepare_sources(
+    config: dict[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    """Prepare every configured dataset independently."""
     seed = int(config.get("seed", 42))
-    min_chars = int(config.get("min_chars", 20))
-    max_chars = int(config.get("max_chars", 600))
+    global_min = int(config.get("min_chars", 20))
+    global_max = int(config.get("max_chars", 600))
 
-    rng = random.Random(seed)
-    global_seen: set[str] = set()
-    manifest: list[dict[str, str]] = []
+    prepared: dict[str, list[dict[str, str]]] = {}
 
-    sources = config.get("sources")
-
-    if not isinstance(sources, list) or not sources:
-        raise ValueError("Config must contain a nonempty 'sources' list")
-
-    for source in sources:
-        if not isinstance(source, dict):
-            raise ValueError("Each source configuration must be an object")
-
+    for source in config["sources"]:
         if not source.get("enabled", True):
             continue
 
         for required in ("name", "domain", "kind", "count"):
             if required not in source:
-                raise ValueError(f"Source is missing required field {required!r}")
-        print(f"Loading source: {source['name']}")
-        selected = collect_candidates(
+                raise ValueError(f"Source configuration missing {required!r}: {source}")
+
+        name = source["name"]
+        domain = source["domain"]
+
+        print(f"Preparing {name} [{domain}] ...")
+
+        min_chars = int(source.get("min_chars", global_min))
+        max_chars = int(source.get("max_chars", global_max))
+
+        texts = collect_candidates(
             source,
-            global_seen=global_seen,
-            rng=rng,
+            seed=seed,
             min_chars=min_chars,
             max_chars=max_chars,
         )
 
-        for text in selected:
-            manifest.append(
-                {
-                    "text": text,
-                    "source_dataset": str(source["name"]),
-                    "source_domain": str(source["domain"]),
-                }
-            )
+        prepared[name] = [
+            {
+                "text": text,
+                "source_dataset": name,
+                "source_domain": domain,
+            }
+            for text in texts
+        ]
 
-    rng.shuffle(manifest)
+        print(f"  Prepared {len(texts)} examples")
 
-    return manifest
+    return prepared
 
 
-def write_manifest(
-    records: Iterable[dict[str, str]],
-    output_path: Path,
+def deduplicate_records(
+    records: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Deduplicate combined corpora while retaining source provenance."""
+    seen: set[str] = set()
+    result = []
+
+    for record in records:
+        key = record["text"].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(record)
+
+    return result
+
+
+def write_jsonl(
+    records: list[dict[str, str]],
+    path: Path,
 ) -> None:
-    """Write the pilot corpus manifest as UTF-8 JSONL."""
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open("w", encoding="utf-8") as file:
+    with path.open("w", encoding="utf-8") as file:
         for record in records:
-            file.write(
-                json.dumps(
-                    record,
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def write_separate(
+    prepared: dict[str, list[dict[str, str]]],
+    output_dir: Path,
+) -> dict[str, int]:
+    counts = {}
+
+    for name, records in prepared.items():
+        path = output_dir / "separate" / f"{name}.jsonl"
+        write_jsonl(records, path)
+        counts[name] = len(records)
+
+    return counts
+
+
+def write_by_domain(
+    prepared: dict[str, list[dict[str, str]]],
+    output_dir: Path,
+    seed: int,
+) -> dict[str, int]:
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+
+    for records in prepared.values():
+        for record in records:
+            grouped[record["source_domain"]].append(record)
+
+    counts = {}
+
+    for domain, records in sorted(grouped.items()):
+        records = deduplicate_records(records)
+        random.Random(seed + sum(ord(c) for c in domain)).shuffle(records)
+
+        path = output_dir / "by_domain" / f"{domain}.jsonl"
+        write_jsonl(records, path)
+        counts[domain] = len(records)
+
+    return counts
+
+
+def write_mixed(
+    prepared: dict[str, list[dict[str, str]]],
+    output_dir: Path,
+    seed: int,
+) -> dict[str, int]:
+    records = [
+        record for source_records in prepared.values() for record in source_records
+    ]
+
+    records = deduplicate_records(records)
+    random.Random(seed).shuffle(records)
+
+    write_jsonl(records, output_dir / "mixed" / "pilot_mixed.jsonl")
+
+    return {"mixed": len(records)}
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    """Load and validate the YAML configuration root."""
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    if not isinstance(data, dict):
-        raise ValueError("Pilot corpus config must contain a mapping")
+    if not isinstance(config, dict):
+        raise ValueError("Configuration must be a YAML mapping.")
 
-    return data
+    if not isinstance(config.get("sources"), list) or not config["sources"]:
+        raise ValueError("Configuration must contain a nonempty sources list.")
+
+    return config
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Prepare a provenance-tagged semantic-parser pilot corpus."
-    )
+    parser = argparse.ArgumentParser(description="Prepare parser pilot datasets.")
 
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/parser_config/pilot_corpus.yaml"),
+        default=DEFAULT_CONFIG,
     )
 
     parser.add_argument(
-        "--output",
+        "--output-dir",
         type=Path,
-        default=Path("data/parser_corpus/pilot_1000.jsonl"),
+        default=DEFAULT_OUTPUT,
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=["separate", "by_domain", "mixed", "all"],
+        default="separate",
+        help="Preparation mode. Default: separate.",
     )
 
     return parser
 
 
 def main() -> int:
-    arguments = build_argument_parser().parse_args()
+    args = build_argument_parser().parse_args()
+    config = load_config(args.config)
 
-    config = load_config(arguments.config)
+    prepared = prepare_sources(config)
+    seed = int(config.get("seed", 42))
 
-    manifest = build_manifest(config)
+    modes = ["separate", "by_domain", "mixed"] if args.mode == "all" else [args.mode]
 
-    write_manifest(
-        manifest,
-        arguments.output,
-    )
+    for mode in modes:
+        if mode == "separate":
+            counts = write_separate(prepared, args.output_dir)
+        elif mode == "by_domain":
+            counts = write_by_domain(prepared, args.output_dir, seed)
+        else:
+            counts = write_mixed(prepared, args.output_dir, seed)
 
-    print(f"Wrote {len(manifest)} examples -> " f"{arguments.output}")
+        print(f"\n{mode.upper()} preparation:")
+        for name, count in sorted(counts.items()):
+            print(f"  {name}: {count}")
 
-    counts: dict[tuple[str, str], int] = {}
-
-    for record in manifest:
-        key = (
-            record["source_dataset"],
-            record["source_domain"],
-        )
-        counts[key] = counts.get(key, 0) + 1
-
-    for (dataset, domain), count in sorted(counts.items()):
-        print(f"  {dataset}: {count} " f"({domain})")
-
+    print(f"\nOutput directory: {args.output_dir}")
     return 0
 
 

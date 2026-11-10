@@ -28,20 +28,20 @@ if str(REPO_ROOT) not in sys.path:
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
+from runtime.data_loader import load_runtime_data  # noqa: E402
 from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
 from stages.stage_A.a1 import A1Config, a1_objective  # noqa: E402
 from stages.stage_base import (  # noqa: E402
     RunConfig,
     apply_run_overrides,
     configure_logging,
+    evaluate,
     evaluate_checkpoint,
     initialize_stage,
     load_configs,
     log_experiment_header,
     log_final_summary,
-    prepare_domain,
     run_sequential,
-    test_domain,
 )
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml"
@@ -137,9 +137,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(results, indent=2))
         return 0
 
-    # Shared data preparation; fail before creating a run directory.
-    domains = [prepare_domain(substrate, d, train_cfg) for d in cfg.domains]
+    # Load data before creating the run directory, so bad datasets fail fast.
+    log.info("Preparing datasets across %d domain(s)...", len(cfg.domains))
 
+    runtime_data = load_runtime_data(
+        config_path=REPO_ROOT / "configs" / "runtime_datasets.yaml",
+        tokenizer=substrate.tokenizer,
+        sequence_length=train_cfg.seq_len,
+        batch_size=train_cfg.batch_size,
+        eval_batches=train_cfg.eval_batches,
+        default_epochs=train_cfg.epochs,
+    )
+
+    domains = runtime_data.tasks
     run_name = args.run_name or default_run_name("a1")
     with RunWriter(train_cfg.output_dir, run_name) as writer:
         writer.write_config(cfg.to_dict())
@@ -181,11 +191,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         frozen = substrate.verify_frozen()
         summary["params_unchanged"] = frozen["params_unchanged"]
 
-        test_results = {
-            d.name: test_domain(substrate, adapter, params, d, train_cfg, writer=writer)
-            for d in cfg.domains
-        }
+        # Final test-set evaluation across domains for paper-table results
+        test_eval_batches = (
+            args.eval_batches
+            if args.eval_batches is not None
+            else train_cfg.eval_batches
+        )
+        log.info(
+            "Running final test evaluation across %d tasks...",
+            len(runtime_data.test_blocks),
+        )
+
+        test_results = {}
+
+        for task_name, test_set in runtime_data.get_test_sets(
+            train_cfg.batch_size,
+            test_eval_batches,
+        ).items():
+            test_results[task_name] = evaluate(
+                substrate,
+                adapter,
+                params,
+                test_set,
+                jit=train_cfg.jit,
+            )
+
+            writer.log(
+                "test",
+                domain=task_name,
+                **test_results[task_name],
+            )
+
         summary["test"] = test_results
+        summary["runtime_data"] = runtime_data.metadata
         writer.write_json("results.json", summary)
 
     log_final_summary(log, summary, frozen, start_time=start_time)
