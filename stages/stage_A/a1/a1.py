@@ -1,7 +1,4 @@
-"""Stage A1: plain residual baseline (no predictive coding, no symbolic head).
-
-L_A1 = L_task + lambda_kl * KL(p_F0 || p_F0+R) + lambda_wd * ||phi||^2
-"""
+"""Stage A1: standard residual adapter baseline."""
 
 from __future__ import annotations
 
@@ -12,8 +9,9 @@ from typing import Any
 import jax
 
 from frozenllm.substrate import FrozenSubstrate
+from losses.a1_loss import compute_a1_loss
 from residual import AdapterParams, ResidualAdapter
-from stages.stage_base import base_logits, checked_kwargs, model_loss_terms
+from stages.stage_base import base_logits, checked_kwargs
 
 
 @dataclass(frozen=True)
@@ -25,11 +23,61 @@ class A1Config:
         for name in ("lambda_kl", "lambda_wd"):
             value = getattr(self, name)
             if not isinstance(value, int | float) or value < 0:
-                raise ValueError(f"{name} must be a number >= 0, got {value!r}")
+                raise ValueError(f"{name} must be >= 0, got {value!r}")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> A1Config:
         return cls(**checked_kwargs(cls, data))
+
+
+def a1_forward(
+    params: AdapterParams,
+    batch: jax.Array,
+    key: jax.Array | None = None,
+    *,
+    substrate: FrozenSubstrate,
+    adapter: ResidualAdapter,
+    config: A1Config,
+    base: jax.Array | None = None,
+) -> dict[str, jax.Array | None]:
+    """Run A1 forward pass and return predictions."""
+
+    adapted = substrate.run_with_interception(
+        batch,
+        modify_fn=adapter.modify_fn(params),
+        intercept_layers=adapter.layers,
+    ).logits
+
+    reference = base
+
+    if config.lambda_kl > 0 and reference is None:
+        reference = base_logits(substrate, batch)
+
+    return {
+        "logits": adapted,
+        "base_logits": reference,
+    }
+
+
+def a1_loss(
+    predictions: Mapping[str, jax.Array | None],
+    batch: jax.Array,
+    params: AdapterParams,
+    config: A1Config,
+    *,
+    substrate: FrozenSubstrate,
+) -> tuple[jax.Array, dict[str, jax.Array]]:
+    """Calculate A1 losses from model predictions."""
+
+    return compute_a1_loss(
+        substrate,
+        predictions["logits"],
+        batch,
+        lambda_kl=config.lambda_kl,
+        lambda_wd=config.lambda_wd,
+        weight_decay=ResidualAdapter.l2_norm_sq(params),
+        base=predictions["base_logits"],
+    )
 
 
 def a1_objective(
@@ -42,25 +90,29 @@ def a1_objective(
     labels: jax.Array | None = None,
     base: jax.Array | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    adapted = substrate.run_with_interception(
+    """Compatibility objective used by existing A1 and A2 implementations."""
+
+    predictions = a1_forward(
+        params,
         input_ids,
-        modify_fn=adapter.modify_fn(params),
-        intercept_layers=adapter.layers,
-    ).logits
-    target_labels = input_ids if labels is None else labels
-    wd = ResidualAdapter.l2_norm_sq(params)
-
-    reference = None
-    if config.lambda_kl > 0 or base is not None:
-        reference = base_logits(substrate, input_ids) if base is None else base
-    model_loss, task, kl = model_loss_terms(
-        substrate, adapted, target_labels, config.lambda_kl, reference
+        substrate=substrate,
+        adapter=adapter,
+        config=config,
+        base=base,
     )
-    total = model_loss + config.lambda_wd * wd
-    terms = {"total": total, "task": task, "wd": wd}
-    if kl is not None:
-        terms["kl"] = kl
-    return total, terms
+
+    return a1_loss(
+        predictions,
+        input_ids if labels is None else labels,
+        params,
+        config,
+        substrate=substrate,
+    )
 
 
-__all__ = ["A1Config", "a1_objective"]
+__all__ = [
+    "A1Config",
+    "a1_forward",
+    "a1_loss",
+    "a1_objective",
+]

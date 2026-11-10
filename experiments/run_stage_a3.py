@@ -1,4 +1,4 @@
-"""Run Stage A3: Hybrid predictive-coding residual training."""
+"""Run Stage A3: hybrid predictive-coding residual training."""
 
 from __future__ import annotations
 
@@ -17,118 +17,140 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import jax  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import optax  # noqa: E402
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
-from metrics.performance import training_step_time  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
-from stages.results import RunWriter, default_run_name, run_metadata  # noqa: E402
+from runtime.data_loader import load_runtime_data  # noqa: E402
+from stages.results import (  # noqa: E402
+    RunWriter,
+    default_run_name,
+    run_metadata,
+)
 from stages.stage_A.a3 import A3HybridConfig, A3Model  # noqa: E402
 from stages.stage_base import (  # noqa: E402
-    Domain,
     RunConfig,
-    TrainingConfig,
-    batches,
+    apply_run_overrides,
     configure_logging,
+    format_params,
     load_configs,
-    load_token_blocks,
+    log_experiment_header,
+    log_final_summary,
     make_eval_set,
-    summarize,
 )
+from training.train import train  # noqa: E402
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "stage_A" / "a3_hybrid_pc.yaml"
+DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "configs" / "runtime_datasets.yaml"
 
 log = logging.getLogger("stage_a3")
 
 
+# ---------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--rank", type=int, default=None)
+
     parser.add_argument(
         "--K",
         type=int,
         nargs="+",
         default=None,
-        help="Run separate experiments for each inference-step count.",
+        help="Run separate experiments for each PC inference-step count.",
     )
+
     parser.add_argument("--eta-z", type=float, default=None)
     parser.add_argument("--lambda-kl", type=float, default=None)
-    parser.add_argument("--epochs", "--epoch", dest="epochs", type=int, default=None)
+
+    parser.add_argument(
+        "--epochs",
+        "--epoch",
+        dest="epochs",
+        type=int,
+        default=None,
+    )
+
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--eval-batches", type=int, default=None)
     parser.add_argument("--split", type=str, default="test")
-    parser.add_argument("--energy-curve", action="store_true", default=False)
-    parser.add_argument("--no-jit", action="store_true", default=False)
+
+    parser.add_argument(
+        "--energy-curve",
+        action="store_true",
+        default=False,
+    )
+
+    parser.add_argument(
+        "--no-jit",
+        action="store_true",
+        default=False,
+    )
 
     return parser.parse_args(argv)
 
 
-def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
-    adapter = cfg.adapter
-    objective = cfg.objective
-    training = cfg.training
-    domains = cfg.domains
+# ---------------------------------------------------------------------
+# Configuration overrides
+# ---------------------------------------------------------------------
 
-    if args.rank is not None:
-        adapter = replace(adapter, rank=args.rank)
+
+def apply_overrides(
+    cfg: RunConfig,
+    args: argparse.Namespace,
+) -> RunConfig:
+    """Apply shared training and A3-specific CLI overrides."""
+
+    cfg = apply_run_overrides(cfg, args)
+
+    objective: A3HybridConfig = cfg.objective
 
     if args.eta_z is not None:
-        objective = replace(objective, eta_z=args.eta_z)
+        objective = replace(
+            objective,
+            eta_z=args.eta_z,
+        )
 
     if args.lambda_kl is not None:
-        objective = replace(objective, lambda_kl=args.lambda_kl)
-
-    if args.model is not None:
-        training = replace(training, model=args.model)
-
-    if args.output_dir is not None:
-        training = replace(training, output_dir=args.output_dir)
-
-    if args.no_jit:
-        training = replace(training, jit=False)
-
-    if args.epochs is not None:
-        if args.epochs < 0:
-            raise ValueError(f"epochs must be >= 0, got {args.epochs}")
-
-        training = replace(training, epochs=args.epochs)
-        domains = tuple(replace(domain, epochs=args.epochs) for domain in domains)
-
-    if args.eval_batches is not None:
-        if args.eval_batches < 1:
-            raise ValueError(f"eval_batches must be >= 1, got {args.eval_batches}")
-
-        training = replace(
-            training,
-            eval_batches=args.eval_batches,
+        objective = replace(
+            objective,
+            lambda_kl=args.lambda_kl,
         )
 
     return replace(
         cfg,
-        adapter=adapter,
         objective=objective,
-        training=training,
-        domains=domains,
     )
 
 
+# ---------------------------------------------------------------------
+# A3 evaluation
+# ---------------------------------------------------------------------
+
+
 def evaluate_deployment(
-    substrate,
+    substrate: FrozenSubstrate,
     model: A3Model,
     params,
     eval_batches,
     *,
     jit: bool = True,
-):
+) -> dict[str, float]:
+    """Evaluate the deployed A3 model using its adapter."""
+
     if not eval_batches:
         return {
             "base_loss": 0.0,
@@ -179,251 +201,57 @@ def evaluate_deployment(
     }
 
 
-def train_sequential(
-    substrate,
-    model: A3Model,
-    params,
-    domains,
-    training: TrainingConfig,
-    writer: RunWriter,
-    *,
-    energy_curve: bool = False,
-):
-    names = [domain.name for domain in domains]
+# ---------------------------------------------------------------------
+# A3 PC gradient adapter
+# ---------------------------------------------------------------------
 
-    def evaluate_all(after_task: int):
-        results = {}
 
-        for domain in domains:
-            results[domain.name] = evaluate_deployment(
-                substrate,
-                model,
-                params,
-                domain.eval_set,
-                jit=training.jit,
-            )
+def make_a3_gradient_fn(model: A3Model):
+    """Adapt A3's custom PC gradients to the shared training interface."""
 
-            writer.log(
-                "eval",
-                after_task=after_task,
-                domain=domain.name,
-                **results[domain.name],
-            )
-
-        return results
-
-    initial_results = evaluate_all(-1)
-
-    optimizer = optax.adam(training.learning_rate)
-    base_key = jax.random.PRNGKey(training.seed + 100)
-
-    def train_step(params, opt_state, ids, key):
-        grads, aux = model.train_grads(params, ids, key)
-
-        updates, opt_state = optimizer.update(
-            grads,
-            opt_state,
+    def a3_gradient_fn(params, batch, key):
+        grads, aux = model.train_grads(
             params,
+            batch,
+            key,
         )
 
         metrics = {
-            "total_loss": aux["loss"] + aux["spring"],
+            "total": aux["energy_after_exact"],
+            "task": aux["task"],
             "pc_energy": aux["spring"],
-            "ppl": jnp.exp(aux["task"]),
         }
 
-        params = optax.apply_updates(params, updates)
+        if "kl" in aux:
+            metrics["kl"] = aux["kl"]
 
-        return params, opt_state, metrics
+        return grads, metrics
 
-    if training.jit:
-        train_step = jax.jit(train_step)
+    return a3_gradient_fn
 
-    opt_state = optimizer.init(params)
 
-    rows = []
-    step_times = []
-
-    global_step = 0
-    tokens = 0
-
-    for task_idx, domain in enumerate(domains):
-        if task_idx > 0 and training.reset_optimizer:
-            opt_state = optimizer.init(params)
-
-        num_epochs = domain.epochs
-
-        if num_epochs > 0 and len(domain.train_blocks) < training.batch_size:
-            raise ValueError(
-                f"Domain {domain.name!r} has insufficient training blocks "
-                f"for batch_size={training.batch_size}."
-            )
-
-        batches_per_epoch = (
-            len(domain.train_blocks) // training.batch_size if num_epochs > 0 else 0
-        )
-
-        log.info("\nTask %d: %s", task_idx + 1, domain.name)
-
-        domain_step = 0
-
-        for epoch in range(1, num_epochs + 1):
-            log.info("  Epoch %d/%d", epoch, num_epochs)
-
-            epoch_start = time.time()
-
-            epoch_step_times = []
-            epoch_metrics = []
-            epoch_tokens = 0
-
-            stream = batches(
-                domain.train_blocks,
-                training.batch_size,
-                training.seed + task_idx * 10000 + (epoch - 1),
-            )
-
-            for batch_idx, ids in enumerate(stream, start=1):
-                domain_step += 1
-                global_step += 1
-
-                batch_tokens = int(ids.size)
-                tokens += batch_tokens
-                epoch_tokens += batch_tokens
-
-                key = jax.random.fold_in(
-                    base_key,
-                    global_step,
-                )
-
-                (params, opt_state, metrics), step_time = training_step_time(
-                    train_step,
-                    params,
-                    opt_state,
-                    ids,
-                    key,
-                )
-
-                step_times.append(step_time)
-                epoch_step_times.append(step_time)
-
-                scalars = {name: float(value) for name, value in metrics.items()}
-
-                epoch_metrics.append(scalars)
-
-                writer.log(
-                    "train",
-                    task=task_idx,
-                    domain=domain.name,
-                    epoch=epoch,
-                    batch=batch_idx,
-                    step=domain_step,
-                    global_step=global_step,
-                    tokens=tokens,
-                    step_time=step_time,
-                    **scalars,
-                )
-
-                if (
-                    batch_idx == 1
-                    or batch_idx == batches_per_epoch
-                    or domain_step % training.log_every == 0
-                ):
-                    log.info(
-                        "    Batch %d | Total loss: %.4f | "
-                        "PC energy: %.6f | PPL: %.2f",
-                        batch_idx,
-                        scalars["total_loss"],
-                        scalars["pc_energy"],
-                        scalars["ppl"],
-                    )
-
-            if epoch_metrics:
-                duration = time.time() - epoch_start
-
-                mean_metrics = {
-                    name: float(np.mean([metrics[name] for metrics in epoch_metrics]))
-                    for name in epoch_metrics[0]
-                }
-
-                mean_step_time = float(np.mean(epoch_step_times))
-
-                writer.log(
-                    "epoch",
-                    task=task_idx,
-                    domain=domain.name,
-                    epoch=epoch,
-                    total_epochs=num_epochs,
-                    global_step=global_step,
-                    batches=len(epoch_metrics),
-                    blocks=len(epoch_metrics) * training.batch_size,
-                    epoch_tokens=epoch_tokens,
-                    tokens=tokens,
-                    epoch_time=duration,
-                    mean_step_time=mean_step_time,
-                    **mean_metrics,
-                )
-
-                log.info(
-                    "    Epoch average | Total loss: %.4f | "
-                    "PC energy: %.4f | PPL: %.2f",
-                    mean_metrics["total_loss"],
-                    mean_metrics["pc_energy"],
-                    mean_metrics["ppl"],
-                )
-
-        writer.save_checkpoint(
-            f"task_{task_idx}_{domain.name}",
-            model.adapter_params(params),
-            opt_state=opt_state,
-            global_step=global_step,
-            task=task_idx,
-            domain=domain.name,
-            epoch=num_epochs,
-            step=domain_step,
-        )
-
-        rows.append(evaluate_all(task_idx))
-
-        if energy_curve and domain.eval_set:
-            curve = model.energy_curve(
-                params,
-                domain.eval_set[0],
-                jax.random.fold_in(base_key, 0),
-            )
-
-            writer.log(
-                "energy_curve",
-                after_task=task_idx,
-                domain=domain.name,
-                curve=curve,
-            )
-
-    summary = summarize(names, initial_results, rows)
-
-    summary.update(
-        epochs={domain.name: domain.epochs for domain in domains},
-        steps=global_step,
-        tokens=tokens,
-        mean_step_time=(
-            float(np.mean(step_times[1:])) if len(step_times) > 1 else None
-        ),
-    )
-
-    return params, summary
+# ---------------------------------------------------------------------
+# Run one A3 experiment
+# ---------------------------------------------------------------------
 
 
 def run_one(
     cfg: RunConfig,
-    args,
-    substrate,
-    adapter,
-    domains,
+    args: argparse.Namespace,
+    substrate: FrozenSubstrate,
+    adapter: ResidualAdapter,
+    runtime_data,
+    test_sets,
     n_frozen: int,
     run_name: str,
     start_time: float,
 ) -> int:
     train_cfg = cfg.training
-    objective = cfg.objective
+    objective: A3HybridConfig = cfg.objective
+
+    # -------------------------------------------------------------
+    # Build A3 model
+    # -------------------------------------------------------------
 
     model = A3Model(
         substrate,
@@ -439,7 +267,52 @@ def run_one(
 
     n_trainable = sum(int(leaf.size) for leaf in jax.tree_util.tree_leaves(params))
 
-    with RunWriter(train_cfg.output_dir, run_name) as writer:
+    domains = runtime_data.tasks
+
+    # -------------------------------------------------------------
+    # Evaluation callback
+    # -------------------------------------------------------------
+
+    def eval_fn(p, eval_set):
+        return evaluate_deployment(
+            substrate,
+            model,
+            p,
+            eval_set,
+            jit=train_cfg.jit,
+        )
+
+    # -------------------------------------------------------------
+    # A3-specific PC energy curve callback
+    # -------------------------------------------------------------
+
+    base_key = jax.random.PRNGKey(train_cfg.seed + 100)
+
+    def after_task_fn(p, task_idx, task):
+        if not args.energy_curve or not task.eval_set:
+            return
+
+        curve = model.energy_curve(
+            p,
+            task.eval_set[0],
+            jax.random.fold_in(base_key, 0),
+        )
+
+        writer.log(
+            "energy_curve",
+            after_task=task_idx,
+            domain=task.name,
+            curve=curve,
+        )
+
+    # -------------------------------------------------------------
+    # Run artifacts
+    # -------------------------------------------------------------
+
+    with RunWriter(
+        train_cfg.output_dir,
+        run_name,
+    ) as writer:
         writer.write_config(cfg.to_dict())
 
         writer.write_json(
@@ -448,24 +321,66 @@ def run_one(
                 **run_metadata(),
                 "stage": "A3",
                 "model": train_cfg.model,
+                "num_layers": substrate.architecture.num_layers,
+                "hidden_size": substrate.architecture.hidden_size,
                 "adapted_layers": list(adapter.layers),
                 "trainable_params": n_trainable,
                 "frozen_params": n_frozen,
                 "infer_steps": objective.infer_steps,
+                "eta_z": objective.eta_z,
+                "lambda_kl": objective.lambda_kl,
                 "epochs": {domain.name: domain.epochs for domain in domains},
                 "jit": train_cfg.jit,
+                "runtime_data": runtime_data.metadata,
             },
         )
 
-        params, summary = train_sequential(
-            substrate,
-            model,
-            params,
-            domains,
-            train_cfg,
-            writer,
-            energy_curve=args.energy_curve,
+        # ---------------------------------------------------------
+        # Experiment header
+        # ---------------------------------------------------------
+
+        log_experiment_header(
+            log,
+            cfg=cfg,
+            arch=substrate.architecture,
+            adapter=adapter,
+            n_trainable=n_trainable,
+            n_frozen=n_frozen,
+            run_dir=writer.dir,
+            domains=domains,
+            stage="A3",
         )
+
+        log.info(
+            "A3 parameters      : Total=%s",
+            format_params(n_trainable),
+        )
+
+        # ---------------------------------------------------------
+        # Shared training engine with A3-specific PC gradients
+        # ---------------------------------------------------------
+
+        optimizer = optax.adam(train_cfg.learning_rate)
+
+        params, summary = train(
+            params=params,
+            tasks=domains,
+            forward_fn=None,
+            loss_fn=None,
+            loss_config=None,
+            optimizer=optimizer,
+            config=train_cfg,
+            writer=writer,
+            eval_fn=eval_fn,
+            pc_gradient_fn=make_a3_gradient_fn(model),
+            checkpoint_fn=model.adapter_params,
+            after_task_fn=after_task_fn,
+        )
+
+        # ---------------------------------------------------------
+        # Final A3 adapter checkpoint
+        # ---------------------------------------------------------
+
         writer.save_checkpoint(
             "a3hybrid_final",
             model.adapter_params(params),
@@ -479,57 +394,64 @@ def run_one(
             final=True,
         )
 
-        log.info("Final A3 Hybrid adapter saved: a3hybrid_final")
+        # ---------------------------------------------------------
+        # Substrate integrity
+        # ---------------------------------------------------------
 
         frozen = substrate.verify_frozen()
 
         summary["params_unchanged"] = frozen["params_unchanged"]
         summary["infer_steps"] = objective.infer_steps
+        summary["runtime_data"] = runtime_data.metadata
+
+        # ---------------------------------------------------------
+        # Final test evaluation
+        # ---------------------------------------------------------
 
         test_results = {}
 
-        for domain in cfg.domains:
-            split_name = {
-                "test": domain.test_split,
-                "train": domain.train_split,
-            }.get(args.split, domain.eval_split)
-
-            blocks = load_token_blocks(
-                substrate,
-                domain,
-                split_name,
-                train_cfg.seq_len,
-            )
-
-            test_set = make_eval_set(
-                blocks,
-                train_cfg.batch_size,
-                train_cfg.eval_batches,
-            )
-
-            test_results[domain.name] = evaluate_deployment(
-                substrate,
-                model,
+        for name, test_set in test_sets.items():
+            result = eval_fn(
                 params,
                 test_set,
-                jit=train_cfg.jit,
             )
+
+            test_results[name] = result
 
             writer.log(
                 "test",
-                domain=domain.name,
-                **test_results[domain.name],
+                domain=name,
+                **result,
             )
 
         summary["test"] = test_results
 
-        writer.write_json("results.json", summary)
+        writer.write_json(
+            "results.json",
+            summary,
+        )
+
+    # -------------------------------------------------------------
+    # Final experiment summary
+    # -------------------------------------------------------------
+
+    log_final_summary(
+        log,
+        summary,
+        frozen,
+        start_time=start_time,
+    )
 
     if not frozen["params_unchanged"]:
         log.error("Frozen substrate parameters changed during training.")
         return 1
 
     return 0
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -549,15 +471,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     train_cfg = cfg.training
 
+    # -------------------------------------------------------------
+    # Frozen substrate and adapter
+    # -------------------------------------------------------------
+
     substrate = FrozenSubstrate(train_cfg.model)
+
     arch = substrate.architecture
 
-    max_pos = arch.max_position_embeddings
-
-    if max_pos is not None and train_cfg.seq_len > max_pos:
-        raise ValueError(f"seq_len={train_cfg.seq_len} exceeds {max_pos} positions.")
-
-    adapter = ResidualAdapter(cfg.adapter, arch)
+    adapter = ResidualAdapter(
+        cfg.adapter,
+        arch,
+    )
 
     n_frozen = sum(parameter.numel() for parameter in substrate.params.values())
 
@@ -566,42 +491,63 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not frozen["params_unchanged"]:
         raise RuntimeError(f"Frozen substrate verification failed: {frozen}")
 
-    domains = []
+    # -------------------------------------------------------------
+    # Shared runtime datasets
+    # -------------------------------------------------------------
 
-    for domain in cfg.domains:
-        train_blocks = load_token_blocks(
-            substrate,
-            domain,
-            domain.train_split,
-            train_cfg.seq_len,
+    eval_batches = train_cfg.eval_batches
+
+    runtime_data = load_runtime_data(
+        config_path=DEFAULT_RUNTIME_CONFIG,
+        tokenizer=substrate.tokenizer,
+        sequence_length=train_cfg.seq_len,
+        batch_size=train_cfg.batch_size,
+        eval_batches=eval_batches,
+        default_epochs=train_cfg.epochs,
+    )
+
+    domains = runtime_data.tasks
+
+    # Select the final evaluation split.
+    if args.split == "test":
+        test_sets = runtime_data.get_test_sets(
+            train_cfg.batch_size,
+            eval_batches,
         )
 
-        eval_blocks = load_token_blocks(
-            substrate,
-            domain,
-            domain.eval_split,
-            train_cfg.seq_len,
-        )
+    elif args.split in ("eval", "validation"):
+        test_sets = {task.name: task.eval_set for task in domains}
 
-        domains.append(
-            Domain(
-                name=domain.name,
-                train_blocks=train_blocks,
-                eval_set=make_eval_set(
-                    eval_blocks,
-                    train_cfg.batch_size,
-                    train_cfg.eval_batches,
-                ),
-                epochs=(train_cfg.epochs if domain.epochs is None else domain.epochs),
+    elif args.split == "train":
+        test_sets = {
+            task.name: make_eval_set(
+                task.train_blocks,
+                train_cfg.batch_size,
+                eval_batches,
             )
-        )
+            for task in domains
+        }
+
+    else:
+        raise ValueError("split must be 'test', 'validation', 'eval', or 'train'.")
+
+    # -------------------------------------------------------------
+    # Multiple inference-step experiments
+    # -------------------------------------------------------------
 
     base_name = args.run_name or default_run_name("a3hybrid")
-    ks = args.K or [cfg.objective.infer_steps]
+
+    inference_steps = args.K if args.K is not None else [cfg.objective.infer_steps]
+
+    if any(k < 0 for k in inference_steps):
+        raise ValueError("Every K value must be >= 0.")
+
+    if len(set(inference_steps)) != len(inference_steps):
+        raise ValueError("K values must be unique.")
 
     status = 0
 
-    for k in ks:
+    for k in inference_steps:
         run_cfg = replace(
             cfg,
             objective=replace(
@@ -610,14 +556,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
 
-        run_name = base_name if len(ks) == 1 else f"{base_name}-K{k}"
+        run_name = base_name if len(inference_steps) == 1 else f"{base_name}-K{k}"
 
         status |= run_one(
             run_cfg,
             args,
             substrate,
             adapter,
-            domains,
+            runtime_data,
+            test_sets,
             n_frozen,
             run_name,
             start_time,

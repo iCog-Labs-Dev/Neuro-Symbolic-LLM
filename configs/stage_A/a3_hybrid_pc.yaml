@@ -1,5 +1,6 @@
+# Stage A3: Hybrid predictive-coding residual training
+
 adapter:
-  rank: 16
   activation: identity
   alpha: 16
   init_std: null
@@ -15,41 +16,3 @@ a3_hybrid:
   lambda_kl: 0.0
   predictor_init_std: 0.001
   projection_init_std: 0.1
-
-training:
-  model: gpt2
-  seq_len: 16
-  batch_size: 8
-  epochs: 3
-  learning_rate: 0.01
-  eval_batches: 8
-  log_every: 10
-  seed: 42
-  reset_optimizer: true
-  output_dir: runs
-  jit: true
-
-domains:
-  - name: eurlex
-    dataset: coastalcph/lex_glue
-    dataset_config: eurlex
-    train_split: "train[:5000]"
-    eval_split: "validation[:500]"
-    test_split: "test[:500]"
-    separator: "\n\n"
-
-  - name: ledgar
-    dataset: coastalcph/lex_glue
-    dataset_config: ledgar
-    train_split: "train[:20000]"
-    eval_split: "validation[:2000]"
-    test_split: "test[:2000]"
-    separator: "\n\n"
-
-  - name: scotus
-    dataset: coastalcph/lex_glue
-    dataset_config: scotus
-    train_split: "train[:500]"
-    eval_split: "validation[:200]"
-    test_split: "test[:200]"
-    separator: "\n\n"
