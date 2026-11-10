@@ -1,0 +1,26 @@
+model:
+  name: gpt2
+
+  # Shared residual adapter architecture
+  rank: 16
+  alpha: 16
+  activation: identity
+  init_std: null
+  layers: null
+
+  # Shared input dimensions
+  seq_len: 128
+  batch_size: 8
+
+  seed: 42
+
+training:
+  epochs: 3
+  reset_optimizer: true
+  output_dir: runs
+  jit: true
+  log_every: 10
+
+evaluation:
+  validation_batches: 8
+  test_batches: 8
