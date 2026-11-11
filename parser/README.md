@@ -18,7 +18,7 @@ MeTTa view:   (Obligation (Evaluation deliver (List supplier goods)))
 [`ReferenceSemanticParser`](semantic/semantic_parser.py) uses a large teacher
 model for offline annotation. [`DistilledSemanticParser`](semantic/semantic_parser.py)
 uses a fine-tuned local 1B–3B student for deployment. Both run the same pipeline
-and return a `SemanticParseResult` (semantic contract `2.0.0`): the source
+and return a `SemanticParseResult` (semantic contract `1.0.0`): the source
 document, the parse provenance, and the validated extraction.
 
 ## Architecture
@@ -388,8 +388,8 @@ source sentences.
 
 ## Current implementation status
 
-Implemented: the contract `2.0.0` output, catalog validation, recorded
+Implemented: the contract `1.0.0` output, catalog validation, recorded
 repairs, deterministic MeTTa rendering, configurable provider backends,
 checkpointed export with resume, student data and training, the
-`symbolic_pipeline` adapter to hybrid-miner, and the contract `2.0.0` teacher
+`symbolic_pipeline` adapter to hybrid-miner, and the contract `1.0.0` teacher
 prompt with its worked examples. Next: adapter support for universal rules.
