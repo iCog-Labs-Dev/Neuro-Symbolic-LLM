@@ -109,12 +109,8 @@ def _modal_result(document_id, source, assertions, entities):
         ("Nora may leave.", "may leave", "positive", "permission"),
         ("Nora must leave.", "must leave", "positive", "obligation"),
         ("Nora must not leave.", "must not leave", "negative", "obligation"),
-        (
-            "Nora is allowed not to leave.",
-            "allowed not to leave",
-            "negative",
-            "permission",
-        ),
+        # "may not" is (Not (Permission ...)) in the parser's renderer
+        ("Nora may not leave.", "may not leave", "negative", "permission"),
     ],
 )
 def test_modal_evaluation_signs_its_relation_fact(source, quote, polarity, modality):
