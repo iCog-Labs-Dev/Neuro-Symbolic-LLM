@@ -11,6 +11,7 @@ from parser.semantic.normalization import (
     SemanticNormalizationError,
     normalize_extraction_payload,
     normalize_symbol,
+    restore_quote_case,
 )
 
 
@@ -153,3 +154,51 @@ def test_preserves_metta_variables_and_normalizes_their_names() -> None:
     assert normalize_symbol("$x") == "$x"
     assert normalize_symbol("$person") == "$person"
     assert normalize_symbol("$Some Person") == "$Some_Person"
+
+
+def test_restore_quote_case_fixes_only_letter_case() -> None:
+    source = "Students may not use phones. The students left."
+    payload: dict[str, Any] = {
+        "entities": [
+            {"id": "students", "mention": {"text": "students"}},
+            {"id": "phones", "mention": {"text": "phones"}},
+        ],
+        "assertions": [
+            {"evidence": [{"text": "students may not use phones"}]},
+            {"evidence": [{"text": "pupils"}]},
+        ],
+        "rules": [{"evidence": [{"text": "THE STUDENTS LEFT"}], "antecedents": []}],
+    }
+
+    repaired, changes = restore_quote_case(payload, source)
+
+    # found exactly as written: untouched, even though "Students" also exists
+    assert repaired["entities"][0] == payload["entities"][0]
+    assert repaired["entities"][1] == payload["entities"][1]
+    # case-only difference: the source's own words and their occurrence number
+    assert repaired["assertions"][0]["evidence"] == [
+        {"text": "Students may not use phones", "occurrence": 0}
+    ]
+    assert repaired["rules"][0]["evidence"] == [
+        {"text": "The students left", "occurrence": 0}
+    ]
+    # different words stay wrong for validation to reject
+    assert repaired["assertions"][1] == payload["assertions"][1]
+    assert len(changes) == 2
+    assert payload["assertions"][0]["evidence"] == [
+        {"text": "students may not use phones"}
+    ]
+
+
+def test_restore_quote_case_recomputes_the_occurrence() -> None:
+    source = "the Buyer met the buyer and the Buyer."
+    payload = {"entities": [{"mention": {"text": "BUYER", "occurrence": 2}}]}
+
+    repaired, changes = restore_quote_case(payload, source)
+
+    # third "buyer" ignoring case is the second exact "Buyer"
+    assert repaired["entities"][0]["mention"] == {"text": "Buyer", "occurrence": 1}
+    assert changes == ["quote 'BUYER' restored to source spelling 'Buyer'"]
+    assert restore_quote_case(
+        {"entities": [{"mention": {"text": "buyer", "occurrence": 5}}]}, source
+    ) == ({"entities": [{"mention": {"text": "buyer", "occurrence": 5}}]}, [])

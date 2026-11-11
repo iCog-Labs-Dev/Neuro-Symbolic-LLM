@@ -122,6 +122,7 @@ repair is written to `provenance.repairs`, so its rate can be measured:
 | `pronoun_in_rule` | Bound an unresolved pronoun in a universal rule to the rule's only variable |
 | `unresolved_pronoun` | Changed nothing; recorded a pronoun the model left unresolved |
 | `rule_duplicate` | Removed a standalone copy of a rule part, which would turn a condition into a fact |
+| `quote_case` | Restored the source's spelling of a quote that differed only by letter case (`students` for `Students`) |
 
 A universal rule whose pronoun could refer to more than one variable is
 rejected rather than guessed.
