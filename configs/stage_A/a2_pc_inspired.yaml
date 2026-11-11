@@ -5,13 +5,10 @@ adapter:
   layers: null
   seed: 42
 
-a3_hybrid:
-  infer_steps: 4
-  eta_z: 0.1
-  sigma2: 1.0
+objective:
   lambda_kl: 0.0
-  predictor_init_std: 0.001
-  projection_init_std: 0.1
+  lambda_wd: 0.0
+  seed: 42
 
 training:
   learning_rate: 1.0e-2
