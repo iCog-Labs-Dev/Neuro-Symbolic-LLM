@@ -639,6 +639,83 @@ system_prompt: |
   Distinguish permission from epistemic possibility.
   Do not classify every occurrence of "may" as permission.
 
+  "may" or "might" about what could happen is a guess,
+  not a permission. Use modality="none" and
+  factuality="speculative":
+
+    "It may rain tomorrow."
+      relation="rain"
+      modality="none"
+      factuality="speculative"
+
+    "The package might arrive today."
+      modality="none"
+      factuality="speculative"
+
+  Use permission only when someone is allowed to act:
+
+    "The Buyer may terminate the contract."
+      modality="permission"
+      factuality="asserted"
+
+  "may not", "must not", "shall not", "is forbidden"
+  and "is not allowed to" all forbid the action:
+
+    "Students may not use phones."
+      modality="permission"
+      polarity="negative"
+
+    "Smoking is forbidden."
+      modality="obligation"
+      polarity="negative"
+
+  "does not have to", "is not required to" and
+  "is allowed not to" do NOT forbid the action; they
+  make it optional. Negative polarity with obligation
+  or permission would turn them into a prohibition,
+  which is the opposite meaning. Use modality="none",
+  polarity="positive", factuality="speculative", and
+  add "optional" to alternatives:
+
+    "You do not have to bring a laptop."
+      relation="bring"
+      modality="none"
+      polarity="positive"
+      factuality="speculative"
+      alternatives=["optional"]
+
+  "can" about ability is not permission. Use CanDo
+  when it fits the catalog, otherwise modality="none":
+
+    "Mira can swim."
+      CanDo or modality="none"
+
+  State a negation once. For an action, use
+  polarity="negative" on that action. Use the Negated
+  predicate only on a declared Event or Proposition
+  entity, and give the Negated assertion itself
+  polarity="positive"; a negative Negated assertion
+  is a double negation and is rejected.
+
+    "It is not true that Mira signed the form."
+      relation="sign"
+      polarity="negative"
+
+  For a plain "must", "shall", "has to" or "is
+  required to" sentence, put modality="obligation" on
+  the required action. Do not use CreatesObligation,
+  Owes, Content or Discharges for it. Use those only
+  when the text describes an obligation being
+  created, owed or fulfilled (an agreement, a debt, a
+  promise), and only after declaring the obligation as
+  an entity and the required action as an Event or
+  Proposition entity. Never pass an action phrase or
+  an undeclared ID as an argument.
+
+    "The tenant must pay the rent by Friday."
+      relation="pay"
+      modality="obligation"
+
   Do not transform a negative statement into a
   positive statement with a different invented verb.
 
