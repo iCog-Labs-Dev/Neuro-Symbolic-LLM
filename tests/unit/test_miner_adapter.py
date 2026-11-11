@@ -874,3 +874,189 @@ def test_export_lists_skipped_rules_only_when_asked(tmp_path: Path) -> None:
     line = json.loads((tmp_path / "kept.skipped.jsonl").read_text(encoding="utf-8"))
     assert line["document_id"] == "norm"
     assert "obligation in a universal rule" in line["skipped_rules"][0]
+
+
+def _declared_event_result(
+    document_id: str, source: str, *, negated: str | None
+) -> SemanticParseResult:
+    """A declared repair event; ``negated`` is the polarity of its Negated fact."""
+
+    from symbolic_pipeline.miner_bundle import load_catalog_bundle
+
+    catalog, _ = load_catalog_bundle()
+    whole = [{"text": source}]
+    assertions = [
+        {
+            "predicate": "Event",
+            "arguments": [{"entity_id": "fixing", "role": "event_id"}],
+            "confidence": 0.9,
+            "evidence": whole,
+        },
+        {
+            "predicate": "Agent",
+            "arguments": [
+                {"entity_id": "fixing", "role": "action"},
+                {"entity_id": "sora", "role": "actor"},
+            ],
+            "confidence": 0.9,
+            "evidence": whole,
+        },
+    ]
+    if negated is not None:
+        assertions.append(
+            {
+                "predicate": "Negated",
+                "arguments": [{"entity_id": "fixing", "role": "target"}],
+                "polarity": negated,
+                "confidence": 0.9,
+                "evidence": whole,
+            }
+        )
+    return SemanticParseResult.model_validate(
+        {
+            "document": {
+                "document_id": document_id,
+                "corpus_id": "unit-tests",
+                "source_text": source,
+            },
+            "provenance": {
+                **_provenance(),
+                "ontology_versions": list(catalog.versions),
+            },
+            "extraction": {
+                "entities": [
+                    {
+                        "id": "sora",
+                        "entity_type": "Entity",
+                        "mention": {"text": "Sora"},
+                    },
+                    {
+                        "id": "fixing",
+                        "entity_type": "Event",
+                        "kind": "repair",
+                        "mention": {"text": "repaired"},
+                    },
+                ],
+                "assertions": assertions,
+                "rules": [],
+            },
+        }
+    )
+
+
+def _signs(document) -> dict[str, str]:
+    return {
+        fact.provisional_relation_id or fact.predicate: fact.polarity
+        for fact in document.assertions
+    }
+
+
+def test_negated_declared_event_signs_the_facts_that_say_it_happened() -> None:
+    done = _adapt(
+        _declared_event_result("done", "The lamp was repaired by Sora.", negated=None)
+    )
+    undone = _adapt(
+        _declared_event_result(
+            "undone", "The lamp was not repaired by Sora.", negated="positive"
+        )
+    )
+
+    assert _signs(done) == {
+        "Event": "positive",
+        "Agent": "positive",
+        "kind_repair": "positive",
+    }
+    assert _signs(undone) == {
+        "Event": "negative",
+        "Agent": "positive",
+        "Negated": "positive",
+        "kind_repair": "negative",
+    }
+
+
+def test_double_negation_is_refused() -> None:
+    result = _declared_event_result(
+        "double",
+        "It is not true that the lamp was repaired by Sora.",
+        negated="negative",
+    )
+
+    with pytest.raises(MinerAdapterError, match="double negation"):
+        _adapt(result)
+
+
+def test_negated_declared_event_never_matches_the_done_pattern(tmp_path: Path) -> None:
+    """Real PeTTa: the repair that did not happen is not found as a repair."""
+
+    petta = os.environ.get("PETTA_ROOT", "")
+    miner = os.environ.get("MINER_ROOT", "")
+    if not petta or not miner:
+        pytest.skip("PETTA_ROOT and MINER_ROOT are not set")
+    from hybrid_miner.emission import symbols
+    from hybrid_miner.emission.emit_petta import emit_petta
+    from hybrid_miner.mining.admitted_support import mine_admitted_support
+    from hybrid_miner.mining.exact_matches import _query_bindings
+
+    from symbolic_pipeline.miner_bundle import load_catalog_bundle
+
+    _, bundle = load_catalog_bundle()
+    documents = [
+        _adapt(_declared_event_result(name, source, negated=negated))
+        for name, source, negated in (
+            ("done", "The lamp was repaired by Sora.", None),
+            ("done-too", "The bike was repaired by Sora.", None),
+            ("undone", "The lamp was not repaired by Sora.", "positive"),
+        )
+    ]
+    source = tmp_path / "documents.jsonl"
+    source.write_text(
+        "".join(document.canonical_json() + "\n" for document in documents),
+        encoding="utf-8",
+    )
+    paths = {
+        "atoms_path": tmp_path / "atoms.metta",
+        "metadata_path": tmp_path / "metadata.metta",
+        "provenance_path": tmp_path / "provenance.jsonl",
+    }
+    emitted = emit_petta(bundle=bundle, input_path=source, **paths)
+    run = mine_admitted_support(
+        bundle=bundle,
+        documents_path=source,
+        emitted_atoms_path=paths["atoms_path"],
+        metadata_path=paths["metadata_path"],
+        provenance_path=paths["provenance_path"],
+        petta_root=Path(petta),
+        miner_root=Path(miner),
+        admitted_atoms_path=tmp_path / "admitted.metta",
+        quarantine_path=tmp_path / "quarantine.jsonl",
+        support_path=tmp_path / "support.jsonl",
+        min_support=2,
+    )
+    assert (run.admission.accepted, run.admission.rejected) == (emitted.facts, 0)
+
+    version = f"{bundle.bundle_id}@{bundle.bundle_version}"
+    kind = "rel:kind_repair"
+    queries = {
+        0: (
+            f"({symbols.fact_head('ProvisionalRelation', version)} {kind} $e)",
+            ("$e",),
+        ),
+        1: (
+            f"({symbols.fact_head('ProvisionalRelation', version, 'negative')} "
+            f"{kind} $e)",
+            ("$e",),
+        ),
+    }
+    found = _query_bindings(
+        queries,
+        atoms_path=tmp_path / "admitted.metta",
+        petta_root=Path(petta),
+        swipl="swipl",
+        timeout_seconds=120,
+    )
+
+    def event(name: str) -> tuple[str]:
+        return (symbols.entity_symbol("unit-tests", name, "fixing"),)
+
+    assert sorted(found[0]) == sorted([event("done"), event("done-too")])
+    assert found[1] == [event("undone")]

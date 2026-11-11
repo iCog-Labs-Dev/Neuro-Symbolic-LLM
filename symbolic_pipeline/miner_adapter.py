@@ -18,6 +18,11 @@ records. Each SemanticParseResult becomes one SemanticDocument:
   miner names the head in the parser's scope order, so "must not leave"
   (Obligation (Not ...)) and "may not leave" (Not (Permission ...)) are both
   prohibitions;
+- ``Negated(e)`` on a declared event or proposition stays a fact, and the
+  facts that say e exists (its kind fact and ``Event(e)``) become negative,
+  so "the repair did not happen" never supports a pattern over repairs that
+  happened. A ``Negated`` fact that is itself negative is a double negation
+  with no clear reading and is refused;
 - content the miner contract cannot express raises MinerAdapterError: modality
   inside a universal rule, and an Evaluation without participants inside a
   universal rule. A caller that passes ``skipped_rules`` keeps the rest of the
@@ -51,6 +56,10 @@ from parser.semantic.schema import (
 
 _ROLE_PREDICATES: Final = {"agent": "Agent", "patient": "Patient", "time": "Time"}
 _PROVISIONAL: Final = "ProvisionalRelation"
+_NEGATED: Final = "Negated"
+# Unary catalog facts that only say their argument exists. Proposition is an
+# entity type only (the parser refuses it as a predicate), so Event is the one.
+_EXISTENCE: Final = frozenset({"Event"})
 _STATUS: Final = "extracted-hypothesis"
 
 
@@ -77,6 +86,7 @@ def to_semantic_document(
     try:
         builder = _SemanticDocumentBuilder(result)
         builder.add_entities()
+        builder.find_negated_targets()
 
         for assertion in result.extraction.assertions:
             builder.add_assertion(assertion)
@@ -121,6 +131,7 @@ class _SemanticDocumentBuilder:
     counters: dict[str, int] = field(default_factory=dict)
     conditional_clauses: dict[tuple, str] = field(default_factory=dict)
     skipped: list[SemanticRule] = field(default_factory=list)
+    negated: set[str] = field(default_factory=set)
 
     def _span(self, quote: SourceQuote) -> SourceSpan:
         """Convert a quote into a character span of the source text."""
@@ -161,6 +172,19 @@ class _SemanticDocumentBuilder:
 
             self.entity_types[entity.id] = entity.entity_type
 
+    def find_negated_targets(self) -> None:
+        """Remember every entity a standalone ``Negated`` fact says did not hold."""
+
+        for assertion in self.result.extraction.assertions:
+            if assertion.predicate != _NEGATED:
+                continue
+            if assertion.polarity == "negative":
+                raise MinerAdapterError(
+                    "Negated with negative polarity is a double negation; "
+                    "state the negation once"
+                )
+            self.negated.update(argument.entity_id for argument in assertion.arguments)
+
     def add_fact(
         self,
         predicate: str,
@@ -200,12 +224,17 @@ class _SemanticDocumentBuilder:
             self.add_evaluation(assertion, conditional_on=conditional_on)
             return
 
+        arguments = [argument.entity_id for argument in assertion.arguments]
+        polarity = assertion.polarity
+        if assertion.predicate in _EXISTENCE and self.negated.issuperset(arguments):
+            polarity = "negative"
+
         self.add_fact(
             assertion.predicate,
-            [argument.entity_id for argument in assertion.arguments],
+            arguments,
             assertion,
             conditional_on=conditional_on,
-            polarity=assertion.polarity,
+            polarity=polarity,
             modality=assertion.modality,
         )
 
@@ -422,6 +451,7 @@ class _SemanticDocumentBuilder:
                     argument_types=(entity.entity_type,),
                     status=_STATUS,
                     factuality=None,
+                    polarity="negative" if entity.id in self.negated else "positive",
                     confidence=min(confidences[entity.id]),
                     source_spans=(self._span(entity.mention),),
                     provisional_relation_id=f"kind_{entity.kind}",
