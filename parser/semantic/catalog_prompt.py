@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -39,6 +40,9 @@ class DiscoursePrompt:
 # ---------------------------------------------------------------------------
 # Ontology rendering
 # ---------------------------------------------------------------------------
+
+
+_INPUT_HEADING = re.compile(r"^[ \t]*## \d+\. INPUT\b", re.MULTILINE)
 
 
 def _general_catalog_versions(
@@ -396,12 +400,13 @@ def build_routed_extraction_prompt(
     # Keep the shared general instructions in one place.
     # Insert the discourse extension before the source input
     # so the source is not sent twice.
-    source_marker = "## 13. INPUT"
-
-    if source_marker not in general.text:
+    # Match the heading by its name, so renumbering the sections cannot break it.
+    markers = list(_INPUT_HEADING.finditer(general.text))
+    if not markers:
         raise ValueError("General prompt must contain an INPUT section")
 
-    general_instructions, input_section = general.text.rsplit(source_marker, 1)
+    start = markers[-1].start()
+    general_instructions, input_section = general.text[:start], general.text[start:]
 
     combined = (
         discourse_guidance
@@ -469,7 +474,6 @@ def build_routed_extraction_prompt(
     Do not return a separate DiscourseExtraction object.
     """
         + "\n\n"
-        + source_marker
         + input_section
     )
 
