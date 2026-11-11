@@ -20,7 +20,9 @@ records. Each SemanticParseResult becomes one SemanticDocument:
   prohibitions;
 - content the miner contract cannot express raises MinerAdapterError: modality
   inside a universal rule, and an Evaluation without participants inside a
-  universal rule.
+  universal rule. A caller that passes ``skipped_rules`` keeps the rest of the
+  document instead: such a rule is left out and its reason is added to the
+  list, so one "Every visitor must sign" does not lose the whole document.
 """
 
 from __future__ import annotations
@@ -56,11 +58,20 @@ class MinerAdapterError(ValueError):
     """The parse result cannot be written in hybrid-miner's document contract."""
 
 
-def to_semantic_document(result: SemanticParseResult) -> SemanticDocument:
+class UnsupportedRuleError(MinerAdapterError):
+    """A universal rule is valid, but the miner rule contract cannot hold it."""
+
+
+def to_semantic_document(
+    result: SemanticParseResult, *, skipped_rules: list[str] | None = None
+) -> SemanticDocument:
     """Convert one validated parse into hybrid-miner's SemanticDocument.
 
     Raises MinerAdapterError when the result uses something the miner
-    contract cannot express.
+    contract cannot express. With ``skipped_rules``, a universal rule the
+    miner rule contract cannot hold is left out instead, and its reason is
+    appended to that list; the document is still refused when nothing else
+    is left in it.
     """
 
     try:
@@ -71,10 +82,22 @@ def to_semantic_document(result: SemanticParseResult) -> SemanticDocument:
             builder.add_assertion(assertion)
 
         for rule in result.extraction.rules:
-            if rule.scope == "universal":
-                builder.add_universal_rule(rule)
-            else:
+            if rule.scope != "universal":
                 builder.add_specific_rule(rule)
+                continue
+            try:
+                builder.add_universal_rule(rule)
+            except UnsupportedRuleError as error:
+                if skipped_rules is None:
+                    raise
+                builder.skipped.append(rule)
+                skipped_rules.append(str(error))
+
+        if builder.skipped and not (builder.assertions or builder.rules):
+            raise MinerAdapterError(
+                "Nothing is left after skipping its universal rules: "
+                + "; ".join(skipped_rules or ())
+            )
 
         builder.add_kind_facts()
         return builder.build()
@@ -97,6 +120,7 @@ class _SemanticDocumentBuilder:
     entity_types: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     conditional_clauses: dict[tuple, str] = field(default_factory=dict)
+    skipped: list[SemanticRule] = field(default_factory=list)
 
     def _span(self, quote: SourceQuote) -> SourceSpan:
         """Convert a quote into a character span of the source text."""
@@ -285,6 +309,13 @@ class _SemanticDocumentBuilder:
         variable_types = {
             variable.id: variable.entity_type for variable in rule.variables
         }
+        # Build both sides first: a refused rule must not use up a rule ID.
+        antecedents = tuple(
+            self._rule_literal(part, variable_types) for part in rule.antecedents
+        )
+        consequents = tuple(
+            self._rule_literal(part, variable_types) for part in rule.consequents
+        )
         self.rules.append(
             MinerRule(
                 id=self._next_rule_id(),
@@ -293,14 +324,8 @@ class _SemanticDocumentBuilder:
                     RuleVariable(id=variable.id, type=variable.entity_type)
                     for variable in rule.variables
                 ),
-                antecedents=tuple(
-                    self._rule_literal(part, variable_types)
-                    for part in rule.antecedents
-                ),
-                consequents=tuple(
-                    self._rule_literal(part, variable_types)
-                    for part in rule.consequents
-                ),
+                antecedents=antecedents,
+                consequents=consequents,
                 source_spans=tuple(self._span(quote) for quote in rule.evidence),
             )
         )
@@ -324,7 +349,7 @@ class _SemanticDocumentBuilder:
         """
 
         if part.modality != "none":
-            raise MinerAdapterError(
+            raise UnsupportedRuleError(
                 f"{part.modality} in a universal rule has no encoding "
                 "in the miner contract"
             )
@@ -343,7 +368,7 @@ class _SemanticDocumentBuilder:
 
         if part.predicate == "Evaluation":
             if not identifiers:
-                raise MinerAdapterError(
+                raise UnsupportedRuleError(
                     f"Evaluation {part.relation!r} without participants "
                     "cannot be a universal rule literal"
                 )
@@ -367,8 +392,13 @@ class _SemanticDocumentBuilder:
         """Add one kind fact per entity that has a kind and is used by a fact."""
 
         extraction = self.result.extraction
-        parts = [part for rule in extraction.rules for part in rule.antecedents]
-        parts += [part for rule in extraction.rules for part in rule.consequents]
+        rules = [
+            rule
+            for rule in extraction.rules
+            if not any(rule is skipped for skipped in self.skipped)
+        ]
+        parts = [part for rule in rules for part in rule.antecedents]
+        parts += [part for rule in rules for part in rule.consequents]
 
         confidences: dict[str, list[float]] = {}
         for assertion in [*extraction.assertions, *parts]:

@@ -728,3 +728,149 @@ def test_every_worked_example_reaches_the_miner(tmp_path: Path) -> None:
         min_support=2,
     )
     assert (run.admission.accepted, run.admission.rejected) == (emitted.facts, 0)
+
+
+def _norm_result(*, with_fact: bool, second_rule: bool = False) -> SemanticParseResult:
+    """A universal rule with an obligation, which the miner rule cannot hold."""
+
+    source = "Nora signed the register. Every visitor must sign the register."
+    whole = [{"text": "Every visitor must sign the register."}]
+    visitor = {
+        "predicate": "Evaluation",
+        "relation": "visitor",
+        "arguments": [{"entity_id": "$x", "role": "theme"}],
+        "fallback": True,
+        "factuality": "hypothetical",
+        "confidence": 0.9,
+        "evidence": whole,
+    }
+    sign = {
+        **visitor,
+        "relation": "sign",
+        "arguments": [
+            {"entity_id": "$x", "role": "agent"},
+            {"entity_id": "book", "role": "patient"},
+        ],
+    }
+    rule = {
+        "scope": "universal",
+        "variables": [{"id": "$x", "entity_type": "Entity"}],
+        "antecedents": [visitor],
+        "consequents": [{**sign, "modality": "obligation"}],
+        "evidence": whole,
+    }
+    entities = [
+        {
+            "id": "book",
+            "entity_type": "Entity",
+            "kind": "register",
+            "mention": {"text": "register", "occurrence": 1},
+        }
+    ]
+    assertions = []
+    if with_fact:
+        entities.append(
+            {"id": "nora", "entity_type": "Entity", "mention": {"text": "Nora"}}
+        )
+        assertions.append(
+            {
+                "predicate": "Evaluation",
+                "relation": "sign",
+                "arguments": [{"entity_id": "nora", "role": "agent"}],
+                "fallback": True,
+                "confidence": 0.9,
+                "evidence": [{"text": "Nora signed the register."}],
+            }
+        )
+    rules = [rule, {**rule, "consequents": [sign]}] if second_rule else [rule]
+    return SemanticParseResult.model_validate(
+        {
+            "document": {
+                "document_id": "norm",
+                "corpus_id": "unit-tests",
+                "source_text": source,
+            },
+            "provenance": _provenance(),
+            "extraction": {
+                "entities": entities,
+                "assertions": assertions,
+                "rules": rules,
+            },
+        }
+    )
+
+
+def test_unsupported_universal_rule_is_refused_unless_skipping_is_asked() -> None:
+    from symbolic_pipeline.miner_adapter import to_semantic_document
+
+    result = _norm_result(with_fact=True)
+
+    with pytest.raises(MinerAdapterError, match="obligation in a universal rule"):
+        to_semantic_document(result)
+
+    skipped: list[str] = []
+    document = to_semantic_document(result, skipped_rules=skipped)
+
+    assert len(skipped) == 1 and "obligation in a universal rule" in skipped[0]
+    assert document.rules == ()
+    # "Nora signed" is kept; nothing of the skipped rule becomes a fact
+    relations = [fact.provisional_relation_id for fact in document.assertions]
+    assert relations == ["sign", None]
+    assert [fact.predicate for fact in document.assertions][1] == "Agent"
+
+
+def test_skipping_keeps_supported_rules_and_their_numbering() -> None:
+    from symbolic_pipeline.miner_adapter import to_semantic_document
+
+    skipped: list[str] = []
+    document = to_semantic_document(
+        _norm_result(with_fact=False, second_rule=True), skipped_rules=skipped
+    )
+
+    assert len(skipped) == 1
+    assert [rule.id for rule in document.rules] == ["rule-0"]
+    assert document.rules[0].consequents[0].provisional_relation_id == "sign"
+    # the register is still used by the kept rule, so its kind fact stays
+    assert [fact.provisional_relation_id for fact in document.assertions] == [
+        "kind_register"
+    ]
+
+
+def test_document_with_nothing_left_after_skipping_is_still_refused() -> None:
+    from symbolic_pipeline.miner_adapter import to_semantic_document
+
+    with pytest.raises(MinerAdapterError, match="Nothing is left after skipping"):
+        to_semantic_document(_norm_result(with_fact=False), skipped_rules=[])
+
+
+def test_export_lists_skipped_rules_only_when_asked(tmp_path: Path) -> None:
+    from symbolic_pipeline.document_export import export_semantic_documents
+    from symbolic_pipeline.miner_bundle import load_catalog_bundle
+
+    catalog, bundle = load_catalog_bundle()
+    result = _norm_result(with_fact=True)
+    provenance = result.provenance.model_copy(
+        update={"ontology_versions": list(catalog.versions)}
+    )
+    source = tmp_path / "results.jsonl"
+    source.write_text(
+        result.model_copy(update={"provenance": provenance}).model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+
+    strict = export_semantic_documents(
+        source, tmp_path / "strict.jsonl", tmp_path / "strict.rej", bundle=bundle
+    )
+    assert (strict.accepted, strict.rejected, strict.skipped_rules) == (0, 1, 0)
+
+    kept = export_semantic_documents(
+        source,
+        tmp_path / "kept.jsonl",
+        tmp_path / "kept.rej",
+        bundle=bundle,
+        skipped_path=tmp_path / "kept.skipped.jsonl",
+    )
+    assert (kept.accepted, kept.rejected, kept.skipped_rules) == (1, 0, 1)
+    line = json.loads((tmp_path / "kept.skipped.jsonl").read_text(encoding="utf-8"))
+    assert line["document_id"] == "norm"
+    assert "obligation in a universal rule" in line["skipped_rules"][0]
