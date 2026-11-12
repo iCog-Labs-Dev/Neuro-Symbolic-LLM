@@ -771,7 +771,7 @@ def test_communication_samples_real_updates_without_replay(
         assert report["copy_ratio_of_means_percent"] == pytest.approx(
             100 * 0.00003 / sampled[0]["step_time"]
         )
-        assert "Communication during training:" in caplog.text
+        assert "CUDA copies during training:" in caplog.text
     weights = load_params(tmp_path / "a4/checkpoints/a4-final.npz")
     initial = init_params(run.model, run.config.training.seed)
     assert any(

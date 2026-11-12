@@ -40,13 +40,14 @@ def _copy_sample(retriever, enabled):
         yield sample
 
 
-def _communication_summary(samples, *, log_summary=True):
+def _communication_summary(samples):
+    """Aggregate recorded copy intervals without rerunning or logging work."""
     if not samples:
         return {"status": "not_measured", "samples": 0}
     steps = math.fsum(row["step_seconds"] for row in samples)
     d2h = math.fsum(row["d2h_gpu_seconds"] for row in samples)
     h2d = math.fsum(row["h2d_gpu_seconds"] for row in samples)
-    report = {
+    return {
         "status": "measured",
         "samples": len(samples),
         "gpu_to_cpu_mean_ms": 1000 * d2h / len(samples),
@@ -58,11 +59,17 @@ def _communication_summary(samples, *, log_summary=True):
         "denominator": "Same instrumented training steps; excludes first 10 updates and first use of each input shape",
         "excluded": "CPU search and host dispatch/waits outside CUDA event brackets; not a full bridge overhead qualification",
     }
-    if not log_summary:
-        return report
+
+
+def _log_communication(report):
+    if report["status"] != "measured":
+        log.info(
+            "CUDA copies: no sampled updates (disabled, unsupported backend, or run too short)"
+        )
+        return
     log.info(
-        "Communication during training: %d sampled updates | GPU->CPU %.3f ms | "
-        "CPU->GPU %.3f ms | copies %.3f ms / sampled step %.3f ms = %.2f%%",
+        "CUDA copies during training: %d sampled updates | GPU->CPU %.3f ms | "
+        "CPU->GPU %.3f ms | copies %.3f ms / instrumented step %.3f ms = %.2f%%",
         report["samples"],
         report["gpu_to_cpu_mean_ms"],
         report["cpu_to_gpu_mean_ms"],
@@ -70,8 +77,6 @@ def _communication_summary(samples, *, log_summary=True):
         report["sampled_step_mean_ms"],
         report["copy_ratio_of_means_percent"],
     )
-    log.info("Copy intervals only; instrumented steps, not full bridge overhead.")
-    return report
 
 
 def init_params(model: A4Model, seed: int) -> dict[str, Any]:
@@ -335,6 +340,7 @@ def train(
         log.info("%s", columns)
         epoch_communication = _communication_summary(epoch_samples)
         writer.log("communication", epoch=epoch + 1, **epoch_communication)
+        _log_communication(epoch_communication)
         validation = evaluate(
             model,
             frozen_residual,
@@ -363,9 +369,7 @@ def train(
         "validation_ce_change": validation["loss"] - initial_validation["loss"],
         "training_examples": len(data.train),
         "alignment": data.provenance.get("alignment", {}),
-        "communication": _communication_summary(
-            communication_samples, log_summary=False
-        ),
+        "communication": _communication_summary(communication_samples),
         "training_step_mean_ms": (
             1000 * math.fsum(step_times[1:]) / (len(step_times) - 1)
             if len(step_times) > 1
@@ -404,11 +408,6 @@ def train(
         )
     else:
         log.info("Latency: insufficient updates for a mean excluding the first update")
-    if communication_samples:
-        _communication_summary(communication_samples)
-    if not communication_samples:
-        log.info(
-            "Communication: no sampled updates (disabled, unsupported backend, or run too short)"
-        )
+    _log_communication(results["communication"])
     log.info("Saved run: %s", writer.dir)
     return results

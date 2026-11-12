@@ -302,26 +302,23 @@ def main(
             training_log.setFormatter(logging.Formatter("%(message)s"))
             logger.addHandler(training_log)
             try:
-                try:
-                    train(
-                        model,
-                        frozen_residual,
-                        data,
-                        bank,
-                        config,
-                        writer,
-                        max_grad_norm=args.max_grad_norm,
-                        latency_every=0 if args.skip_latency else args.latency_every,
-                    )
-                    writer.write_json(
-                        "status.json", {"stage": "A4", "status": "completed"}
-                    )
-                except BaseException as error:
-                    writer.write_json(
-                        "status.json",
-                        {"stage": "A4", "status": "failed", "error": str(error)},
-                    )
-                    raise
+                train(
+                    model,
+                    frozen_residual,
+                    data,
+                    bank,
+                    config,
+                    writer,
+                    max_grad_norm=args.max_grad_norm,
+                    latency_every=0 if args.skip_latency else args.latency_every,
+                )
+                writer.write_json("status.json", {"stage": "A4", "status": "completed"})
+            except BaseException as error:
+                writer.write_json(
+                    "status.json",
+                    {"stage": "A4", "status": "failed", "error": str(error)},
+                )
+                raise
             finally:
                 logger.removeHandler(training_log)
                 training_log.close()

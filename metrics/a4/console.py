@@ -1,4 +1,4 @@
-"""Console A4 evaluation summaries without a numerical runtime."""
+"""Readable A4 training and evaluation output without a numerical runtime."""
 
 from __future__ import annotations
 
@@ -12,33 +12,6 @@ def training_row(batch: int, batches: int, metrics: dict[str, Any]) -> str:
         f"{f'{batch}/{batches}':>12} {metrics['total']:>14.6f} "
         f"{metrics['task']:>14.6f} {metrics['symbolic']:>14.6f} {ppl:>12}"
     )
-
-
-def latency_lines(reports: list[dict[str, Any]]):
-    """Shared readable timings for standalone and post-training measurements."""
-    for report in reports:
-        yield (
-            f"A4 {report['mode']} | samples={report['samples']} | "
-            f"mean step={report['step_mean_ms']:.3f} ms"
-        )
-        for name, prefix in (
-            ("Full bridge", "full_round_trip"),
-            ("Bridge minus CPU search", "communication"),
-        ):
-            yield (
-                f"{name}: {report[f'{prefix}_mean_ms']:.3f} ms | "
-                f"mean share={report[f'{prefix}_ratio_of_means_percent']:.2f}% | "
-                f"paired p95 share={report[f'{prefix}_paired_ratio_p95_percent']:.2f}%"
-            )
-        if "cuda_transfers" in report:
-            copies = report["cuda_transfers"]
-            yield (
-                f"CUDA copy intervals only: {copies['transfer_only_mean_ms']:.3f} ms | "
-                f"mean share={copies['transfer_only_ratio_of_means_percent']:.2f}% | "
-                f"paired p95 share={copies['transfer_only_paired_ratio_p95_percent']:.2f}%"
-            )
-        else:
-            yield "CUDA copy intervals: not recorded"
 
 
 def print_result(command: str, result: dict[str, Any]) -> None:
@@ -84,8 +57,29 @@ def print_result(command: str, result: dict[str, Any]) -> None:
             f"Hit rate={scores['hit_rate']:.4f} MRR={scores['mean_reciprocal_rank']:.4f}"
         )
     else:
-        for line in latency_lines(result["reports"]):
-            print(line)
+        for report in result["reports"]:
+            print(
+                f"A4 {report['mode']} | samples={report['samples']} | "
+                f"mean step={report['step_mean_ms']:.3f} ms"
+            )
+            for name, prefix in (
+                ("Full bridge", "full_round_trip"),
+                ("Bridge minus CPU search", "communication"),
+            ):
+                print(
+                    f"{name}: {report[f'{prefix}_mean_ms']:.3f} ms | "
+                    f"mean share={report[f'{prefix}_ratio_of_means_percent']:.2f}% | "
+                    f"paired p95 share={report[f'{prefix}_paired_ratio_p95_percent']:.2f}%"
+                )
+            if "cuda_transfers" in report:
+                copies = report["cuda_transfers"]
+                print(
+                    f"CUDA copy intervals only: {copies['transfer_only_mean_ms']:.3f} ms | "
+                    f"mean share={copies['transfer_only_ratio_of_means_percent']:.2f}% | "
+                    f"paired p95 share={copies['transfer_only_paired_ratio_p95_percent']:.2f}%"
+                )
+            else:
+                print("CUDA copy intervals: not recorded")
     print(result["scope"])
 
 
