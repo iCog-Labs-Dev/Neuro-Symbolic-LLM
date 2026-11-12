@@ -35,7 +35,16 @@ def test_show_reports_recorded_losses_without_creating_artifacts(tmp_path, capsy
     write_json(tmp_path / "results.json", {"stage": "A4", "validation": {"loss": 3}})
     records = [
         {"event": "eval", "split": "validation", "epoch": 0, "loss": 2, "ppl": 7.389},
-        {"event": "train", "step": 5, "task": 1, "key": 2, "value": 3},
+        {
+            "event": "train",
+            "step": 5,
+            "task": 1,
+            "key": 2,
+            "value": 3,
+            "total": 6,
+            "gradient_norm": 10,
+            "step_time": 0.03,
+        },
         {"event": "eval", "split": "validation", "epoch": 1, "loss": 3, "ppl": 20.086},
     ]
     (tmp_path / "metrics.jsonl").write_text(
@@ -46,6 +55,9 @@ def test_show_reports_recorded_losses_without_creating_artifacts(tmp_path, capsy
     printed = capsys.readouterr().out
     assert "CE=2.000000" in printed and "CE=3.000000" in printed
     assert "Last update 5" in printed
+    assert "Total loss=6.000000" in printed
+    assert "before clipping)=10.000000" in printed
+    assert "30.000 ms" in printed
     assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
 
 
@@ -164,7 +176,9 @@ def test_malformed_input_exits_with_cli_error(tmp_path, capsys):
     assert "error:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("command", ["", "measure-latency", "measure-retrieval"])
+@pytest.mark.parametrize(
+    "command", ["", "measure-latency", "measure-retrieval", "report"]
+)
 def test_module_cli_needs_no_numeric_runtime(command):
     code = (
         "import runpy,sys\n"
@@ -241,7 +255,13 @@ def test_retrieval_measurement_dispatches_to_checkpoint_evaluator(
 
     calls = []
     write_json(
-        tmp_path / "result.json", {"reports": [], "scope": "reference evaluation"}
+        tmp_path / "result.json",
+        {
+            "status": "completed",
+            "contract_version": "a4-retrieval-evaluation-v1",
+            "reports": [],
+            "scope": "reference evaluation",
+        },
     )
 
     def measure(run, probes, **settings):
@@ -253,3 +273,225 @@ def test_retrieval_measurement_dispatches_to_checkpoint_evaluator(
     assert calls[0][1] == Path("probes.json")
     assert not calls[0][2]["allow_source_change"]
     assert "reference evaluation" in capsys.readouterr().out
+
+
+def test_representation_report_prints_alignment_and_undefined_factors(tmp_path, capsys):
+    write_json(
+        tmp_path / "result.json",
+        {
+            "status": "completed",
+            "contract_version": "a4-representation-v1",
+            "reports": [
+                {
+                    "condition": "trained",
+                    "ce": 2,
+                    "ppl": 7.389,
+                    "kl_base_to_model": 0.1,
+                    "next_token_accuracy": 0.5,
+                    "next_token_targets": 20,
+                    "layers": [
+                        {
+                            "layer": 6,
+                            "reference_pair_key_nll": 4,
+                            "reference_pair_value_squared_error": 5,
+                            "alignment_reference_pairs": 10,
+                            "retrieval": [],
+                            "query_clusters": {"silhouette": -0.1},
+                            "writeback_to_hidden_norm_mean": 0.2,
+                            "writeback_nonzero_fraction": 1,
+                            "factor_organization": {
+                                "fracture": [0.5, 1, None],
+                                "mean_off_diagonal_overlap": 0.6,
+                                "factors": 3,
+                                "components": 2,
+                                "zero_effect_factor_indices": [2],
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    write_json(
+        tmp_path / "capacity.json",
+        {
+            "6": {
+                "controls": [
+                    {
+                        "dimensions": 16,
+                        "bank_size": 100,
+                        "available_reference_pair_fraction": 0.8,
+                        "scores": [
+                            {
+                                "top_k": 8,
+                                "all_probe_precision": 0.25,
+                                "positive_macro_recall": 0.5,
+                            }
+                        ],
+                    }
+                ],
+                "ann_exact_id_agreement_at_8": 0.75,
+            }
+        },
+    )
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    assert main(["report", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert "key NLL=4.000000" in text
+    assert "value squared error=5.000000" in text
+    assert "mean fracture=0.750000" in text
+    assert "mean pair overlap=0.600000" in text
+    assert "zero-effect factors=1" in text
+    assert "Query silhouette=-0.100000" in text
+    assert "dimensions=16 bank=100" in text
+    assert "reference coverage=80.00%" in text
+    assert "ID agreement=75.00%" in text
+    assert "no new inference" in text
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_saved_retrieval_report_preserves_positive_and_negative_denominators(
+    tmp_path, capsys
+):
+    path = write_json(
+        tmp_path / "result.json",
+        {
+            "status": "completed",
+            "contract_version": "a4-retrieval-evaluation-v1",
+            "reports": [
+                {
+                    "condition": "trained",
+                    "causal_window_ce": 2,
+                    "next_token_targets": 20,
+                    "layers": [
+                        {
+                            "layer": 6,
+                            "scores": [
+                                {
+                                    "top_k": 8,
+                                    "positive_probes": 3,
+                                    "known_negative_probes": 1,
+                                    "all_probe_micro_precision": 0.25,
+                                    "positive_only": {
+                                        "macro_recall": 0.5,
+                                        "hit_rate": 1,
+                                        "mean_reciprocal_rank": 0.75,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert main(["report", str(path)]) == 0
+    text = capsys.readouterr().out
+    assert "precision(all)=25.00%" in text
+    assert "recall(positive)=50.00%" in text
+    assert "3 positive, 1 known negative" in text
+
+
+def test_saved_latency_report_reuses_sample_validation(timing_file, capsys):
+    assert main(["report", str(timing_file)]) == 0
+    text = capsys.readouterr().out
+    assert "CUDA copy intervals only" in text
+    assert "no new inference" in text
+
+
+@pytest.mark.parametrize("kind", ["latency", "retrieval", "representation"])
+def test_fresh_and_saved_evaluations_share_console_summary(
+    kind, timing_file, monkeypatch, capsys
+):
+    from importlib import import_module
+
+    module = import_module(
+        "stages.stage_A.a4."
+        + {
+            "latency": "benchmark",
+            "retrieval": "evaluation",
+            "representation": "diagnostics",
+        }[kind]
+    )
+    if kind != "latency":
+        write_json(
+            timing_file,
+            {
+                "status": "completed",
+                "contract_version": {
+                    "retrieval": "a4-retrieval-evaluation-v1",
+                    "representation": "a4-representation-v1",
+                }[kind],
+                "reports": [],
+                "scope": "Shared evaluation summary",
+            },
+        )
+    monkeypatch.setattr(
+        module, f"measure_{kind}", lambda *args, **kwargs: timing_file.parent
+    )
+    before = {path.name: path.read_bytes() for path in timing_file.parent.iterdir()}
+    arguments = [f"measure-{kind}", str(timing_file.parent)]
+    if kind != "latency":
+        arguments.extend(["--probes", "probes.json"])
+    assert main(arguments) == 0
+    fresh = capsys.readouterr().out
+    fresh = "\n".join(
+        line for line in fresh.splitlines() if not line.startswith("Selected A4 run:")
+    ).strip()
+    assert main(["report", str(timing_file)]) == 0
+    saved = capsys.readouterr().out.split("Saved evaluation:")[0].strip()
+    assert fresh == saved
+    assert {
+        path.name: path.read_bytes() for path in timing_file.parent.iterdir()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "running", "contract_version": "a4-representation-v1"},
+        {"status": "completed", "contract_version": "unrelated"},
+    ],
+)
+def test_saved_report_rejects_incomplete_or_unknown_measurements(tmp_path, payload):
+    path = write_json(tmp_path / "result.json", payload)
+    with pytest.raises(SystemExit) as error:
+        main(["report", str(path)])
+    assert error.value.code == 2
+
+
+def test_representation_cli_dispatches_without_loading_numeric_runtime(
+    tmp_path, monkeypatch
+):
+    from types import ModuleType
+
+    calls = []
+    module = ModuleType("stages.stage_A.a4.diagnostics")
+
+    def measure(run, probes, **kwargs):
+        calls.append((run, probes, kwargs))
+        (tmp_path / "result.json").write_text(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "contract_version": "a4-representation-v1",
+                    "reports": [],
+                }
+            )
+        )
+        return tmp_path
+
+    module.measure_representation = measure
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert (
+        main(
+            [
+                "measure-representation",
+                str(tmp_path),
+                "--probes",
+                str(tmp_path / "probes.json"),
+            ]
+        )
+        == 0
+    )
+    assert calls[0][2]["maximum_factors"] == 32

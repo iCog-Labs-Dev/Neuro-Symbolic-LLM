@@ -1,8 +1,17 @@
-"""A4 latency boundaries and labelled retrieval calculations."""
+"""A4 latency, retrieval and representation metric calculations."""
 
+import numpy as np
 import pytest
 
 from metrics.a4.latency import summarize_latency, summarize_transfers
+from metrics.a4.representation import (
+    capacity_sensitivity,
+    cosine_geometry,
+    factor_organization,
+    key_log_probabilities,
+    query_silhouette,
+    select_factors,
+)
 from metrics.a4.retrieval import retrieval_metrics
 
 
@@ -147,3 +156,77 @@ def test_empty_return_is_counted_as_a_miss():
 def test_rejects_ambiguous_or_invalid_accounting(predictions, targets):
     with pytest.raises(ValueError):
         retrieval_metrics(predictions, targets)
+
+
+def test_fracture_overlap_and_zero_effects():
+    result = factor_organization([[1, 0], [0, 2], [1, 1], [0, 0]])
+    assert result["fracture"] == [0.5, 0.5, 1.0, None]
+    assert result["valid_factor_indices"] == [0, 1, 2]
+    np.testing.assert_allclose(
+        result["overlap_matrix"], [[1, 0, 0.5], [0, 1, 0.5], [0.5, 0.5, 1]]
+    )
+    assert result["mean_off_diagonal_overlap"] == pytest.approx(1 / 3)
+    empty = factor_organization([[0, 0]])
+    assert empty["overlap_matrix"] == []
+    assert empty["mean_off_diagonal_overlap"] is None
+
+
+@pytest.mark.parametrize("value", [[[-1, 1]], [[float("nan"), 0]], [], [1, 2]])
+def test_invalid_effects_are_rejected(value):
+    with pytest.raises(ValueError):
+        factor_organization(value)
+
+
+def test_cosine_geometry_excludes_self_and_duplicate_pair_counts():
+    result = cosine_geometry([[1, 0], [2, 0], [0, 3]], block_size=1)
+    assert result["pairs"] == 3
+    assert result["mean_cosine"] == pytest.approx(1 / 3)
+    assert result["mean_squared_cosine"] == pytest.approx(1 / 3)
+    assert result["norm_max"] == 3
+    assert cosine_geometry([[1, 0]])["mean_cosine"] is None
+    with pytest.raises(ValueError, match="zero"):
+        cosine_geometry([[0, 0]])
+
+
+def test_key_probability_uses_raw_dot_and_is_numerically_stable():
+    result = key_log_probabilities([[1000, 0]], [[1, 0], [2, 0]])
+    np.testing.assert_allclose(result, [[-1000, 0]])
+    with pytest.raises(ValueError, match="dimensions"):
+        key_log_probabilities([[1]], [[1, 2]])
+
+
+def test_silhouette_and_multilabel_memberships():
+    queries = [[0, 0], [0, 0], [10, 0], [10, 0]]
+    result = query_silhouette(queries, [["a"], ["a"], ["b"], ["b"]])
+    assert result["silhouette"] == 1
+    result = query_silhouette([[0], [0]], [["a", "b"], ["a", "b"]])
+    assert result["memberships"] == 4
+    assert result["silhouette"] == 0
+    assert query_silhouette([[0], [1]], [["a"], ["b"]])["silhouette"] is None
+    with pytest.raises(ValueError, match="Unique"):
+        query_silhouette([[0]], [["a", "a"]])
+
+
+def test_factors_require_cross_document_support_and_ignore_model_scores():
+    probes = [
+        {"corpus_id": "c", "document_id": "one", "relevant_ids": ["a", "b"]},
+        {"corpus_id": "c", "document_id": "one", "relevant_ids": ["a", "b"]},
+        {"corpus_id": "c", "document_id": "two", "relevant_ids": ["a", "c"]},
+    ]
+    names, support = select_factors(probes)
+    assert names == ["a"] and support == {"a": [0, 1, 2]}
+
+
+def test_capacity_controls_use_exact_cosine_and_preserve_full_dimension():
+    vectors = np.eye(64)[:3]
+    result = capacity_sensitivity(
+        vectors[:2], vectors, ["a", "b", "c"], [["a"], ["b"]], np.eye(64)
+    )
+    full = next(row for row in result["controls"] if row["dimensions"] == 64)
+    assert full["scores"][0]["all_probe_precision"] == 1
+    assert full["available_reference_pair_fraction"] == 1
+    assert result["ann_exact_id_agreement_at_8"] is None
+    with pytest.raises(ValueError, match="reference"):
+        capacity_sensitivity(
+            vectors[:2], vectors, ["a", "b", "c"], [["missing"], ["b"]], np.eye(64)
+        )

@@ -351,8 +351,3 @@ The suite in [`tests/residual/`](../../tests/residual/) covers the adapter, the 
 - **Zero-residual start**: adapted logits equal base logits at init; non-adapted blocks and intermediates are untouched.
 - **Strict configuration**: invalid layers or bounds and unknown config keys raise `ValueError`.
 - **Reproducibility**: a written `config.yaml` loads back to an equal `RunConfig`.
-
-## Stage A4 training
-
-See the [A4 guide](a4/README.md) for data preparation, training, checkpoints,
-retrieval quality and latency measurements.

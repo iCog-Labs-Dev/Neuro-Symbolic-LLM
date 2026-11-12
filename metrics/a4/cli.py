@@ -1,4 +1,4 @@
-"""Inspect A4 runs and evaluate retrieval quality or latency."""
+"""Inspect A4 runs and evaluate retrieval, latency and representations."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from metrics.a4.console import print_representation, print_result, print_retrieval
 from metrics.a4.latency import summarize_latency, summarize_transfers
 from metrics.a4.retrieval import retrieval_metrics
 
@@ -190,66 +191,31 @@ def inspect_latency(path: Path) -> dict[str, Any]:
     }
 
 
-def _print_result(command: str, result: dict[str, Any]) -> None:
-    if command == "list":
-        if not result["runs"]:
-            print("No A4 training runs found")
-        for row in result["runs"]:
-            print(f"{row['status']:12} {row['path']}")
-    elif command == "show":
-        print(f"A4 status: {result['status']['status']}")
-        if not result["results_available"]:
-            print("Final results: not recorded")
-        for row in result["evaluations"]:
-            print(
-                f"{row['split']} epoch {row['epoch']}: "
-                f"CE={row['loss']:.6f} PPL={row['ppl']:.4f}"
-            )
-        row = result["latest_training"]
-        if row:
-            print(
-                f"Last update {row['step']}: CE={row['task']:.6f} "
-                f"key={row['key']:.6f} value={row['value']:.6f}"
-            )
-        print(result["retrieval_quality"])
-    elif command == "retrieval":
-        scores = result["metrics"]
-        print(
-            f"A4 {result['measurement']} | split={result['split']} | probes={scores['query_count']}"
-        )
-        print(
-            f"Macro precision={scores['macro_precision']:.4f} recall={scores['macro_recall']:.4f}"
-        )
-        print(
-            f"Micro precision={scores['micro_precision']:.4f} recall={scores['micro_recall']:.4f}"
-        )
-        print(
-            f"Hit rate={scores['hit_rate']:.4f} MRR={scores['mean_reciprocal_rank']:.4f}"
-        )
+def _print_evaluation(path: Path) -> None:
+    """Use the same summary for fresh and previously saved evaluations."""
+    path = path / "result.json" if path.is_dir() else path
+    result = _read(path)
+    if result.get("status") != "completed":
+        raise ValueError("Expected a completed evaluation")
+    contract = result.get("contract_version")
+    if contract == "a4-representation-v1":
+        capacity = result.get("capacity")
+        if capacity is None and (path.parent / "capacity.json").is_file():
+            capacity = _read(path.parent / "capacity.json")
+        print_representation(result, capacity=capacity)
+    elif contract == "a4-retrieval-evaluation-v1":
+        print_retrieval(result)
+    elif "samples" in result and result.get("checkpoint_sha256"):
+        print_result("latency", inspect_latency(path))
     else:
-        for report in result["reports"]:
-            print(
-                f"A4 {report['mode']} | samples={report['samples']} | mean step={report['step_mean_ms']:.3f} ms"
-            )
-            for name, prefix in (
-                ("Full bridge", "full_round_trip"),
-                ("Bridge minus CPU search", "communication"),
-            ):
-                print(
-                    f"{name}: {report[f'{prefix}_mean_ms']:.3f} ms | "
-                    f"mean share={report[f'{prefix}_ratio_of_means_percent']:.2f}% | "
-                    f"paired p95 share={report[f'{prefix}_paired_ratio_p95_percent']:.2f}%"
-                )
-            if "cuda_transfers" in report:
-                copies = report["cuda_transfers"]
-                print(
-                    f"CUDA copy intervals only: {copies['transfer_only_mean_ms']:.3f} ms | "
-                    f"mean share={copies['transfer_only_ratio_of_means_percent']:.2f}% | "
-                    f"paired p95 share={copies['transfer_only_paired_ratio_p95_percent']:.2f}%"
-                )
-            else:
-                print("CUDA copy intervals: not recorded")
-    print(result["scope"])
+        raise ValueError("Expected an A4 retrieval, representation or latency result")
+
+
+def print_saved_evaluation(path: Path) -> None:
+    """Display a completed evaluation without running the model or changing files."""
+    _print_evaluation(path)
+    print(f"Saved evaluation: {path}")
+    print("Read saved measurements only; no new inference or weight updates")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -258,6 +224,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     listing = commands.add_parser("list", help="List A4 training runs")
     listing.add_argument("path", type=Path, nargs="?", default=Path("runs"))
     listing.add_argument("--json", action="store_true")
+    report = commands.add_parser(
+        "report", help="Display a completed A4 evaluation as readable text"
+    )
+    report.add_argument("path", type=Path, help="Evaluation directory or result.json")
     for name, help_text in (
         ("show", "Show a saved A4 run's losses, evaluation and status"),
         ("retrieval", "Score explicitly labelled, already retrieved template IDs"),
@@ -316,8 +286,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     retrieval.add_argument("--output", type=Path)
     retrieval.add_argument("--native-library", type=Path)
     retrieval.add_argument("--allow-source-change", action="store_true")
+    representation = commands.add_parser(
+        "measure-representation",
+        help="Measure trained-head drift, usage and channel organization",
+    )
+    representation.add_argument("path", type=Path)
+    representation.add_argument("--probes", type=Path, required=True)
+    representation.add_argument("--output", type=Path)
+    representation.add_argument("--native-library", type=Path)
+    representation.add_argument("--allow-source-change", action="store_true")
+    representation.add_argument("--maximum-factors", type=int, default=32)
     args = parser.parse_args(argv)
     try:
+        if args.command == "report":
+            print_saved_evaluation(args.path)
+            return 0
+        if args.command == "measure-representation":
+            from stages.stage_A.a4.diagnostics import measure_representation
+
+            output = measure_representation(
+                args.path,
+                args.probes,
+                output=args.output,
+                native_library=args.native_library,
+                allow_source_change=args.allow_source_change,
+                maximum_factors=args.maximum_factors,
+            )
+            _print_evaluation(output)
+            return 0
         if args.command in {"measure-latency", "measure-retrieval"}:
             if (args.path is None) == (not args.latest):
                 raise ValueError("Supply a run directory or --latest, not both")
@@ -335,26 +331,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     native_library=args.native_library,
                     allow_source_change=args.allow_source_change,
                 )
-                result = _read(output / "result.json")
-                for report in result["reports"]:
-                    print(
-                        f"{report['condition']}: causal-window CE={report['causal_window_ce']:.6f}"
-                    )
-                    for layer in report["layers"]:
-                        for row in layer["scores"]:
-                            print(
-                                f"  layer {layer['layer']} top-{row['top_k']}: "
-                                f"all-probe precision={row['all_probe_micro_precision']:.4f} "
-                                f"positive-probe recall={row['positive_only']['macro_recall']:.4f}"
-                            )
-                if "support_prior" in result:
-                    print("Bank-source support prior (no held-out fitting):")
-                    for row in result["support_prior"]["scores"]:
-                        print(
-                            f"  top-{row['top_k']}: precision={row['all_probe_micro_precision']:.4f} "
-                            f"positive-probe recall={row['positive_only']['macro_recall']:.4f}"
-                        )
-                print(result["scope"])
+                _print_evaluation(output)
                 return 0
             from stages.stage_A.a4.benchmark import measure_latency
 
@@ -369,7 +346,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 profile_transfers=not args.skip_transfers,
                 allow_source_change=args.allow_source_change,
             )
-            _print_result("latency", inspect_latency(output))
+            _print_evaluation(output)
             return 0
         result = {
             "list": list_runs,
@@ -380,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.json:
             print(json.dumps(result, indent=2, allow_nan=False))
         else:
-            _print_result(args.command, result)
+            print_result(args.command, result)
     except (
         OSError,
         ValueError,

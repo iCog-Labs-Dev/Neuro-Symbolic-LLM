@@ -17,12 +17,25 @@ loss = CE + key_weight * key_alignment + value_weight * value_alignment
 ```
 
 Key alignment supervises the query against bank keys. Value alignment trains
-`V_pred`, a hidden-to-value predictor. The separate value-to-hidden matrix
-`U_out` learns writeback through CE. KL and spring terms are not included.
+`V_pred[d,k]`, a hidden-to-value predictor distinct from the value-to-hidden
+writeback matrix `U_out[k,d]` (row-vector convention). With one attached head,
+`U_out` learns writeback through CE. With multiple attached heads, later-layer
+alignment losses also backpropagate through earlier heads: value loss can update
+an earlier `U_out`, and its query projection once writeback is nonzero. It does
+not directly supervise its own layer's `U_out`. This cross-layer coupling is
+retained; setting either alignment weight to zero permits controlled ablations.
+Labels are still required for input validation. KL and spring terms are not included.
 
 Training and evaluation both reuse A3's frozen `clean_pass` and `predict_latents`
 methods, without target-conditioned settling or A3 parameter updates.
 Run metadata identifies this protocol as `frozen-a3-prediction-v1`.
+Unlike the post-settlement reference in paper section 5.2, the head consumes
+frozen A3 predictions rather than iteratively settled, target-conditioned states.
+
+Stage A uses one shared, fixed K/V bank for all attached head layers, with
+separate trainable projections per layer. The experiment's bank was built from
+the encoder's last-layer representations; it is not a collection of distinct
+layer-specific banks as denoted by the paper's per-layer keys and values.
 
 [A4 YAML](../../../configs/stage_A/a4_symbolic_head.yaml) sets batch size,
 sequence length, epochs, learning rate, alignment weights and top-m. Its
@@ -76,6 +89,12 @@ does not mean distinct text count. Coverage reports both. The
 `alignment-occurrences-v2` manifest references NPZ token, mask and target arrays;
 padding contributes neither CE nor alignment targets. Legacy
 `alignment-labels-v1` is also accepted.
+
+Preparation excludes hypothetical-only assertion bindings and reports their
+count. Explicit rule-structure bindings remain eligible; unclassified factuality
+is retained and counted. The same policy applies to retrieval probes. This does
+not repair upstream polarity/modality encoding: after an upstream semantic fix,
+rebuild patterns, exact matches, embeddings and labels together before retraining.
 
 Admission checks fingerprints, retokenized windows and evidence positions.
 Validation/test text must be separate from training and bank-source text.
@@ -132,14 +151,23 @@ a4-metrics list
 a4-metrics show runs/a4-seed-0
 a4-metrics measure-retrieval runs/a4-seed-0 --probes data/a4/probes.json
 a4-metrics measure-latency runs/a4-seed-0
+a4-metrics measure-representation runs/a4-seed-0 --probes data/a4/probes.json
 ```
 
 `list` and `show` read saved artifacts. `retrieval FILE` scores existing ranked
 IDs; `latency FILE` recalculates saved timing samples. These read-only commands
 accept `--json`. The `measure-*` commands load a completed checkpoint without
-retraining. They accept `--latest` to select the completed run with the newest
-status-file modification time; `--runs-root` changes the default `runs/` search.
+retraining. `measure-retrieval` and `measure-latency` accept `--latest` to select
+the completed run with the newest status-file modification time; `--runs-root`
+changes the default `runs/` search.
 Use `a4-metrics COMMAND --help` for options.
+
+Measurement commands print readable results and save structured artifacts.
+`report` displays a completed retrieval, representation or latency evaluation
+without running the model. Representation output includes alignment, retrieval,
+channel organization, query geometry, writeback and capacity controls when present.
+Capture console progress and errors with `2>&1 | tee evaluation.log` in Bash;
+use `set -o pipefail` when checking the measurement's exit status through a pipe.
 
 ### Retrieval quality
 
@@ -160,6 +188,36 @@ For saved ranked IDs, `retrieval` accepts JSON with `label_kind`, `split` and
 `probes`; each probe contains `retrieved_ids` and `relevant_ids`.
 Use `semantic_firing` for template relevance or `exact_neighbor` for
 HNSW-versus-Flat agreement. Neighbor agreement is not semantic quality.
+
+### Representation diagnostics
+
+`measure-representation` compares the initial and trained heads without updating
+weights. It reports CE/PPL, next-token accuracy, base-to-adapted KL, reference-pair
+alignment errors, retrieval at available depths through 16, and endpoint writeback
+size. Bank-key cosine statistics describe the fixed bank, not head learning.
+
+Channel diagnostics zero one frozen-A3 residual coordinate across the input
+window. A factor is a reference template present in at least two documents;
+selection uses label support only (up to `--maximum-factors`, default 32).
+Positive increases in full-bank target-key NLL estimate component contributions,
+averaged equally across documents. Fracture and overlap follow paper sections
+14.3/14.4; zero-effect factors remain undefined, and beneficial removals are saved
+separately. These are basis-dependent diagnostics, not proof of disentanglement.
+Query silhouette uses Euclidean distance, expanded multilabel memberships and at
+most 256 eligible probe windows. Coverage and selection policies accompany scores.
+
+Results go under `run/evaluation/representation-<timestamp>/`: `result.json`,
+`contributions.npz`, `summary.csv`, and `review.json`. Capacity results are
+included in `result.json`.
+Capacity controls use captured trained queries with smaller query/key dimensions
+and nested ID-selected bank subsets. All controls use exact cosine search and
+report reference coverage; they do not retrain smaller heads or resize values.
+The full-space control also reports HNSW-versus-exact top-8 ID agreement, which is
+tie-sensitive and distinct from semantic precision.
+Review records contain text,
+expressions and attention weights; exporting them does not constitute human review.
+These measurements do not replace controlled capacity/retraining studies or the
+shared Stage A residual/continual-learning evaluations.
 
 ### Latency
 
@@ -194,7 +252,7 @@ Results and raw samples go under `run/evaluation/latency-<UTC timestamp>/` or
 | `experiments/run_stage_a4.py` | CLI and model/data/backend setup |
 | `a4/config.py`, `data.py`, `checkpoint.py` | Settings, labels/splits and A3 restoration |
 | `a4/model.py`, `objective.py`, `training.py` | Forward composition, losses and head optimization |
-| `a4/evaluation.py`, `benchmark.py`, `replay.py` | Retrieval evaluation and latency replay |
+| `a4/evaluation.py`, `benchmark.py`, `diagnostics.py`, `replay.py` | Retrieval, latency, representation evaluation and replay |
 | `residual/symbolic_head/jax_head.py`, `alignment.py` | Query projection, attention, writeback and alignment |
 | `residual/symbolic_head/contracts/`, `retrieval/` | Record validation and CPU index |
 | `symbolic_memory/` | MORK storage, native bridge and TCP service |
