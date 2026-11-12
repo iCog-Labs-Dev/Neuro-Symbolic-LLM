@@ -57,7 +57,7 @@ anthropic = ["anthropic>=0.25"]
 gemini = ["google-genai>=2.0.0"]
 ollama = ["ollama>=0.4"]
 miner = [
-    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.0",
+    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.1",
 ]
 dev = [
     "jsonschema>=4.18",
