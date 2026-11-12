@@ -1,3 +1,4 @@
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -5,19 +6,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "neuro-symbolic-llm"
 version = "0.1.0"
-description = "PC residual with symbolic head on frozen LLM"
+description = "Predictive-coding residual adaptation and symbolic retrieval on frozen LLMs"
 requires-python = ">=3.11"
+
 dependencies = [
-    # FabricPC: pinned release — only upgrade deliberately
+    # Predictive Coding Framework
     "fabricpc @ git+https://github.com/trueagi-io/FabricPC.git@v0.6.0",
 
-    # JAX ecosystem
+    # JAX Ecosystem
     "jax>=0.4.30",
     "jaxlib>=0.4.30",
     "optax>=0.2.0",
     "orbax-checkpoint>=0.5.0",
+    "numpy>=1.26",
 
-    # Frozen base model (PyTorch, hidden state extraction only)
+    # Frozen LLM Substrate and Student Training
     "torch>=2.6.0,<2.13.0",
     "transformers>=5.0.0",
     "accelerate>=0.25.0",
@@ -27,18 +30,27 @@ dependencies = [
     "protobuf>=3.20.0",
     "torchax==0.0.14.dev20260617",
 
-    # MORK service
+    # Semantic Parser Model Providers
+    "openai>=1.0",
+    "anthropic>=0.25",
+    "google-genai>=2.0.0",
+    "ollama>=0.4",
+
+    # Symbolic Processing and Hybrid Miner
+    "hyperon>=0.2.0",
+    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.0",
+
+    # MORK Service and Retrieval
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "httpx>=0.27.0",
     "pydantic>=2.6.0",
     "hnswlib>=0.8.0",
 
-    # Tier 3 queue
+    # Tier 3 Queue
     "redis>=5.0.0",
 
-    # Symbolic pipeline
-    "numpy>=1.26",
+    # Shared Utilities
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
     "tqdm>=4.66.0",
@@ -46,19 +58,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# CUDA-enabled JAX; install according to the host CUDA environment.
 gpu = [
     "jax[cuda12]>=0.4.30",
 ]
-hyperon = [
-    "hyperon>=0.2.0",
-]
-openai = ["openai>=1.0"]
-anthropic = ["anthropic>=0.25"]
-gemini = ["google-genai>=2.0.0"]
-ollama = ["ollama>=0.4"]
-miner = [
-    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.0",
-]
+
+# Development and testing tools.
 dev = [
     "jsonschema>=4.18",
     "pytest>=8.0",
@@ -104,9 +109,6 @@ include = [
 [tool.black]
 line-length = 88
 target-version = ["py310", "py311", "py312"]
-# Black reformats code automatically. It never asks questions.
-# Run manually: black .
-# Runs automatically on every commit via pre-commit.
 
 # ── Ruff ───────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -115,25 +117,25 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors (e.g. wrong indentation)
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes (unused imports, undefined names)
-    "I",   # isort (import ordering)
-    "N",   # pep8 naming conventions
-    "UP",  # pyupgrade (use modern Python syntax)
-    "B",   # flake8-bugbear (catches likely bugs)
-    "C4",  # flake8-comprehensions (cleaner list/dict/set comprehensions)
-    "SIM", # flake8-simplify (simplifiable code patterns)
+    "E",
+    "W",
+    "F",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "C4",
+    "SIM",
 ]
+
 ignore = [
-    "E501",  # line too long — black handles this
-    "B008",  # do not perform function calls in default arguments (FastAPI uses this)
-    "N806",  # variable in function should be lowercase
-    "N803",  # argument name should be lowercase
+    "E501",
+    "B008",
+    "N806",
+    "N803",
 ]
 
 [tool.ruff.lint.isort]
-# tells ruff which packages are "yours" so imports are sorted into the right group
 known-first-party = [
     "fabricpc_ext",
     "nac",
@@ -156,23 +158,15 @@ known-first-party = [
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
 [tool.mypy]
-# Parse/check target. Must stay >= 3.12 because modern JAX/NumPy/Flax ship
-# PEP 695 stubs ("type X = ...", generic "[T]" syntax) that older targets
-# refuse to parse. The package itself remains 3.10-compatible at runtime
-# (requires-python = ">=3.10"); this setting only controls type checking.
 python_version = "3.12"
 warn_return_any = true
 warn_unused_ignores = true
 warn_redundant_casts = true
-ignore_missing_imports = true   # JAX and FabricPC stubs are incomplete
+ignore_missing_imports = true
 
-# Treat heavy numeric/JAX libraries as opaque: skip analyzing their internals
-# (their names still resolve). Keeps local and CI runs fast and consistent.
 [[tool.mypy.overrides]]
 module = ["jax", "jax.*", "flax", "flax.*", "numpy", "numpy.*"]
 follow_imports = "skip"
-# Run manually: mypy .
-# Runs automatically on every commit via pre-commit.
 
 [[tool.mypy.overrides]]
 module = "parser.semantic.semantic_parser"
@@ -183,10 +177,8 @@ disable_error_code = ["no-any-return"]
 testpaths = ["tests"]
 pythonpath = [".", "frozenllm"]
 asyncio_mode = "auto"
+
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning:jax",
 ]
-# Run all tests: pytest
-# Run only unit tests: pytest tests/unit/
-# Run with output: pytest -v -s
