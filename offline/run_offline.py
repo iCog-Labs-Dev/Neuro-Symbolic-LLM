@@ -23,6 +23,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -692,32 +694,64 @@ def run_command(
 
 def run_parser_command(
     command: list[str],
+    checkpoint_path: Path,
+    total: int,
 ) -> tuple[int, str]:
-    """Run parser CLI and capture its output for recovery decisions."""
+    """Run parser with a percentage-only progress display."""
 
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    output = result.stdout or ""
-    errors = result.stderr or ""
-
-    if output:
-        print(output, end="", flush=True)
-
-    if errors:
-        print(
-            errors,
-            end="",
-            file=sys.stderr,
-            flush=True,
+    with tempfile.TemporaryFile(mode="w+t") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=REPO_ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
         )
 
-    return result.returncode, output + "\n" + errors
+        previous = -1
+
+        try:
+            while process.poll() is None:
+                try:
+                    state = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    processed = state.get("line_number", 0)
+                except (OSError, json.JSONDecodeError):
+                    processed = 0
+
+                percent = min(
+                    100,
+                    int(processed / max(total, 1) * 100),
+                )
+
+                if percent != previous:
+                    print(
+                        f"\rTeacher extraction: {percent}%",
+                        end="",
+                        flush=True,
+                    )
+                    previous = percent
+
+                time.sleep(0.5)
+
+            returncode = process.wait()
+
+            if returncode == 0:
+                print(
+                    "\rTeacher extraction: 100%",
+                    flush=True,
+                )
+            else:
+                print(flush=True)
+
+            log.seek(0)
+            output = log.read()
+
+            return returncode, output
+
+        except KeyboardInterrupt:
+            process.terminate()
+            process.wait()
+            print(flush=True)
+            raise
 
 
 def run_loader_with_progress(
@@ -1169,7 +1203,13 @@ def run_parser(
     # G. Run parser CLI.
     # ---------------------------------------------------------
 
-    returncode, parser_output = run_parser_command(command)
+    checkpoint_path = run_dir / CHECKPOINT_NAME
+
+    returncode, parser_output = run_parser_command(
+        command,
+        checkpoint_path,
+        count_jsonl(prepared_path),
+    )
 
     # If the parser itself detects an incompatible checkpoint,
     # archive the run and retry once without --resume.
@@ -1198,7 +1238,11 @@ def run_parser(
             skip_training=False,
         )
 
-        returncode, parser_output = run_parser_command(command)
+        returncode, parser_output = run_parser_command(
+            command,
+            checkpoint_path,
+            count_jsonl(prepared_path),
+        )
 
     if returncode != 0:
         print(
