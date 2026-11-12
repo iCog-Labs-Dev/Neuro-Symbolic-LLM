@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import time
+from contextlib import contextmanager
 from typing import Any
 
 import jax
@@ -13,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from metrics.a4.console import training_row
 from residual.symbolic_head.alignment import ValuePredictor
 from stages.results import RunWriter
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config
@@ -22,6 +24,54 @@ from stages.stage_A.a4.objective import AlignmentLabels, objective_at_latents
 from stages.stage_base import make_eval_set
 
 log = logging.getLogger("stage_a4")
+
+
+@contextmanager
+def _copy_sample(retriever, enabled):
+    """Read existing native CUDA events around one real optimizer update."""
+    sample = {}
+    if enabled:
+        with retriever.transfer_timing():
+            before = retriever.transfer_stats()
+            yield sample
+            after = retriever.transfer_stats()
+            sample.update({key: after[key] - before[key] for key in before})
+    else:
+        yield sample
+
+
+def _communication_summary(samples, *, log_summary=True):
+    if not samples:
+        return {"status": "not_measured", "samples": 0}
+    steps = math.fsum(row["step_seconds"] for row in samples)
+    d2h = math.fsum(row["d2h_gpu_seconds"] for row in samples)
+    h2d = math.fsum(row["h2d_gpu_seconds"] for row in samples)
+    report = {
+        "status": "measured",
+        "samples": len(samples),
+        "gpu_to_cpu_mean_ms": 1000 * d2h / len(samples),
+        "cpu_to_gpu_mean_ms": 1000 * h2d / len(samples),
+        "copy_mean_ms": 1000 * (d2h + h2d) / len(samples),
+        "sampled_step_mean_ms": 1000 * steps / len(samples),
+        "copy_ratio_of_means_percent": 100 * (d2h + h2d) / steps,
+        "scope": "CUDA-event copy intervals in real weight-updating steps",
+        "denominator": "Same instrumented training steps; excludes first 10 updates and first use of each input shape",
+        "excluded": "CPU search and host dispatch/waits outside CUDA event brackets; not a full bridge overhead qualification",
+    }
+    if not log_summary:
+        return report
+    log.info(
+        "Communication during training: %d sampled updates | GPU->CPU %.3f ms | "
+        "CPU->GPU %.3f ms | copies %.3f ms / sampled step %.3f ms = %.2f%%",
+        report["samples"],
+        report["gpu_to_cpu_mean_ms"],
+        report["cpu_to_gpu_mean_ms"],
+        report["copy_mean_ms"],
+        report["sampled_step_mean_ms"],
+        report["copy_ratio_of_means_percent"],
+    )
+    log.info("Copy intervals only; instrumented steps, not full bridge overhead.")
+    return report
 
 
 def init_params(model: A4Model, seed: int) -> dict[str, Any]:
@@ -150,9 +200,21 @@ def train(
     writer: RunWriter,
     *,
     max_grad_norm: float = 1.0,
+    latency_every: int = 100,
 ) -> dict[str, Any]:
     """Train the symbolic head and save its checkpoint and evaluation metrics."""
     training = config.training
+    if latency_every < 0:
+        raise ValueError("latency_every must be nonnegative")
+    retriever = model.symbolic.retrieve
+    timing_enabled = bool(
+        latency_every
+        and training.jit
+        and callable(getattr(retriever, "transfer_timing", None))
+        and callable(getattr(retriever, "transfer_stats", None))
+    )
+    communication_samples = []
+    seen_shapes = set()
     fingerprint = residual_fingerprint(model, frozen_residual)
     params = init_params(model, training.seed)
     optimizer = optax.chain(
@@ -167,13 +229,36 @@ def train(
         jnp.asarray(np.stack([record.val_vector for record in bank.records])),
         config,
     )
+    log.info("Task 1/1: A4 symbolic-head training")
+    if timing_enabled:
+        log.info(
+            "CUDA copy timing: every %d updates after 10-update and input-shape warmup",
+            latency_every,
+        )
+    else:
+        log.info(
+            "Communication timing disabled or unavailable (requires compiled native CUDA retrieval)"
+        )
+    log.info("Initial validation...")
     validation = evaluate(
         model, frozen_residual, params, data.validation, training, data.validation_mask
     )
     initial_validation = dict(validation)
     writer.log("eval", split="validation", epoch=0, **validation)
+    log.info(
+        "Validation: task loss=%.6f PPL=%.4f", validation["loss"], validation["ppl"]
+    )
     updates = 0
+    batches_per_epoch = len(data.train) // training.batch_size
+    step_times = []
+    columns = (
+        f"{'Batch':>12} {'Total loss':>14} {'Task loss':>14} "
+        f"{'Symbolic loss':>14} {'PPL':>12}"
+    )
     for epoch in range(training.epochs):
+        epoch_samples = []
+        log.info("Epoch %d/%d", epoch + 1, training.epochs)
+        log.info("%s", columns)
         order = np.random.default_rng(training.seed + epoch).permutation(
             len(data.train)
         )
@@ -182,10 +267,7 @@ def train(
         ):
             indices = order[start : start + training.batch_size]
             positions, targets = data.batch_labels(indices)
-            started = time.perf_counter()
-            params, state, terms, finite = step(
-                params,
-                state,
+            inputs = (
                 jnp.asarray(data.train[indices]),
                 jnp.asarray(positions),
                 jnp.asarray(targets),
@@ -195,26 +277,64 @@ def train(
                     else jnp.asarray(data.train_mask[indices])
                 ),
             )
-            jax.block_until_ready((params, state, terms, finite))
+            shape = tuple(
+                None if value is None else (value.shape, str(value.dtype))
+                for value in inputs
+            )
+            measure = (
+                timing_enabled
+                and updates >= 10
+                and shape in seen_shapes
+                and (updates + 1) % latency_every == 0
+            )
+            with _copy_sample(retriever, measure) as sample:
+                started = time.perf_counter()
+                params, state, terms, finite = step(params, state, *inputs)
+                jax.block_until_ready((params, state, terms, finite))
+                if measure:
+                    jax.effects_barrier()
+                elapsed = time.perf_counter() - started
+            seen_shapes.add(shape)
             if not bool(finite):
                 raise FloatingPointError("Nonfinite loss, gradient or optimizer update")
+            if measure:
+                if sample["calls"] != len(model.symbolic.layers):
+                    raise RuntimeError("CUDA timing did not cover every symbolic layer")
+                sample.update(step_seconds=elapsed, step=updates + 1, epoch=epoch + 1)
+                communication_samples.append(sample)
+                epoch_samples.append(sample)
+            step_times.append(elapsed)
+            metrics: dict[str, Any] = {
+                name: float(value) for name, value in terms.items()
+            }
+            metrics["symbolic"] = (
+                config.key_weight * metrics["key"]
+                + config.value_weight * metrics["value"]
+            )
+            if measure:
+                metrics["communication"] = sample
+            try:
+                metrics["ppl"] = math.exp(metrics["task"])
+            except OverflowError:
+                metrics["ppl"] = None
             updates += 1
             writer.log(
                 "train",
                 epoch=epoch + 1,
                 step=updates,
-                step_time=time.perf_counter() - started,
-                **{name: float(value) for name, value in terms.items()},
+                step_time=elapsed,
+                **metrics,
             )
-            if updates == 1 or updates % training.log_every == 0:
-                log.info(
-                    "epoch=%d step=%d CE=%.6f key=%.6f value=%.6f",
-                    epoch + 1,
-                    updates,
-                    float(terms["task"]),
-                    float(terms["key"]),
-                    float(terms["value"]),
-                )
+            batch = start // training.batch_size + 1
+            if (
+                batch == 1
+                or updates % training.log_every == 0
+                or batch == batches_per_epoch
+            ):
+                log.info("%s", training_row(batch, batches_per_epoch, metrics))
+        log.info("%s", columns)
+        epoch_communication = _communication_summary(epoch_samples)
+        writer.log("communication", epoch=epoch + 1, **epoch_communication)
         validation = evaluate(
             model,
             frozen_residual,
@@ -224,6 +344,9 @@ def train(
             data.validation_mask,
         )
         writer.log("eval", split="validation", epoch=epoch + 1, **validation)
+        log.info(
+            "Validation: task loss=%.6f PPL=%.4f", validation["loss"], validation["ppl"]
+        )
     if residual_fingerprint(model, frozen_residual) != fingerprint:
         raise RuntimeError("Frozen continuous residual changed")
     frozen = model.continuous.sub.verify_frozen()
@@ -240,6 +363,14 @@ def train(
         "validation_ce_change": validation["loss"] - initial_validation["loss"],
         "training_examples": len(data.train),
         "alignment": data.provenance.get("alignment", {}),
+        "communication": _communication_summary(
+            communication_samples, log_summary=False
+        ),
+        "training_step_mean_ms": (
+            1000 * math.fsum(step_times[1:]) / (len(step_times) - 1)
+            if len(step_times) > 1
+            else None
+        ),
     }
     if data.test is not None:
         results["test"] = evaluate(
@@ -260,4 +391,24 @@ def train(
         bank_snapshot_sha256=bank.input_snapshot_sha256,
     )
     writer.write_json("results.json", results)
+    log.info("Summary: %d epochs, %d updates", training.epochs, updates)
+    log.info(
+        "Final validation: task loss=%.6f PPL=%.4f",
+        validation["loss"],
+        validation["ppl"],
+    )
+    mean_ms = results["training_step_mean_ms"]
+    if mean_ms is not None:
+        log.info(
+            "Latency: mean training step=%.3f ms (excluding first update)", mean_ms
+        )
+    else:
+        log.info("Latency: insufficient updates for a mean excluding the first update")
+    if communication_samples:
+        _communication_summary(communication_samples)
+    if not communication_samples:
+        log.info(
+            "Communication: no sampled updates (disabled, unsupported backend, or run too short)"
+        )
+    log.info("Saved run: %s", writer.dir)
     return results

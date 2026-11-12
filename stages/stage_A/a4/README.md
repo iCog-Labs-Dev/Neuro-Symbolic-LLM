@@ -122,6 +122,20 @@ Use a fresh run name. `--skip-test` leaves test sources unread; replace it with
 `--retrieval-backend tcp` selects the service backend instead of native.
 Run `python -m experiments.run_stage_a4 --help` for overrides.
 
+Training prints task/epoch progress and a batch table of total, task and weighted
+symbolic loss plus task perplexity. `training.log_every: 1` prints every update.
+The training summary includes mean step time excluding the first update.
+Compiled native runs measure CUDA copy intervals inside every 100th real optimizer
+update, excluding the first 10 updates and first use of each input shape.
+`--latency-every N` changes this interval; `--skip-latency` disables it.
+Each epoch ends with repeated column headings and a communication summary in the
+console and `training.log`. Sampled updates include their timing in `metrics.jsonl`;
+`results.json` contains the aggregate. The denominator is the same instrumented
+update's elapsed time. These copy intervals exclude CPU search and host overhead;
+they are not a full bridge-overhead qualification. TCP and non-JIT runs report
+timing as unavailable. Separate deployment/latency benchmarks remain available
+through the metrics CLI; training does not replay the checkpoint afterward.
+
 An existing Python session can reuse its initialized substrate through
 `experiments.run_stage_a4.main(training_arguments, substrate=substrate)`.
 A CLI process loads its own model; it cannot reuse another process's object.
@@ -134,6 +148,7 @@ Each run creates an ignored `runs/<run-name>/` directory:
 | --- | --- |
 | `config.yaml`, `meta.json`, `data.json` | Effective settings, runtime and input fingerprints |
 | `status.json` | Running, completed or failed |
+| `training.log` | Readable A4 training progress and final summary |
 | `metrics.jsonl` | Per-step losses/gradients and epoch evaluations |
 | `results.json` | Initial/final held-out CE and perplexity |
 | `params/a3-frozen.npz` | Frozen A3 residual |

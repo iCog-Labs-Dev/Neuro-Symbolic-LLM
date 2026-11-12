@@ -8,7 +8,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from experiments.run_stage_a4 import DEFAULT_CONFIG, _resolve_substrate, parse_args
+from experiments.run_stage_a4 import (
+    DEFAULT_CONFIG,
+    _resolve_substrate,
+    parse_args,
+)
 
 
 def test_reuses_substrate_without_loading(monkeypatch):
@@ -23,14 +27,29 @@ def test_reuses_substrate_without_loading(monkeypatch):
 
 def test_standalone_run_loads_one_substrate(monkeypatch):
     existing = Mock()
+    native, tokenizer = Mock(), Mock()
+    model_loader = Mock(return_value=native)
+    tokenizer_loader = Mock(return_value=tokenizer)
     constructor = Mock(return_value=existing)
     dtype = object()
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float32=dtype))
     monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoModelForCausalLM=SimpleNamespace(from_pretrained=model_loader),
+            AutoTokenizer=SimpleNamespace(from_pretrained=tokenizer_loader),
+        ),
+    )
+    monkeypatch.setitem(
         sys.modules, "frozenllm.substrate", SimpleNamespace(FrozenSubstrate=constructor)
     )
     assert _resolve_substrate("configured-model", None) is existing
-    constructor.assert_called_once_with("configured-model", dtype=dtype)
+    model_loader.assert_called_once_with(
+        "configured-model", dtype=dtype, attn_implementation="eager"
+    )
+    tokenizer_loader.assert_called_once_with("configured-model")
+    constructor.assert_called_once_with(native, tokenizer=tokenizer)
 
 
 def arguments(*extra):
@@ -58,6 +77,11 @@ def test_defaults_use_a4_configuration():
     args = parse_args(arguments())
     assert args.config == DEFAULT_CONFIG
     assert args.epochs is None
+    assert not args.skip_latency
+    assert parse_args(arguments("--skip-latency")).skip_latency
+    assert args.latency_every == 100
+    assert parse_args(arguments("--latency-every", "20")).latency_every == 20
+    assert parse_args(arguments("--log-every", "1")).log_every == 1
     assert not hasattr(args, "compare")
     assert not hasattr(args, "comparison_steps")
 
@@ -82,6 +106,8 @@ def test_requires_checkpoint_and_firing_labels(required):
         ("--max-train-blocks", "0"),
         ("--minimum-examples", "0"),
         ("--eval-batches", "0"),
+        ("--log-every", "0"),
+        ("--latency-every", "0"),
         ("--task-only",),
         ("--comparison-steps", "10"),
         ("--steps", "10"),

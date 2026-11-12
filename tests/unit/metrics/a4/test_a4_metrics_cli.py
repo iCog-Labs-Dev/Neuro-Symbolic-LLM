@@ -15,6 +15,13 @@ from metrics.a4.cli import (
     main,
     score_probes,
 )
+from metrics.a4.console import training_row
+
+
+@pytest.mark.parametrize("ppl,expected", [(2.7182818, "2.7183"), (None, "overflow")])
+def test_compact_training_row_displays_recorded_losses_and_ppl(ppl, expected):
+    row = training_row(2, 5, {"total": 7, "task": 1, "symbolic": 6, "ppl": ppl})
+    assert row.split() == ["2/5", "7.000000", "1.000000", "6.000000", expected]
 
 
 def write_json(path, value):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import logging
 import math
 import os
@@ -40,12 +39,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--test-sources", type=Path)
     parser.add_argument("--skip-test", action="store_true")
+    parser.add_argument(
+        "--skip-latency",
+        action="store_true",
+        help="Disable CUDA copy timing during actual training updates",
+    )
+    parser.add_argument(
+        "--latency-every",
+        type=int,
+        default=100,
+        help="Measure CUDA copies on every Nth real update after warmup",
+    )
     parser.add_argument("--model")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seq-len", type=int)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--eval-batches", type=int)
+    parser.add_argument("--log-every", type=int)
     parser.add_argument("--output-dir")
     parser.add_argument("--run-name")
     parser.add_argument("--layers", type=int, nargs="+")
@@ -73,6 +84,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "batch_size",
         "seq_len",
         "eval_batches",
+        "log_every",
+        "latency_every",
         "max_train_rows",
         "max_eval_rows",
         "max_train_blocks",
@@ -108,10 +121,17 @@ def _resolve_substrate(
     if substrate is not None:
         return substrate
     import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # Load native weights before the substrate enables TorchAX dispatch.
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, dtype=torch.float32, attn_implementation="eager"
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     from frozenllm.substrate import FrozenSubstrate
 
-    return FrozenSubstrate(model_id, dtype=torch.float32)
+    return FrozenSubstrate(model, tokenizer=tokenizer)
 
 
 def main(
@@ -147,6 +167,7 @@ def main(
             "seq_len",
             "learning_rate",
             "eval_batches",
+            "log_every",
             "output_dir",
         )
         if getattr(args, name) is not None
@@ -274,26 +295,37 @@ def main(
                 },
             )
             writer.write_json("status.json", {"stage": "A4", "status": "running"})
+            logger = logging.getLogger("stage_a4")
+            training_log = logging.FileHandler(
+                writer.dir / "training.log", encoding="utf-8"
+            )
+            training_log.setFormatter(logging.Formatter("%(message)s"))
+            logger.addHandler(training_log)
             try:
-                results = train(
-                    model,
-                    frozen_residual,
-                    data,
-                    bank,
-                    config,
-                    writer,
-                    max_grad_norm=args.max_grad_norm,
-                )
-                writer.write_json("status.json", {"stage": "A4", "status": "completed"})
-            except BaseException as error:
-                writer.write_json(
-                    "status.json",
-                    {"stage": "A4", "status": "failed", "error": str(error)},
-                )
-                raise
+                try:
+                    train(
+                        model,
+                        frozen_residual,
+                        data,
+                        bank,
+                        config,
+                        writer,
+                        max_grad_norm=args.max_grad_norm,
+                        latency_every=0 if args.skip_latency else args.latency_every,
+                    )
+                    writer.write_json(
+                        "status.json", {"stage": "A4", "status": "completed"}
+                    )
+                except BaseException as error:
+                    writer.write_json(
+                        "status.json",
+                        {"stage": "A4", "status": "failed", "error": str(error)},
+                    )
+                    raise
             finally:
+                logger.removeHandler(training_log)
+                training_log.close()
                 jax.effects_barrier()
-    print(json.dumps(results, indent=2))
     return 0
 
 

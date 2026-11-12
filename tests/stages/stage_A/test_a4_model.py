@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -639,15 +641,22 @@ def test_rejects_continuous_parameters_in_optimizer(run):
         )
 
 
-def test_training_checkpoint_separates_frozen_and_trainable_weights(run, tmp_path):
-    blocks = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
-    data = A4Data(blocks, blocks, None, np.array([[3, 0]], dtype=np.int32), {})
-    with RunWriter(tmp_path, "a4") as writer:
+@pytest.mark.parametrize("batches", [1, 2])
+def test_training_checkpoint_separates_frozen_and_trainable_weights(
+    run, tmp_path, caplog, batches
+):
+    blocks = np.array([[1, 2, 3, 4, 5]] * batches, dtype=np.int32)
+    targets = np.array([[3, 0]] * batches, dtype=np.int32)
+    data = A4Data(blocks, blocks, None, targets, {})
+    with (
+        caplog.at_level("INFO", logger="stage_a4"),
+        RunWriter(tmp_path, "a4") as writer,
+    ):
         result = train(run.model, run.frozen, data, run.bank, run.config, writer)
     weights = load_params(tmp_path / "a4/checkpoints/a4-final.npz")
     assert set(weights) == {"symbolic.layer_7", "value.layer_7"}
     assert (tmp_path / "a4/params/a3-frozen.npz").is_file()
-    assert result["updates"] == 1
+    assert result["updates"] == batches
     assert result["training_state_source"] == TRAINING_STATE_SOURCE
     with np.load(tmp_path / "a4/checkpoints/a4-final.npz", allow_pickle=False) as saved:
         metadata = json.loads(str(saved["__metadata__"]))
@@ -656,6 +665,124 @@ def test_training_checkpoint_separates_frozen_and_trainable_weights(run, tmp_pat
     assert result["frozen_residual_sha256"] == residual_fingerprint(
         run.model, run.frozen
     )
+    assert "Task 1/1" in caplog.text and "Epoch 1/1" in caplog.text
+    assert "Total loss" in caplog.text and "Symbolic loss" in caplog.text
+    assert f"{batches}/{batches}" in caplog.text and "Final validation:" in caplog.text
+    messages = [record.getMessage() for record in caplog.records]
+    headings = [i for i, message in enumerate(messages) if "Symbolic loss" in message]
+    assert len(headings) == 2
+    assert messages[headings[-1] - 1].strip().startswith(f"{batches}/{batches}")
+    assert result["communication"]["status"] == "not_measured"
+    mean_ms = result["training_step_mean_ms"]
+    assert mean_ms is None if batches == 1 else mean_ms > 0
+    records = [
+        json.loads(row)
+        for row in (tmp_path / "a4/metrics.jsonl").read_text().splitlines()
+    ]
+    for row in records:
+        if row["event"] == "train":
+            assert row["ppl"] == pytest.approx(math.exp(row["task"]))
+            assert row["symbolic"] == pytest.approx(row["key"] + row["value"])
+
+
+@pytest.mark.parametrize("latency_every", [0, 2])
+def test_communication_samples_real_updates_without_replay(
+    run, tmp_path, monkeypatch, caplog, latency_every
+):
+    from stages.stage_A.a4 import training as module
+
+    class TimingRetriever:
+        active = False
+        calls = 0
+
+        @contextmanager
+        def transfer_timing(self):
+            self.active = True
+            try:
+                yield
+            finally:
+                self.active = False
+
+        def transfer_stats(self):
+            return {
+                "calls": self.calls,
+                "d2h_gpu_seconds": self.calls * 0.00001,
+                "h2d_gpu_seconds": self.calls * 0.00002,
+            }
+
+    timing = TimingRetriever()
+    # Keep the numerical fixture's retrieval unchanged; simulate only its clock API.
+    retrieve = run.model.symbolic.retrieve
+    monkeypatch.setattr(
+        run.model.symbolic,
+        "retrieve",
+        SimpleNamespace(
+            transfer_timing=timing.transfer_timing, transfer_stats=timing.transfer_stats
+        ),
+    )
+    original = module.make_train_step
+    invocations = []
+
+    def make_step(*args):
+        monkeypatch.setattr(run.model.symbolic, "retrieve", retrieve)
+        numerical_step = original(*args)
+
+        def step(*inputs):
+            invocations.append(timing.active)
+            output = numerical_step(*inputs)
+            if timing.active:
+                timing.calls += 1
+            return output
+
+        return step
+
+    monkeypatch.setattr(module, "make_train_step", make_step)
+    blocks = np.array([[1, 2, 3, 4, 5]] * 12, dtype=np.int32)
+    data = A4Data(blocks, blocks[:1], None, np.array([[3, 0]] * 12), {})
+    with (
+        caplog.at_level("INFO", logger="stage_a4"),
+        RunWriter(tmp_path, "a4") as writer,
+    ):
+        result = train(
+            run.model,
+            run.frozen,
+            data,
+            run.bank,
+            run.config,
+            writer,
+            latency_every=latency_every,
+        )
+    assert result["updates"] == len(invocations) == 12
+    assert not any(invocations[:10])
+    assert invocations[10:] == [False, bool(latency_every)]
+    report = result["communication"]
+    assert report["samples"] == (1 if latency_every else 0)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "a4/metrics.jsonl").read_text().splitlines()
+    ]
+    sampled = [
+        row for row in rows if row["event"] == "train" and "communication" in row
+    ]
+    assert len(sampled) == report["samples"]
+    if latency_every:
+        assert sampled[0]["step"] == 12
+        assert report["copy_mean_ms"] == pytest.approx(0.03)
+        assert report["copy_ratio_of_means_percent"] == pytest.approx(
+            100 * 0.00003 / sampled[0]["step_time"]
+        )
+        assert "Communication during training:" in caplog.text
+    weights = load_params(tmp_path / "a4/checkpoints/a4-final.npz")
+    initial = init_params(run.model, run.config.training.seed)
+    assert any(
+        not np.array_equal(a, b)
+        for a, b in zip(
+            jax.tree.leaves(weights["symbolic.layer_7"]),
+            jax.tree.leaves(initial["symbolic"]["layer_7"]),
+            strict=True,
+        )
+    )
+    assert result["frozen"]["params_unchanged"]
 
 
 def test_eager_train_step_uses_same_parameter_groups(run):
