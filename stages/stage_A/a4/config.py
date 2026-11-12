@@ -31,9 +31,9 @@ class A4Config:
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
                 or not math.isfinite(value)
-                or value <= 0
+                or value < 0
             ):
-                raise ValueError(f"{name} must be finite and positive")
+                raise ValueError(f"{name} must be finite and nonnegative")
         for name in ("top_m", "minimum_templates"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:

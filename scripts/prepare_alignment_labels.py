@@ -11,6 +11,37 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+FACTUALITY_POLICY = (
+    "Exclude hypothetical-only assertion bindings; retain explicit rule-structure "
+    "bindings; retain and count unclassified factuality"
+)
+
+
+def hypothetical_assertion_only(binding: Mapping[str, Any]) -> bool:
+    """Do not treat a hypothetical assertion as an independently asserted fact."""
+    evidence = binding["evidence"]
+    return (
+        bool(evidence)
+        and not any(row.get("kind") == "rule" for row in evidence)
+        and all(row.get("factuality") == "hypothetical" for row in evidence)
+    )
+
+
+def qualified_pattern_ids(patterns: Any) -> dict[str, str]:
+    """Reuse IDs of exact qualified bank patterns without recomputing miner IDs."""
+    identifiers: dict[str, str] = {}
+    for pattern in patterns:
+        trace = pattern.expensive_trace
+        qualified = (
+            trace.get("qualified_pattern") if isinstance(trace, Mapping) else None
+        )
+        if not isinstance(qualified, str) or not qualified.strip():
+            raise ValueError("Bank patterns require their recorded qualified pattern")
+        if qualified in identifiers and identifiers[qualified] != pattern.id:
+            raise ValueError("A qualified bank pattern has conflicting IDs")
+        identifiers[qualified] = pattern.id
+    return identifiers
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -188,7 +219,7 @@ def collect_examples(
     tokenizer: Any,
     paths: list[Path],
     template_ids: set[str],
-    pattern_id: Callable[[dict[str, Any]], str],
+    pattern_id: Callable[[dict[str, Any]], str | None],
     seq_len: int,
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], Any], dict[str, int]]:
     """Deduplicate by template, source, window and causal evidence endpoint."""
@@ -231,6 +262,13 @@ def collect_examples(
                         for span in spans
                     ):
                         raise ValueError("Exact evidence does not match source text")
+                    if any(
+                        row.get("factuality") is None for row in binding["evidence"]
+                    ):
+                        counts["unclassified_factuality_bindings"] += 1
+                    if hypothetical_assertion_only(binding):
+                        counts["hypothetical_only_bindings_excluded"] += 1
+                        continue
                     left = min(span["start"] for span in spans)
                     right = max(span["end"] for span in spans)
                     tokens = encoded[identity]["input_ids"]
@@ -310,7 +348,6 @@ def select_examples(
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     import numpy as np
-    from hybrid_miner.mining.build_pattern_records import _pattern_id
     from hybrid_miner.ontology import OntologyBundle
     from transformers import AutoTokenizer
 
@@ -332,6 +369,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Source texts and semantic documents differ")
     bank = load_bank(args.patterns, args.embeddings)
     lookup = {record.template_id: index for index, record in enumerate(bank.records)}
+    qualified_ids = qualified_pattern_ids(bank.patterns)
     bundle = OntologyBundle.model_validate_json(args.bundle.read_text(encoding="utf-8"))
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     pad = (
@@ -349,7 +387,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             bundle.bundle_version,
         ):
             raise ValueError("Exact-match bundle identity differs")
-        return _pattern_id(bundle, match["pattern"])
+        return qualified_ids.get(match["pattern"])
 
     eligible, encoded, counts = collect_examples(
         sources, tokenizer, paths, set(lookup), identify, args.seq_len
@@ -387,6 +425,12 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             }
         ),
         "source_document_count": len(sources),
+        "hypothetical_only_bindings_excluded": counts.get(
+            "hypothetical_only_bindings_excluded", 0
+        ),
+        "unclassified_factuality_bindings": counts.get(
+            "unclassified_factuality_bindings", 0
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with arrays_path.open("xb") as stream:
@@ -419,6 +463,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             }
         ),
         "selection_policy": "unique template/source/window/endpoint pairs; seeded template round-robin; no replacement",
+        "factuality_policy": FACTUALITY_POLICY,
         "source_semantic_correctness": "Source-span identity checked; semantic correctness requires independent audit",
         "coverage": coverage,
         "labels": labels,

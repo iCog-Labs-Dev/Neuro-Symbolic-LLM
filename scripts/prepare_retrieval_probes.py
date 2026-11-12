@@ -10,6 +10,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from scripts.prepare_alignment_labels import (
+    FACTUALITY_POLICY,
+    hypothetical_assertion_only,
+)
+
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -102,6 +107,8 @@ def causal_probes(document, tokenizer, bindings, seq_len):
             for s in spans
         ):
             raise ValueError("Reference evidence differs from source text")
+        if hypothetical_assertion_only(binding):
+            continue
         resolved.append(
             (template_id, min(s["start"] for s in spans), max(s["end"] for s in spans))
         )
@@ -279,6 +286,14 @@ def prepare(config_path: Path) -> Path:
                         except exact._ReusedGroundFact:
                             counts["reused_fact_bindings_excluded"] += 1
                             continue
+                        if any(
+                            evidence.get("factuality") is None
+                            for evidence in binding["evidence"]
+                        ):
+                            counts["unclassified_factuality_bindings"] += 1
+                        if hypothetical_assertion_only(binding):
+                            counts["hypothetical_only_bindings_excluded"] += 1
+                            continue
                         name = bank.patterns[i].id
                         linked.append((name, binding))
                         oracle.write(
@@ -316,6 +331,7 @@ def prepare(config_path: Path) -> Path:
             "oracle": "All bank patterns checked against admitted annotated graphs; exact PeTTa bindings; distinct ground facts; visible evidence only",
             "semantics": "Structural template firing, not executable rule entailment or an LLM parser accuracy measurement",
             "review_status": "Dataset-reference transcription; independent semantic audit not asserted",
+            "factuality_policy": FACTUALITY_POLICY,
             "preparation_source_sha256": digest(Path(__file__)),
             "matcher_source_sha256": digest(Path(inspect.getfile(exact))),
             "inputs": [

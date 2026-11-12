@@ -14,6 +14,7 @@ from residual.symbolic_head.contracts import (
 
 def valid_record_data() -> dict[str, object]:
     return {
+        "contract_version": "pattern-record-v1",
         "id": "pattern-concession-001",
         "canonical_term": "(Concession $clause_0 $clause_1)",
         "interface_variables": ["$clause_0", "$clause_1"],
@@ -37,7 +38,7 @@ def valid_record_data() -> dict[str, object]:
             "experiment_version": "q1-s1-v1",
         },
         "generator_history": ["greedy:one-clause-seed"],
-        "cheap_features": {"support": 4, "clause_count": 1},
+        "cheap_features": {"width": 4, "clause_count": 1},
         "cheap_endpoint": {"support_estimate": 4},
         "expensive_endpoint": {"exact_support": 4},
         "expensive_trace": {"bindings": 4},
@@ -58,6 +59,22 @@ def test_accepts_q1_extracted_pattern() -> None:
     assert validate_q1_pattern_record(record) is record
 
 
+def test_runtime_exports_the_miner_contract_and_accepts_both_serializations():
+    from hybrid_miner.contracts import PatternRecord as MinerPatternRecord
+    from hybrid_miner.contracts import validate_extraction_pattern_record
+
+    from residual.symbolic_head import PatternRecord as PublicPatternRecord
+    from symbolic_memory.bank import PatternRecord as BankPatternRecord
+
+    assert (
+        PatternRecord is PublicPatternRecord is BankPatternRecord is MinerPatternRecord
+    )
+    assert validate_q1_pattern_record is validate_extraction_pattern_record
+    miner = MinerPatternRecord.model_validate(valid_record_data())
+    runtime = PublicPatternRecord.model_validate_json(miner.to_canonical_json())
+    assert MinerPatternRecord.model_validate_json(runtime.to_canonical_json()) == miner
+
+
 def test_canonical_json_round_trip_is_deterministic() -> None:
     first_data = valid_record_data()
     second_data = deepcopy(first_data)
@@ -65,7 +82,7 @@ def test_canonical_json_round_trip_is_deterministic() -> None:
         "$clause_1": "Clause",
         "$clause_0": "Clause",
     }
-    second_data["cheap_features"] = {"clause_count": 1, "support": 4}
+    second_data["cheap_features"] = {"clause_count": 1, "width": 4}
 
     first = PatternRecord.model_validate(first_data)
     second = PatternRecord.model_validate(second_data)
@@ -138,7 +155,9 @@ def test_q1_policy_rejects_later_stage_fields() -> None:
 
     record = PatternRecord.model_validate(data)
 
-    with pytest.raises(PatternRecordError, match="Q1 PatternRecord violations"):
+    with pytest.raises(
+        PatternRecordError, match="Extraction-stage PatternRecord violations"
+    ):
         validate_q1_pattern_record(record)
 
 

@@ -1,13 +1,17 @@
-"""Stable data contracts shared across Tier 2 boundaries."""
+"""Miner-owned pattern contracts and backward-compatible A4 aliases."""
 
-from residual.symbolic_head.contracts.pattern_record import (
+from hybrid_miner.contracts import (
     PatternProvenance,
     PatternRecord,
     PatternRecordError,
-    SemanticLevel,
-    SourceSpan,
-    validate_q1_pattern_record,
+    validate_extraction_pattern_record,
 )
+from hybrid_miner.contracts import (
+    PatternSourceSpan as SourceSpan,
+)
+from hybrid_miner.contracts.pattern_record import SemanticLevel
+
+validate_q1_pattern_record = validate_extraction_pattern_record
 
 __all__ = [
     "PatternProvenance",
@@ -15,5 +19,6 @@ __all__ = [
     "PatternRecordError",
     "SemanticLevel",
     "SourceSpan",
+    "validate_extraction_pattern_record",
     "validate_q1_pattern_record",
 ]

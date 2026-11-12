@@ -11,7 +11,9 @@ import pytest
 from scripts.prepare_alignment_labels import (
     collect_examples,
     exact_paths,
+    hypothetical_assertion_only,
     parse_args,
+    qualified_pattern_ids,
     select_examples,
 )
 from scripts.prepare_retrieval_probes import (
@@ -60,6 +62,64 @@ def occurrence_file(tmp_path, patterns):
     return path
 
 
+@pytest.mark.parametrize(
+    "evidence,excluded",
+    [
+        ([{"factuality": "hypothetical"}], True),
+        ([{"factuality": "asserted"}], False),
+        ([{"factuality": "hypothetical"}, {"factuality": "asserted"}], False),
+        ([{"kind": "rule", "factuality": "hypothetical"}], False),
+        ([{}], False),
+        ([], False),
+    ],
+)
+def test_hypothetical_filter_preserves_rule_structure_and_unknowns(evidence, excluded):
+    assert hypothetical_assertion_only({"evidence": evidence}) is excluded
+
+
+@pytest.mark.parametrize("kind,excluded", [(None, True), ("rule", False)])
+def test_hypothetical_training_bindings_are_filtered_and_counted(
+    tmp_path, kind, excluded
+):
+    path = occurrence_file(tmp_path, [("A", 0, 3, "1 2")])
+    match = json.loads(path.read_text())
+    evidence = match["exact_bindings"][0]["evidence"][0]
+    evidence["factuality"] = "hypothetical"
+    if kind is not None:
+        evidence["kind"] = kind
+    path.write_text(json.dumps(match))
+    rows, _, counts = collect_examples(
+        {("c", "a"): {"source_text": "1 2 3"}},
+        Tokenizer(),
+        [path],
+        {"A"},
+        lambda row: row["pattern"],
+        128,
+    )
+    assert len(rows) == (0 if excluded else 1)
+    assert counts.get("hypothetical_only_bindings_excluded", 0) == int(excluded)
+
+
+def test_bank_pattern_ids_are_reused_without_a_private_miner_function():
+    bank = [
+        SimpleNamespace(
+            id="bank-owned-id", expensive_trace={"qualified_pattern": "(P $x)"}
+        )
+    ]
+    assert qualified_pattern_ids(bank) == {"(P $x)": "bank-owned-id"}
+    with pytest.raises(ValueError, match="conflicting IDs"):
+        qualified_pattern_ids(
+            [
+                *bank,
+                SimpleNamespace(
+                    id="other", expensive_trace={"qualified_pattern": "(P $x)"}
+                ),
+            ]
+        )
+    with pytest.raises(ValueError, match="recorded qualified pattern"):
+        qualified_pattern_ids([SimpleNamespace(id="missing", expensive_trace=None)])
+
+
 def test_short_document_retains_multiple_template_pairs_without_duplicate_rows(
     tmp_path,
 ):
@@ -75,6 +135,7 @@ def test_short_document_retains_multiple_template_pairs_without_duplicate_rows(
     assert all(row["token_index"] == 1 and row["window_end"] == 3 for row in rows)
     assert encoded["c", "a"]["input_ids"] == [1, 2, 3]
     assert counts["duplicate_position_template_pairs"] == 1
+    assert counts["unclassified_factuality_bindings"] == 3
 
 
 def test_occurrence_window_crosses_old_fixed_block_boundary(tmp_path):
@@ -353,6 +414,21 @@ def test_complete_multilabel_sets_only_use_visible_evidence():
     assert probes[2]["input_ids"] == [3, 4, 5, 6, 7, 8]
     assert probes[2]["relevant_ids"] == ["later", "same_endpoint"]
     assert probes[2]["token_index"] == 5
+
+
+def test_probe_labels_exclude_hypothetical_assertions_but_keep_rules():
+    row = {
+        **document("d", "ab."),
+        "assertions": [{"source_spans": [{"start": 0, "end": 3}]}],
+    }
+    hypothetical = binding(0, 3, "ab.")
+    hypothetical["evidence"][0]["factuality"] = "hypothetical"
+    rule = binding(0, 3, "ab.")
+    rule["evidence"][0].update(kind="rule", factuality="hypothetical")
+    probes = causal_probes(
+        row, CharacterTokenizer(), [("plain-action", hypothetical), ("rule", rule)], 128
+    )
+    assert probes[0]["relevant_ids"] == ["rule"]
 
 
 def test_source_mismatches_do_not_become_labels():

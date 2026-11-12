@@ -1,30 +1,58 @@
-"""A4 layer constraints and disabled-head equivalence with A3 inference."""
+"""A4 forward composition, objectives, checkpoints and frozen-residual training."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
+import torchax
 
 pytest.importorskip("fabricpc.graph_assembly", reason="A3 requires FabricPC >= 0.6")
 
+from frozenllm.substrate import FrozenSubstrate  # noqa: E402
+from frozenllm.substrate.torchax_backend import is_torchax_enabled  # noqa: E402
 from residual.symbolic_head.jax_head import SymbolicHead  # noqa: E402
 from stages.results import RunWriter, load_params  # noqa: E402
 from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
 from stages.stage_A.a3_tail import residual_modify  # noqa: E402
 from stages.stage_A.a4.checkpoint import restore_a3_weights  # noqa: E402
+from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config  # noqa: E402
+from stages.stage_A.a4.data import A4Data  # noqa: E402
 from stages.stage_A.a4.model import A4Model  # noqa: E402
 from stages.stage_A.a4.objective import (  # noqa: E402
     AlignmentLabels,
     _task_terms_at_latents,
     objective_at_latents,
 )
+from stages.stage_A.a4.training import (  # noqa: E402
+    init_params,
+    make_train_step,
+    residual_fingerprint,
+    train,
+)
+from stages.stage_base import TrainingConfig  # noqa: E402
 from symbolic_memory.jax_bridge import RetrievedTemplates  # noqa: E402
-from tests.stages.stage_A.a4_fixtures import small_substrate  # noqa: E402
+from tests.frozenllm.conftest import _torch_model  # noqa: E402
+
+
+def small_substrate():
+    enabled = is_torchax_enabled()
+    if enabled:
+        torchax.disable_globally()
+    try:
+        native = _torch_model("gpt2")
+    finally:
+        if enabled:
+            torchax.enable_globally()
+    return FrozenSubstrate(native)
 
 
 def forbidden_retrieval(queries):
@@ -266,6 +294,66 @@ def aligned_env(env):
     )
 
 
+@pytest.mark.parametrize("writeback_scale", [0.0, 0.01])
+def test_multilayer_value_loss_reaches_only_upstream_symbolic_heads(
+    env, aligned_env, writeback_scale
+):
+    head = SymbolicHead(32, 256, (6, 7), aligned_env.a4.symbolic.retrieve)
+    model = A4Model(env.continuous, head)
+    symbolic = head.init_params(2)
+    symbolic["layer_6"]["U_out"] = writeback_scale * jax.random.normal(
+        jax.random.PRNGKey(19), (256, 32)
+    )
+    value = {f"layer_{layer}": aligned_env.value["layer_7"] for layer in head.layers}
+    labels = {layer: aligned_env.labels[7] for layer in head.layers}
+
+    def value_loss(candidate):
+        _, terms = objective_at_latents(
+            model,
+            env.params,
+            candidate,
+            value,
+            env.ids,
+            env.z,
+            labels,
+            aligned_env.keys,
+            aligned_env.values,
+        )
+        return terms["value"]
+
+    gradients = jax.jit(jax.grad(value_loss))(symbolic)
+    for gradient in gradients["layer_7"].values():
+        np.testing.assert_array_equal(gradient, jnp.zeros_like(gradient))
+    assert np.linalg.norm(gradients["layer_6"]["U_out"]) > 0
+    for name in ("W_sym", "b_sym"):
+        if writeback_scale == 0:
+            np.testing.assert_array_equal(
+                gradients["layer_6"][name], jnp.zeros_like(gradients["layer_6"][name])
+            )
+        else:
+            assert np.linalg.norm(gradients["layer_6"][name]) > 0
+
+
+def test_zero_value_weight_disables_predictor_gradient(env, aligned_env):
+    def loss(value):
+        return objective_at_latents(
+            aligned_env.a4,
+            env.params,
+            aligned_env.symbolic,
+            value,
+            env.ids,
+            env.z,
+            aligned_env.labels,
+            aligned_env.keys,
+            aligned_env.values,
+            value_weight=0,
+        )[0]
+
+    gradients = jax.jit(jax.grad(loss))(aligned_env.value)
+    for gradient in jax.tree.leaves(gradients):
+        np.testing.assert_array_equal(gradient, jnp.zeros_like(gradient))
+
+
 @pytest.mark.parametrize(
     "key_weight,value_weight", [(1.0, 1.0), (0.0, 0.0), (0.25, 2.0)]
 )
@@ -369,3 +457,219 @@ def test_alignment_rejects_invalid_weight_before_forward(env, weight):
             jnp.ones((1, 256)),
             key_weight=weight,
         )
+
+
+@pytest.fixture(scope="module")
+def run():
+    substrate = small_substrate()
+    continuous = A3Model(
+        substrate, layers=(7,), rank=4, seq_len=5, config=A3Config(infer_steps=1)
+    )
+    frozen = continuous.init_params(jax.random.PRNGKey(0))
+    keys = jnp.eye(2, 256, dtype=jnp.float32)
+    values = keys * 2
+
+    def retrieve(queries):
+        count = len(queries)
+        return RetrievedTemplates(
+            jnp.broadcast_to(keys, (count, 2, 256)),
+            jnp.broadcast_to(values, (count, 2, 256)),
+            jnp.zeros((count, 2)),
+            jnp.broadcast_to(jnp.arange(2), (count, 2)),
+        )
+
+    model = A4Model(continuous, SymbolicHead(32, 256, (7,), retrieve))
+    config = A4Config(
+        Path("a3.yaml"),
+        TrainingConfig(
+            model="unit-fixture", seq_len=5, batch_size=1, epochs=1, eval_batches=1
+        ),
+        minimum_templates=1,
+    )
+    records = tuple(
+        SimpleNamespace(
+            key_vector=np.asarray(keys[i]), val_vector=np.asarray(values[i])
+        )
+        for i in range(2)
+    )
+    bank = SimpleNamespace(records=records, input_snapshot_sha256="unit-bank")
+    return SimpleNamespace(
+        model=model, frozen=frozen, config=config, bank=bank, keys=keys, values=values
+    )
+
+
+def test_optimizer_tree_contains_only_symbolic_parameters(run):
+    params = init_params(run.model, 0)
+    assert set(params) == {"symbolic", "value"}
+    assert set(params["symbolic"]["layer_7"]) == {"W_sym", "b_sym", "U_out"}
+    assert set(params["value"]["layer_7"]) == {"V_pred"}
+
+
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("jit", [False, True])
+def test_training_reuses_a3_predictions_without_settlement(
+    run, monkeypatch, masked, jit
+):
+    ids = jnp.array([[1, 2, 3, 4, 5]])
+    mask = jnp.array([[True, True, True, False, False]]) if masked else None
+    positions, targets = jnp.array([[0, 2]]), jnp.array([0])
+    params = init_params(run.model, 0)
+    continuous = run.model.continuous
+    clean, _ = continuous.clean_pass(ids)
+    predicted = continuous.predict_latents(run.frozen, clean)
+    _, expected = objective_at_latents(
+        run.model,
+        run.frozen,
+        params["symbolic"],
+        params["value"],
+        ids,
+        predicted,
+        {7: AlignmentLabels(positions, targets)},
+        run.keys,
+        run.values,
+        token_mask=mask,
+    )
+    prediction = Mock(wraps=continuous.predict_latents)
+    monkeypatch.setattr(continuous, "predict_latents", prediction)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A4 must reuse prediction, not run A3 settlement")
+
+    for method in ("make_batch", "_refresh_state", "train_grads"):
+        monkeypatch.setattr(continuous, method, forbidden)
+    original_config = continuous.cfg
+
+    class PredictionOnlyConfig:
+        def __getattr__(self, name):
+            if name in {"infer_steps", "eta_z", "sigma2", "lambda_kl"}:
+                raise AssertionError("A4 must not read A3 settlement settings")
+            return getattr(original_config, name)
+
+    monkeypatch.setattr(continuous, "cfg", PredictionOnlyConfig())
+    config = replace(run.config, training=replace(run.config.training, jit=jit))
+    optimizer = optax.adam(1e-4)
+    step = make_train_step(
+        run.model, run.frozen, optimizer, run.keys, run.values, config
+    )
+    _, _, terms, finite = step(
+        params, optimizer.init(params), ids, positions, targets, mask
+    )
+    assert bool(finite)
+    prediction.assert_called_once()
+    for name in ("task", "key", "value", "total"):
+        np.testing.assert_allclose(terms[name], expected[name], rtol=3e-4, atol=3e-4)
+
+
+def test_head_step_with_short_context_has_finite_masked_losses(run):
+    params = init_params(run.model, 0)
+    optimizer = optax.adam(1e-4)
+    step = make_train_step(
+        run.model, run.frozen, optimizer, run.keys, run.values, run.config
+    )
+    _, _, terms, finite = step(
+        params,
+        optimizer.init(params),
+        jnp.array([[1, 2, 3, 0, 0]]),
+        jnp.array([[0, 2]]),
+        jnp.array([0]),
+        jnp.array([[True, True, True, False, False]]),
+    )
+    assert bool(finite)
+    assert set(terms).issuperset({"task", "key", "value", "total"})
+    assert "spring" not in terms and "kl" not in terms
+    _, _, changed_padding_terms, changed_padding_finite = step(
+        params,
+        optimizer.init(params),
+        jnp.array([[1, 2, 3, 9, 11]]),
+        jnp.array([[0, 2]]),
+        jnp.array([0]),
+        jnp.array([[True, True, True, False, False]]),
+    )
+    assert bool(changed_padding_finite)
+    for name in ("task", "key", "value", "total"):
+        np.testing.assert_allclose(
+            terms[name], changed_padding_terms[name], rtol=3e-4, atol=3e-4
+        )
+
+
+def test_head_update_keeps_both_inherited_matrices_frozen(run, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A4 must not compute A3 parameter gradients")
+
+    monkeypatch.setattr(run.model.continuous, "train_grads", forbidden)
+    before = residual_fingerprint(run.model, run.frozen)
+    params = init_params(run.model, 0)
+    optimizer = optax.adam(1e-4)
+    step = make_train_step(
+        run.model, run.frozen, optimizer, run.keys, run.values, run.config
+    )
+    updated, _, terms, finite = step(
+        params,
+        optimizer.init(params),
+        jnp.array([[1, 2, 3, 4, 5]]),
+        jnp.array([[0, 3]]),
+        jnp.array([0]),
+    )
+    assert bool(finite)
+    assert residual_fingerprint(run.model, run.frozen) == before
+    assert set(updated) == {"symbolic", "value"}
+    assert any(
+        not np.array_equal(a, b)
+        for a, b in zip(jax.tree.leaves(params), jax.tree.leaves(updated), strict=True)
+    )
+    assert float(terms["total"]) == pytest.approx(
+        float(terms["task"] + terms["key"] + terms["value"]), rel=1e-6
+    )
+    assert "kl" not in terms and "spring" not in terms
+
+
+def test_rejects_continuous_parameters_in_optimizer(run):
+    params = {**init_params(run.model, 0), "continuous": run.frozen}
+    optimizer = optax.adam(1e-4)
+    step = make_train_step(
+        run.model, run.frozen, optimizer, run.keys, run.values, run.config
+    )
+    with pytest.raises(ValueError, match="only symbolic and value"):
+        step(
+            params,
+            optimizer.init(params),
+            jnp.array([[1, 2, 3, 4, 5]]),
+            jnp.array([[0, 3]]),
+            jnp.array([0]),
+        )
+
+
+def test_training_checkpoint_separates_frozen_and_trainable_weights(run, tmp_path):
+    blocks = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
+    data = A4Data(blocks, blocks, None, np.array([[3, 0]], dtype=np.int32), {})
+    with RunWriter(tmp_path, "a4") as writer:
+        result = train(run.model, run.frozen, data, run.bank, run.config, writer)
+    weights = load_params(tmp_path / "a4/checkpoints/a4-final.npz")
+    assert set(weights) == {"symbolic.layer_7", "value.layer_7"}
+    assert (tmp_path / "a4/params/a3-frozen.npz").is_file()
+    assert result["updates"] == 1
+    assert result["training_state_source"] == TRAINING_STATE_SOURCE
+    with np.load(tmp_path / "a4/checkpoints/a4-final.npz", allow_pickle=False) as saved:
+        metadata = json.loads(str(saved["__metadata__"]))
+    assert metadata["training_state_source"] == TRAINING_STATE_SOURCE
+    assert result["frozen"]["params_unchanged"]
+    assert result["frozen_residual_sha256"] == residual_fingerprint(
+        run.model, run.frozen
+    )
+
+
+def test_eager_train_step_uses_same_parameter_groups(run):
+    params = init_params(run.model, 0)
+    optimizer = optax.adam(1e-4)
+    config = replace(run.config, training=replace(run.config.training, jit=False))
+    step = make_train_step(
+        run.model, run.frozen, optimizer, run.keys, run.values, config
+    )
+    updated, _, _, finite = step(
+        params,
+        optimizer.init(params),
+        jnp.array([[1, 2, 3, 4, 5]]),
+        jnp.array([[0, 3]]),
+        jnp.array([0]),
+    )
+    assert bool(finite) and set(updated) == {"symbolic", "value"}
