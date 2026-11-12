@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -396,12 +397,23 @@ def build_routed_extraction_prompt(
     # Keep the shared general instructions in one place.
     # Insert the discourse extension before the source input
     # so the source is not sent twice.
-    source_marker = "## 13. INPUT"
 
-    if source_marker not in general.text:
-        raise ValueError("General prompt must contain an INPUT section")
+    input_pattern = re.compile(r"(?m)^##\s+\d+\.\s+INPUT\s*$")
 
-    general_instructions, input_section = general.text.rsplit(source_marker, 1)
+    input_sections = list(input_pattern.finditer(general.text))
+
+    if len(input_sections) != 1:
+        raise ValueError(
+            "General prompt must contain exactly one numbered INPUT section"
+        )
+
+    input_section_match = input_sections[0]
+
+    source_marker = input_section_match.group(0)
+
+    general_instructions = general.text[: input_section_match.start()]
+
+    input_section = general.text[input_section_match.end() :]
 
     combined = (
         discourse_guidance

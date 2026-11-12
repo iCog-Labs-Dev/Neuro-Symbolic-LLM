@@ -1,60 +1,58 @@
-# ── Active model ───────────────────────────────────────────────────────────────────────────────
-# Choose one model you want to use below. Credentials always stay in .env.
-active: ollama_catalog
 
-# ── Provider profiles ───────────────────────────────────────────────────────────────────────────
+# ── Active model ──────────────────────────────────────────────────────────────
+# Choose one model for the experiment.
+active: ollama_qwen3_32b
+
+# ── Provider profiles ─────────────────────────────────────────────────────────
 profiles:
 
-  # Hosted APIs ───────────────────────────────────────────────────────────────────────────
+  # Hosted APIs
+
   openai:
     provider: openai
     model: gpt-6.1-terra
     api_key_env: OPENAI_API_KEY
-    # Model output limit; reasoning tokens count against it.
     max_output_tokens: 128000
 
   anthropic:
     provider: anthropic
     model: claude-sonnet-5-5
     api_key_env: ANTHROPIC_API_KEY
-    # The SDK requires streaming above about 21,333 tokens; this backend does not stream.
     max_tokens: 21000
 
   gemini:
     provider: gemini
     model: gemini-3.8-flash
     api_key_env: GEMINI_API_KEY
-    # Model output limit; thinking tokens count against it.
     max_output_tokens: 65536
 
-  # OpenAI-compatible APIs ──────────────────────────────────────────────────────────
+  # OpenAI-compatible APIs
+
   openai_compatible:
-    # For vLLM, Together, Groq, or another OpenAI-compatible endpoint.
     provider: openai-compatible
     model_env: OPENAI_COMPATIBLE_MODEL_USED
     api_key_env: OPENAI_COMPATIBLE_API_KEY
     base_url_env: OPENAI_COMPATIBLE_BASE_URL
-    # Raise to your server's output limit.
-    max_output_tokens: 8192
+    max_output_tokens: 10000
 
-  # Local or self-hosted models ────────────────────────────────────────────────────────
-  # Ollama's default context window (4,096 tokens) is smaller than the catalog
-  # prompt (about 12,000 tokens) and Ollama silently cuts the prompt's start,
-  # so every Ollama profile sets num_ctx to cover the prompt and the output.
+  # Local and self-hosted models
+  # Standard teacher generation budget: 10,000 tokens.
+  # num_ctx must accommodate both the input prompt and generated output.
 
   ollama:
-    # Retained profile spelling; it uses the same document parser.
     provider: ollama
     model: qwen3:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 512
+    max_output_tokens: 10000
     num_ctx: 24576
+    think: false
+    temperature: 0.0
 
   ollama_qwen05:
     provider: ollama
     model: qwen2.5:0.5b
     host_env: OLLAMA_HOST
-    max_output_tokens: 3072
+    max_output_tokens: 10000
     num_ctx: 24576
     temperature: 0.0
 
@@ -62,7 +60,7 @@ profiles:
     provider: ollama
     model: qwen2.5:3b
     host_env: OLLAMA_HOST
-    max_output_tokens: 3072
+    max_output_tokens: 10000
     num_ctx: 24576
     temperature: 0.0
 
@@ -70,7 +68,7 @@ profiles:
     provider: ollama
     model: qwen3:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 3072
+    max_output_tokens: 10000
     num_ctx: 24576
     think: false
     temperature: 0.0
@@ -79,7 +77,7 @@ profiles:
     provider: ollama
     model: gemma3:4b
     host_env: OLLAMA_HOST
-    max_output_tokens: 3072
+    max_output_tokens: 10000
     num_ctx: 24576
     temperature: 0.0
 
@@ -87,41 +85,41 @@ profiles:
     provider: ollama
     model: llama3.1:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 3072
+    max_output_tokens: 10000
     num_ctx: 24576
     temperature: 0.0
 
   ollama_catalog:
-    # Teacher: extracts catalog documents to build the student's training data.
-    # Deterministic settings and a larger output budget for full documents.
     provider: ollama
     model: qwen3:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 3072
+    max_output_tokens: 10000
     num_ctx: 24576
     think: false
     temperature: 0.0
 
-  ollama_qwen3_32b_teacher:
+  ollama_qwen3_32b:
     provider: ollama
     model: qwen3:32b
     host_env: OLLAMA_HOST
-    max_output_tokens: 4096
+    max_output_tokens: 10000
     num_ctx: 32768
     think: false
     temperature: 0.0
+
+  # Transformers local teacher
+
   transformers_local:
-    # A locally downloaded Hugging Face model; no provider API key is required.
     provider: transformers-local
     model: Qwen/Qwen2.5-3B-Instruct
     hf_token_env: HF_TOKEN
-    max_new_tokens: 512
+    max_new_tokens: 10000
+
+  # Fine-tuned semantic student
 
   semantic_document_student:
-    # Student: a small local model fine-tuned on the teacher's output.
-    # Run `python -m parser.semantic train-student` first to create the checkpoint.
     provider: transformers-local
     model: models/semantic_document_parser
-    max_new_tokens: 3072
+    max_new_tokens: 10000
     role: student
     add_special_tokens: false

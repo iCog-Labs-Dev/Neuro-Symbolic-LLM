@@ -245,3 +245,19 @@ def test_parser_exposes_active_prompt_identity_without_generation():
     ).version
 
     assert parser.prompt_version == expected
+
+
+def test_routed_prompt_finds_numbered_input_section():
+    from parser.semantic.catalog_prompt import (
+        build_routed_extraction_prompt,
+    )
+
+    prompt = build_routed_extraction_prompt(
+        "Although it rained, Mira left.",
+        catalog=load_ontology_catalog(),
+        run_discourse=True,
+    )
+
+    assert "FINAL COMBINED EXTRACTION REQUIREMENTS" in prompt.text
+    assert "## 14. INPUT" in prompt.text
+    assert prompt.text.count("Source text:\nAlthough it rained, Mira left.") == 1
