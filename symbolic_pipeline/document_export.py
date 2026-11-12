@@ -5,6 +5,11 @@ bundle check. A result the miner contract cannot express is written to the
 rejected file with its reason, never dropped silently. ``--bundle-output``
 also writes the bundle used for the check, for the miner to load.
 
+``--skip-unsupported-rules`` keeps a document whose only problem is a
+universal rule the miner rule contract cannot hold (for example an obligation
+inside it): that rule is left out, the rest is exported, and every skipped
+rule is listed in ``<output-stem>.skipped.jsonl``.
+
     python -m symbolic_pipeline --input results.jsonl --output documents.jsonl
 """
 
@@ -34,6 +39,8 @@ class DocumentExportResult:
     output_path: Path
     rejected_path: Path
     bundle_path: Path | None = None
+    skipped_rules: int = 0
+    skipped_path: Path | None = None
 
 
 def export_semantic_documents(
@@ -43,14 +50,19 @@ def export_semantic_documents(
     *,
     bundle: OntologyBundle,
     bundle_path: Path | None = None,
+    skipped_path: Path | None = None,
 ) -> DocumentExportResult:
     """Convert every parse result and validate it against the ontology bundle.
 
-    With ``bundle_path``, the bundle itself is written there as well.
+    With ``bundle_path``, the bundle itself is written there as well. With
+    ``skipped_path``, unsupported universal rules are left out of their
+    documents and listed in that file instead of rejecting the document.
     """
     outputs = [output_path, rejected_path]
     if bundle_path is not None:
         outputs.append(bundle_path)
+    if skipped_path is not None:
+        outputs.append(skipped_path)
     paths = (input_path, *outputs)
     if len({path.resolve() for path in paths}) != len(paths):
         raise ValueError("Input and output paths must all differ")
@@ -64,7 +76,8 @@ def export_semantic_documents(
         with bundle_path.open("x", encoding="utf-8") as file:
             file.write(bundle.canonical_json() + "\n")
 
-    accepted = rejected = 0
+    accepted = rejected = skipped_rules = 0
+    skipped_lines: list[str] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rejected_path.parent.mkdir(parents=True, exist_ok=True)
     with (
@@ -75,9 +88,11 @@ def export_semantic_documents(
         for number, line in enumerate(source, 1):
             if not line.strip():
                 continue
+            skipped: list[str] | None = [] if skipped_path is not None else None
             try:
                 document = to_semantic_document(
-                    SemanticParseResult.model_validate_json(line)
+                    SemanticParseResult.model_validate_json(line),
+                    skipped_rules=skipped,
                 )
                 bundle.validate_document(document)
             except ValueError as error:
@@ -92,8 +107,31 @@ def export_semantic_documents(
             else:
                 documents.write(document.canonical_json() + "\n")
                 accepted += 1
+                if skipped:
+                    skipped_rules += len(skipped)
+                    skipped_lines.append(
+                        json.dumps(
+                            {
+                                "line_number": number,
+                                "corpus_id": document.corpus_id,
+                                "document_id": document.document_id,
+                                "skipped_rules": skipped,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+    if skipped_path is not None:
+        skipped_path.parent.mkdir(parents=True, exist_ok=True)
+        with skipped_path.open("x", encoding="utf-8") as file:
+            file.writelines(line + "\n" for line in skipped_lines)
     return DocumentExportResult(
-        accepted, rejected, output_path, rejected_path, bundle_path
+        accepted,
+        rejected,
+        output_path,
+        rejected_path,
+        bundle_path,
+        skipped_rules,
+        skipped_path,
     )
 
 
@@ -121,6 +159,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="also write the ontology bundle used to validate documents",
     )
+    arguments.add_argument(
+        "--skip-unsupported-rules",
+        action="store_true",
+        help="leave out universal rules the miner cannot hold and keep the "
+        "rest of the document; they are listed in <output-stem>.skipped.jsonl",
+    )
     options = arguments.parse_args(argv)
     try:
         _, bundle = load_catalog_bundle(options.ontology_bundle)
@@ -131,12 +175,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             or options.output.with_name(f"{options.output.stem}.rejected.jsonl"),
             bundle=bundle,
             bundle_path=options.bundle_output,
+            skipped_path=(
+                options.output.with_name(f"{options.output.stem}.skipped.jsonl")
+                if options.skip_unsupported_rules
+                else None
+            ),
         )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(f"Accepted: {result.accepted} -> {result.output_path}")
     print(f"Rejected: {result.rejected} -> {result.rejected_path}")
+    if result.skipped_path is not None:
+        print(f"Skipped rules: {result.skipped_rules} -> {result.skipped_path}")
     if result.bundle_path is not None:
         print(f"Ontology bundle: {result.bundle_path}")
     return 2 if result.rejected else 0
