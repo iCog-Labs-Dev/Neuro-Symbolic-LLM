@@ -94,6 +94,9 @@ include = [
     "losses*",
     "stages*",
     "metrics*",
+    "benchmark*",
+    "runtime*",
+    "training*",
 ]
 
 [tool.setuptools.package-data]
