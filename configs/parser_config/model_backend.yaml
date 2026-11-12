@@ -1,7 +1,7 @@
 
 # ── Active model ──────────────────────────────────────────────────────────────
 # Choose one model for the experiment.
-active: ollama_qwen3_32b
+active: ollama_qwen3_8_27b
 
 # ── Provider profiles ─────────────────────────────────────────────────────────
 profiles:
@@ -44,7 +44,7 @@ profiles:
     model: qwen3:8b
     host_env: OLLAMA_HOST
     max_output_tokens: 10000
-    num_ctx: 24576
+    num_ctx: 32768
 
   ollama_qwen05:
     provider: ollama
@@ -66,8 +66,8 @@ profiles:
     provider: ollama
     model: qwen3:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 10000
-    num_ctx: 24576
+    max_output_tokens: 16000
+    num_ctx: 32768
     think: false
     temperature: 0.0
 
@@ -83,7 +83,7 @@ profiles:
     provider: ollama
     model: llama3.1:8b
     host_env: OLLAMA_HOST
-    max_output_tokens: 10000
+    max_output_tokens: 16000
     num_ctx: 24576
     temperature: 0.0
 
@@ -101,6 +101,15 @@ profiles:
     model: qwen3:32b
     host_env: OLLAMA_HOST
     max_output_tokens: 10000
+    num_ctx: 32768
+    think: false
+    temperature: 0.0
+
+  ollama_qwen3_8_27b:
+    provider: ollama
+    model: qwen3.8:27b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 16000
     num_ctx: 32768
     think: false
     temperature: 0.0

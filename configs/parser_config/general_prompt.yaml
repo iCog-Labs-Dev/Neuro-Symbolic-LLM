@@ -1698,3 +1698,17 @@ system_prompt: |
 
   Source text:
   {source_text}
+
+  ## OUTPUT EFFICIENCY
+
+  - Produce complete semantic extraction without unnecessary verbosity.
+  - Return only the required SemanticExtraction JSON object.
+  - Do not include explanations, reasoning, summaries, or Markdown.
+  - Avoid duplicate entities, assertions, and evidence.
+  - Reuse entity IDs whenever the same entity appears.
+  - Keep entity descriptions and content concise.
+  - Include only semantically relevant evidence.
+  - Preserve exact source quotations.
+  - Do not omit valid semantic relationships merely
+    to reduce output length.
+  - Follow the output schema exactly.
