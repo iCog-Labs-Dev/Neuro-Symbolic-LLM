@@ -8,7 +8,7 @@ The overall objective is to investigate whether predictive-coding-based adaptati
 
 ## Architecture
 
-![Neuro-Symbolic LLM Architecture](docs/images/neuro_symbolic_architecture.png)
+![Neuro-Symbolic LLM Architecture](docs/neuro_symbolic_architecture.png)
 
 ## Components
 
