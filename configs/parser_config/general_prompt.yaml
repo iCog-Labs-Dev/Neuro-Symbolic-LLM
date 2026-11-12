@@ -1690,15 +1690,6 @@ system_prompt: |
   - All assertions and rules are semantically consistent.
 
   Return JSON only.
-
-  ## 14. INPUT
-
-  Background context:
-  {context}
-
-  Source text:
-  {source_text}
-
   ## OUTPUT EFFICIENCY
 
   - Produce complete semantic extraction without unnecessary verbosity.
@@ -1712,3 +1703,11 @@ system_prompt: |
   - Do not omit valid semantic relationships merely
     to reduce output length.
   - Follow the output schema exactly.
+
+  ## 14. INPUT
+
+  Background context:
+  {context}
+
+  Source text:
+  {source_text}
