@@ -7,6 +7,7 @@ Supported modes:
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,12 +34,62 @@ class RuntimeData:
     test_blocks: dict[str, np.ndarray]
     task_order: tuple[str, ...]
     metadata: dict[str, Any]
+    training_tasks: tuple[Domain, ...] | None = None
+    heldout_tasks: tuple[str, ...] = ()
 
     def get_test_sets(self, batch_size: int, eval_batches: int):
         return {
             name: make_eval_set(blocks, batch_size, eval_batches)
             for name, blocks in self.test_blocks.items()
         }
+
+
+@dataclass(frozen=True)
+class LegalTaskSpec:
+    """Pinned supervised-task definition used by post-hoc legal evaluation."""
+
+    name: str
+    dataset: str
+    dataset_config: str | None
+    revision: str
+    text_field: str
+    label_field: str
+    multilabel: bool
+    train_split: str
+    validation_split: str
+    test_split: str
+    expected_num_labels: int | None = None
+
+    def split_name(self, split: str) -> str:
+        if split == "train":
+            return self.train_split
+        if split in {"validation", "eval"}:
+            return self.validation_split
+        if split == "test":
+            return self.test_split
+        raise ValueError("split must be 'train', 'validation', 'eval', or 'test'")
+
+
+@dataclass(frozen=True)
+class LabeledSplit:
+    """Tokenized documents, gold labels, and semantic-factor annotations."""
+
+    task_name: str
+    split: str
+    input_ids: np.ndarray
+    attention_mask: np.ndarray
+    transformed_input_ids: np.ndarray
+    transformed_attention_mask: np.ndarray
+    targets: np.ndarray
+    label_names: tuple[str, ...]
+    factor_names: tuple[str, ...]
+    factor_mask: np.ndarray
+    example_ids: tuple[str, ...]
+    multilabel: bool
+    fingerprint: str
+
+    def probe_targets(self) -> np.ndarray:
+        return self.targets if self.multilabel else np.argmax(self.targets, axis=1)
 
 
 # ---------------------------------------------------------------------
@@ -74,6 +125,61 @@ def load_runtime_config(config_path: str | Path) -> dict[str, Any]:
     return config
 
 
+def parse_legal_task_spec(dataset_config: dict[str, Any]) -> LegalTaskSpec | None:
+    """Parse one dataset's optional supervised legal-task definition."""
+    raw = dataset_config.get("legal_task")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{dataset_config.get('name')}: legal_task must be a mapping")
+    revision = dataset_config.get("revision")
+    if not isinstance(revision, str) or not revision:
+        raise ValueError(
+            f"{dataset_config.get('name')}: legal_task requires a pinned revision"
+        )
+    label_field = raw.get("label_field")
+    if not isinstance(label_field, str) or not label_field:
+        raise ValueError(
+            f"{dataset_config.get('name')}: legal_task.label_field is required"
+        )
+    multilabel = raw.get("multilabel")
+    if not isinstance(multilabel, bool):
+        raise ValueError(
+            f"{dataset_config.get('name')}: legal_task.multilabel must be boolean"
+        )
+    expected = raw.get("expected_num_labels")
+    if expected is not None and (
+        isinstance(expected, bool) or not isinstance(expected, int) or expected < 2
+    ):
+        raise ValueError("expected_num_labels must be an integer >= 2 or null")
+    required = ("name", "dataset", "train_split", "validation_split", "test_split")
+    missing = [key for key in required if not dataset_config.get(key)]
+    if missing:
+        raise ValueError(
+            f"{dataset_config.get('name')}: legal task is missing {missing}"
+        )
+    return LegalTaskSpec(
+        name=str(dataset_config["name"]),
+        dataset=str(dataset_config["dataset"]),
+        dataset_config=dataset_config.get("config"),
+        revision=revision,
+        text_field=str(raw.get("text_field", dataset_config.get("text_field", "text"))),
+        label_field=label_field,
+        multilabel=multilabel,
+        train_split=str(raw.get("train_split", dataset_config["train_split"])),
+        validation_split=str(
+            raw.get("validation_split", dataset_config["validation_split"])
+        ),
+        test_split=str(raw.get("test_split", dataset_config["test_split"])),
+        expected_num_labels=expected,
+    )
+
+
+def legal_task_specs(config: dict[str, Any]) -> tuple[LegalTaskSpec, ...]:
+    specs = [parse_legal_task_spec(item) for item in config.get("datasets", [])]
+    return tuple(spec for spec in specs if spec is not None)
+
+
 # ---------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------
@@ -84,6 +190,7 @@ def load_dataset_split(
     split: str,
     *,
     dataset_config: str | None = None,
+    revision: str | None = None,
     streaming: bool = False,
 ):
     """Load one Hugging Face dataset split."""
@@ -98,6 +205,7 @@ def load_dataset_split(
         dataset_name,
         name=dataset_config,
         split=split,
+        revision=revision,
         streaming=streaming,
     )
 
@@ -138,6 +246,7 @@ def load_split_texts(
     dataset = load_dataset_split(
         dataset_name=dataset_config["dataset"],
         dataset_config=dataset_config.get("config"),
+        revision=dataset_config.get("revision"),
         split=split,
         streaming=dataset_config.get("streaming", False),
     )
@@ -145,6 +254,173 @@ def load_split_texts(
     return extract_texts(
         dataset,
         dataset_config.get("text_field", "text"),
+    )
+
+
+def _label_names(dataset: Any, field: str, labels: list[Any]) -> tuple[str, ...]:
+    feature = getattr(dataset, "features", {}).get(field)
+    feature = getattr(feature, "feature", feature)
+    names = getattr(feature, "names", None)
+    if names:
+        return tuple(str(name) for name in names)
+    flat = [
+        int(label)
+        for value in labels
+        for label in (value if isinstance(value, list | tuple) else [value])
+    ]
+    if not flat:
+        raise ValueError(f"Cannot infer label vocabulary for empty field {field!r}")
+    return tuple(str(index) for index in range(max(flat) + 1))
+
+
+def _encode_document(
+    tokenizer: Any, text: str, sequence_length: int
+) -> tuple[np.ndarray, np.ndarray]:
+    encoded = tokenizer(
+        text,
+        add_special_tokens=True,
+        truncation=True,
+        max_length=sequence_length,
+        return_tensors="np",
+    )
+    ids = np.asarray(encoded["input_ids"][0], dtype=np.int32)[:sequence_length]
+    if "attention_mask" in encoded:
+        mask = np.asarray(encoded["attention_mask"][0], dtype=np.bool_)[
+            :sequence_length
+        ]
+    else:
+        mask = np.ones_like(ids, dtype=np.bool_)
+    pad_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_id is None:
+        pad_id = getattr(tokenizer, "eos_token_id", None)
+    if pad_id is None:
+        raise ValueError("Tokenizer needs a pad or EOS token for labeled evaluation")
+    padding = sequence_length - len(ids)
+    if padding:
+        ids = np.pad(ids, (0, padding), constant_values=int(pad_id))
+        mask = np.pad(mask, (0, padding), constant_values=False)
+    if ids.shape != (sequence_length,) or mask.shape != (sequence_length,):
+        raise ValueError("Tokenizer returned malformed document arrays")
+    return ids, mask
+
+
+def array_fingerprint(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(str(tuple(array.shape)).encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def load_labeled_split(
+    spec: LegalTaskSpec,
+    split: str,
+    tokenizer: Any,
+    *,
+    sequence_length: int,
+    max_examples: int | None = None,
+) -> LabeledSplit:
+    """Load one pinned supervised split and derive gold semantic-factor masks."""
+    if sequence_length < 2:
+        raise ValueError("sequence_length must be >= 2")
+    if max_examples is not None and (
+        isinstance(max_examples, bool)
+        or not isinstance(max_examples, int)
+        or max_examples < 1
+    ):
+        raise ValueError("max_examples must be a positive integer or null")
+    split_name = spec.split_name(split)
+    dataset = load_dataset_split(
+        spec.dataset,
+        split_name,
+        dataset_config=spec.dataset_config,
+        revision=spec.revision,
+    )
+    columns = set(getattr(dataset, "column_names", ()))
+    missing = {spec.text_field, spec.label_field} - columns
+    if missing:
+        raise ValueError(
+            f"{spec.name}/{split}: missing fields {sorted(missing)}; available={sorted(columns)}"
+        )
+    rows = list(dataset)
+    if max_examples is not None:
+        rows = rows[:max_examples]
+    labels = [row[spec.label_field] for row in rows]
+    label_names = _label_names(dataset, spec.label_field, labels)
+    if (
+        spec.expected_num_labels is not None
+        and len(label_names) != spec.expected_num_labels
+    ):
+        raise ValueError(
+            f"{spec.name}: expected {spec.expected_num_labels} labels, got {len(label_names)}"
+        )
+    if not rows:
+        raise ValueError(f"{spec.name}/{split}: no labeled examples")
+
+    input_ids = []
+    attention_masks = []
+    transformed_input_ids = []
+    transformed_attention_masks = []
+    targets = np.zeros((len(rows), len(label_names)), dtype=np.int8)
+    example_ids = []
+    for index, (row, raw_label) in enumerate(zip(rows, labels, strict=True)):
+        text = row.get(spec.text_field)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"{spec.name}/{split}: example {index} has no text")
+        ids, mask = _encode_document(tokenizer, text, sequence_length)
+        transformed_ids, transformed_mask = _encode_document(
+            tokenizer, text.lower(), sequence_length
+        )
+        input_ids.append(ids)
+        attention_masks.append(mask)
+        transformed_input_ids.append(transformed_ids)
+        transformed_attention_masks.append(transformed_mask)
+        values = raw_label if spec.multilabel else [raw_label]
+        if not isinstance(values, list | tuple):
+            raise ValueError(
+                f"{spec.name}/{split}: example {index} labels are malformed"
+            )
+        for label in values:
+            label_index = int(label)
+            if not 0 <= label_index < len(label_names):
+                raise ValueError(
+                    f"{spec.name}/{split}: label {label_index} is outside vocabulary"
+                )
+            targets[index, label_index] = 1
+        identity = row.get("id", row.get("case_id", index))
+        digest = hashlib.sha256(
+            f"{spec.dataset}\0{spec.dataset_config}\0{split_name}\0{identity}\0{text}".encode()
+        ).hexdigest()
+        example_ids.append(digest)
+
+    factor_names = tuple(f"{spec.name}:{name}" for name in label_names)
+    ids_array = np.stack(input_ids)
+    mask_array = np.stack(attention_masks)
+    transformed_ids_array = np.stack(transformed_input_ids)
+    transformed_mask_array = np.stack(transformed_attention_masks)
+    fingerprint_hash = hashlib.sha256()
+    fingerprint_hash.update(spec.revision.encode("utf-8"))
+    fingerprint_hash.update(split_name.encode("utf-8"))
+    fingerprint_hash.update(ids_array.tobytes(order="C"))
+    fingerprint_hash.update(mask_array.tobytes(order="C"))
+    fingerprint_hash.update(transformed_ids_array.tobytes(order="C"))
+    fingerprint_hash.update(transformed_mask_array.tobytes(order="C"))
+    fingerprint_hash.update(targets.tobytes(order="C"))
+    return LabeledSplit(
+        task_name=spec.name,
+        split=split,
+        input_ids=ids_array,
+        attention_mask=mask_array,
+        transformed_input_ids=transformed_ids_array,
+        transformed_attention_mask=transformed_mask_array,
+        targets=targets,
+        label_names=label_names,
+        factor_names=factor_names,
+        factor_mask=targets.astype(np.bool_),
+        example_ids=tuple(example_ids),
+        multilabel=spec.multilabel,
+        fingerprint=fingerprint_hash.hexdigest(),
     )
 
 
@@ -342,10 +618,19 @@ def build_separate_tasks(
             )
 
             stats[name] = {
+                "dataset": item["dataset"],
+                "config": item.get("config"),
+                "revision": item.get("revision"),
+                "train_split": item["train_split"],
+                "validation_split": item["validation_split"],
+                "test_split": item["test_split"],
                 "training_blocks": len(train_blocks),
                 "validation_blocks": len(validation_blocks),
                 "test_blocks": len(test_blocks[name]),
                 "dropped_training_blocks": (len(train_blocks) % batch_size),
+                "training_sha256": array_fingerprint(train_blocks),
+                "validation_sha256": array_fingerprint(validation_blocks),
+                "test_sha256": array_fingerprint(test_blocks[name]),
             }
 
     if not tasks:
@@ -396,6 +681,7 @@ def build_story_tasks(
     eval_batches: int,
     seed: int,
     default_epochs: int,
+    max_tasks: int | None = None,
 ) -> tuple[tuple[Domain, ...], dict[str, np.ndarray], dict[str, Any]]:
     """Build sequential story tasks with optional max_tasks limit.
 
@@ -409,15 +695,6 @@ def build_story_tasks(
     name = item["name"]
 
     stories_per_task = int(item.get("stories_per_task", 10))
-
-    max_tasks = load_runtime_config("configs/runtime_datasets.yaml")["runtime"].get(
-        "max_tasks"
-    )
-
-    if max_tasks is not None and (
-        isinstance(max_tasks, bool) or not isinstance(max_tasks, int) or max_tasks < 1
-    ):
-        raise ValueError("max_tasks must be a positive integer or null.")
 
     if max_tasks is not None and (
         isinstance(max_tasks, bool) or not isinstance(max_tasks, int) or max_tasks < 1
@@ -634,6 +911,10 @@ def load_runtime_data(
     config_path: str | Path,
     tokenizer: Any,
     *,
+    source: str | None = None,
+    task_order: tuple[str, ...] | list[str] | None = None,
+    training_mode: str | None = None,
+    heldout_tasks: tuple[str, ...] | list[str] | None = None,
     sequence_length: int = 128,
     batch_size: int = 16,
     eval_batches: int = 8,
@@ -646,8 +927,22 @@ def load_runtime_data(
     runtime_config = config["runtime"]
     datasets_config = config["datasets"]
 
-    mode = runtime_config["source"]
+    mode = runtime_config["source"] if source is None else source
     seed = int(runtime_config.get("seed", 42))
+    requested_order = tuple(task_order or runtime_config.get("task_order", ()))
+    training_mode = training_mode or str(
+        runtime_config.get("training_mode", "sequential")
+    )
+    heldout_tasks = tuple(
+        heldout_tasks
+        if heldout_tasks is not None
+        else runtime_config.get("heldout_tasks", ())
+    )
+
+    if mode not in {"separate", "stories"}:
+        raise ValueError("source must be 'separate' or 'stories'.")
+    if training_mode not in {"sequential", "joint"}:
+        raise ValueError("training_mode must be 'sequential' or 'joint'.")
 
     if sequence_length < 2:
         raise ValueError("sequence_length must be >= 2 for next-token training.")
@@ -686,19 +981,69 @@ def load_runtime_data(
             eval_batches=eval_batches,
             seed=seed,
             default_epochs=default_epochs,
+            max_tasks=runtime_config.get("max_tasks"),
         )
 
     else:
         raise ValueError(f"Unsupported runtime mode: {mode!r}")
 
-    task_order = tuple(task.name for task in tasks)
+    if requested_order:
+        available = {task.name: task for task in tasks}
+        if set(requested_order) != set(available) or len(requested_order) != len(
+            available
+        ):
+            raise ValueError(
+                f"task_order must contain each task exactly once; available={sorted(available)}"
+            )
+        tasks = tuple(available[name] for name in requested_order)
+
+    heldout = tuple(str(name) for name in heldout_tasks)
+    unknown_heldout = sorted(set(heldout) - {task.name for task in tasks})
+    if unknown_heldout:
+        raise ValueError(f"Unknown held-out tasks: {unknown_heldout}")
+    if len(set(heldout)) != len(heldout):
+        raise ValueError("heldout_tasks must be unique")
+    source_tasks = tuple(task for task in tasks if task.name not in set(heldout))
+    if not source_tasks:
+        raise ValueError("At least one non-held-out training task is required")
+
+    if training_mode == "joint":
+        expanded = [
+            np.tile(
+                task.train_blocks[
+                    : (len(task.train_blocks) // batch_size) * batch_size
+                ],
+                (task.epochs, 1),
+            )
+            for task in source_tasks
+            if task.epochs > 0
+        ]
+        if not expanded:
+            joint_blocks = np.empty((0, sequence_length), dtype=np.int32)
+        else:
+            joint_blocks = np.concatenate(expanded, axis=0)
+        training_tasks = (
+            Domain(
+                name="joint",
+                train_blocks=joint_blocks,
+                eval_set=(),
+                epochs=1,
+            ),
+        )
+    else:
+        training_tasks = source_tasks
+
+    tasks = source_tasks
+    task_order_names = tuple(task.name for task in tasks)
 
     metadata = {
         "mode": mode,
         "seed": seed,
         "sequence_length": sequence_length,
         "batch_size": batch_size,
-        "task_order": list(task_order),
+        "task_order": list(task_order_names),
+        "training_mode": training_mode,
+        "heldout_tasks": list(heldout),
         "datasets": [
             item["name"]
             for item in datasets_config
@@ -711,17 +1056,25 @@ def load_runtime_data(
     return RuntimeData(
         tasks=tasks,
         test_blocks=test_blocks,
-        task_order=task_order,
+        task_order=task_order_names,
         metadata=metadata,
+        training_tasks=training_tasks,
+        heldout_tasks=heldout,
     )
 
 
 __all__ = [
+    "LabeledSplit",
+    "LegalTaskSpec",
     "RuntimeData",
+    "array_fingerprint",
     "load_runtime_config",
     "load_runtime_data",
     "load_dataset_split",
     "load_split_texts",
+    "load_labeled_split",
+    "legal_task_specs",
+    "parse_legal_task_spec",
     "extract_texts",
     "encode_texts",
     "tokenize_texts",

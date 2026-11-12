@@ -1,38 +1,131 @@
-
 runtime:
   source: stories
   seed: 42
   max_tasks: 3       # null = use all tasks
+
+evaluation:
+  split: test
+  max_examples: null
+  batch_size: 8
+  sequence_length: 512
+  probe_l2: 1.0e-3
+  calibration_bins: 15
+  min_factor_support: 20
+  anchor:
+    name: general_language_anchor
+    texts:
+      - "The capital of France is Paris."
+      - "Water freezes at zero degrees Celsius."
+      - "A musician practiced the piano before the concert."
+      - "The children read a story in the library."
+      - "A healthy garden needs sunlight and water."
+  long_range:
+    schema: long-range/v1
+    items:
+      - id: relation-near
+        family: relation_recall
+        distance: near
+        context: "Company A owns Company B. Company B owns Company C."
+        question: " Which company indirectly controls Company C?"
+        choices: [" Company A", " Company B", " Company C"]
+        answer: 0
+      - id: relation-far
+        family: relation_recall
+        distance: far
+        context: "Company A owns Company B. The filing discusses revenue, taxes, employees, offices, suppliers, customers, and annual reporting. Company B owns Company C."
+        filler: " The document also records routine schedules, notices, signatures, dates, addresses, and administrative provisions."
+        filler_repeat: 35
+        question: " Which company indirectly controls Company C?"
+        choices: [" Company A", " Company B", " Company C"]
+        answer: 0
+      - id: metaphor-near
+        family: metaphor_consistency
+        distance: near
+        context: "The agreement was a bridge between the two organizations."
+        question: " In this passage, the bridge represents"
+        choices: [" cooperation", " a physical road", " a courtroom"]
+        answer: 0
+      - id: metaphor-far
+        family: metaphor_consistency
+        distance: far
+        context: "The agreement was a bridge between the two organizations. Many clauses then define notice periods, payment schedules, audits, and governing law."
+        filler: " Additional sections list ordinary definitions, dates, addresses, reports, and procedural requirements."
+        filler_repeat: 35
+        question: " In this passage, the bridge represents"
+        choices: [" cooperation", " a physical road", " a courtroom"]
+        answer: 0
+      - id: idiom-near
+        family: idiom_preservation
+        distance: near
+        context: "The parties agreed to meet halfway during negotiation."
+        question: " They intended to"
+        choices: [" compromise", " measure a road", " end all talks"]
+        answer: 0
+      - id: idiom-far
+        family: idiom_preservation
+        distance: far
+        context: "The parties agreed to meet halfway during negotiation. The following pages describe warranties, indemnities, assignments, notices, and signatures."
+        filler: " The remaining text contains standard schedules, contact details, dates, notices, and filing instructions."
+        filler_repeat: 35
+        question: " Their negotiation strategy was to"
+        choices: [" compromise", " measure a road", " end all talks"]
+        answer: 0
+  symbolic_rankings: null
+
 datasets:
   - name: eurlex
     type: separate
     dataset: coastalcph/lex_glue
     config: eurlex
+    revision: c23fdff1a6bf74e0e1a71cb86f1e781d37da888c
     train_split: "train[:5000]"
     validation_split: "validation[:500]"
     test_split: "test[:500]"
     text_field: text
     separator: "\n\n"
+    legal_task:
+      label_field: labels
+      multilabel: true
+      expected_num_labels: 100
+      train_split: train
+      validation_split: validation
+      test_split: test
 
   - name: ledgar
     type: separate
     dataset: coastalcph/lex_glue
     config: ledgar
+    revision: c23fdff1a6bf74e0e1a71cb86f1e781d37da888c
     train_split: "train[:20000]"
     validation_split: "validation[:2000]"
     test_split: "test[:2000]"
     text_field: text
     separator: "\n\n"
+    legal_task:
+      label_field: label
+      multilabel: false
+      expected_num_labels: 100
+      train_split: train
+      validation_split: validation
+      test_split: test
 
   - name: scotus
     type: separate
     dataset: coastalcph/lex_glue
     config: scotus
+    revision: c23fdff1a6bf74e0e1a71cb86f1e781d37da888c
     train_split: "train[:500]"
     validation_split: "validation[:200]"
     test_split: "test[:200]"
     text_field: text
     separator: "\n\n"
+    legal_task:
+      label_field: label
+      multilabel: false
+      expected_num_labels: 13
+      train_split: train
+      validation_split: validation
+      test_split: test
 
   - name: rocstories
     type: stories
@@ -43,3 +136,14 @@ datasets:
     text_field: text
     stories_per_task: 25
     shuffle_train: true
+
+  - name: unfair_tos
+    type: heldout
+    dataset: coastalcph/lex_glue
+    config: unfair_tos
+    revision: c23fdff1a6bf74e0e1a71cb86f1e781d37da888c
+    train_split: train
+    validation_split: validation
+    test_split: "test[:500]"
+    text_field: text
+    separator: "\n\n"
