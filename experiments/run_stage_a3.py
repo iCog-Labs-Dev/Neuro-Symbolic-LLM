@@ -10,6 +10,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("GLOG_minloglevel", "3")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -22,10 +23,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import optax  # noqa: E402
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
+from metrics.performance import (  # noqa: E402
+    classification_metrics,
+    classification_predictions,
+)
 from residual import ResidualAdapter  # noqa: E402
 from runtime.data_loader import load_runtime_data  # noqa: E402
 from stages.results import (  # noqa: E402
@@ -40,6 +46,7 @@ from stages.stage_base import (  # noqa: E402
     configure_logging,
     format_params,
     load_configs,
+    load_task_examples,
     log_experiment_header,
     log_final_summary,
     make_eval_set,
@@ -87,6 +94,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--eval-batches", type=int, default=None)
     parser.add_argument("--split", type=str, default="test")
+    parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument(
+        "--runtime-source",
+        choices=("separate", "stories"),
+        default=None,
+        help="Override runtime.source from the shared dataset configuration.",
+    )
 
     parser.add_argument(
         "--energy-curve",
@@ -99,6 +113,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--training-mode", choices=("sequential", "joint"), default="sequential"
+    )
+    parser.add_argument("--task-order", nargs="+", default=None)
+    parser.add_argument("--heldout-task", action="append", default=[])
 
     return parser.parse_args(argv)
 
@@ -201,6 +220,37 @@ def evaluate_deployment(
     }
 
 
+def evaluate_task_deployment(
+    substrate: FrozenSubstrate,
+    model: A3Model,
+    params: Any,
+    domain: Any,
+) -> dict[str, Any]:
+    task_examples = getattr(domain, "task_examples", ())
+    label_token_ids = getattr(domain, "label_token_ids", ())
+    if not task_examples or not label_token_ids:
+        reason = getattr(domain, "task_skip_reason", None)
+        return {"task_skip_reason": reason} if reason else {}
+    targets = np.asarray([example[1] for example in task_examples])
+    width = max(len(item) for item in label_token_ids)
+    token_ids = jnp.asarray(
+        [list(item) + [item[-1]] * (width - len(item)) for item in label_token_ids],
+        dtype=jnp.int32,
+    )
+    prediction_batches = []
+    for start in range(0, len(task_examples), 32):
+        batch = task_examples[start : start + 32]
+        ids = jnp.stack([example[0] for example in batch])
+        positions = jnp.asarray([example[2] for example in batch], dtype=jnp.int32)
+        logits, _ = model.deploy_logits(params, ids)
+        prediction_batches.append(
+            np.asarray(classification_predictions(logits, positions, token_ids))
+        )
+    predictions = np.concatenate(prediction_batches)
+    values = classification_metrics(targets, predictions)
+    return {"task_accuracy": values["accuracy"], "task_f1": values["macro_f1"]}
+
+
 # ---------------------------------------------------------------------
 # A3 PC gradient adapter
 # ---------------------------------------------------------------------
@@ -268,19 +318,27 @@ def run_one(
     n_trainable = sum(int(leaf.size) for leaf in jax.tree_util.tree_leaves(params))
 
     domains = runtime_data.tasks
+    training_tasks = runtime_data.training_tasks or domains
 
     # -------------------------------------------------------------
     # Evaluation callback
     # -------------------------------------------------------------
 
+    task_by_eval_set = {id(task.eval_set): task for task in domains}
+    task_by_name = {task.name: task for task in domains}
+
     def eval_fn(p, eval_set):
-        return evaluate_deployment(
+        result = evaluate_deployment(
             substrate,
             model,
             p,
             eval_set,
             jit=train_cfg.jit,
         )
+        task = task_by_eval_set.get(id(eval_set))
+        if task is not None:
+            result.update(evaluate_task_deployment(substrate, model, p, task))
+        return result
 
     # -------------------------------------------------------------
     # A3-specific PC energy curve callback
@@ -313,7 +371,9 @@ def run_one(
         train_cfg.output_dir,
         run_name,
     ) as writer:
-        writer.write_config(cfg.to_dict())
+        effective_config = cfg.to_dict()
+        effective_config["a3_hybrid"] = effective_config.pop("objective")
+        writer.write_config(effective_config)
 
         writer.write_json(
             "meta.json",
@@ -364,7 +424,7 @@ def run_one(
 
         params, summary = train(
             params=params,
-            tasks=domains,
+            tasks=training_tasks,
             forward_fn=None,
             loss_fn=None,
             loss_config=None,
@@ -375,6 +435,7 @@ def run_one(
             pc_gradient_fn=make_a3_gradient_fn(model),
             checkpoint_fn=model.adapter_params,
             after_task_fn=after_task_fn,
+            evaluation_tasks=domains,
         )
 
         # ---------------------------------------------------------
@@ -415,6 +476,9 @@ def run_one(
                 params,
                 test_set,
             )
+            task = task_by_name.get(name)
+            if task is not None and "task_accuracy" not in result:
+                result.update(evaluate_task_deployment(substrate, model, params, task))
 
             test_results[name] = result
 
@@ -431,6 +495,9 @@ def run_one(
             summary,
         )
 
+        if not frozen["params_unchanged"]:
+            raise RuntimeError("Frozen substrate parameters changed during training.")
+
     # -------------------------------------------------------------
     # Final experiment summary
     # -------------------------------------------------------------
@@ -441,10 +508,6 @@ def run_one(
         frozen,
         start_time=start_time,
     )
-
-    if not frozen["params_unchanged"]:
-        log.error("Frozen substrate parameters changed during training.")
-        return 1
 
     return 0
 
@@ -498,13 +561,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     eval_batches = train_cfg.eval_batches
 
     runtime_data = load_runtime_data(
-        config_path=DEFAULT_RUNTIME_CONFIG,
+        config_path=args.runtime_config,
         tokenizer=substrate.tokenizer,
+        source=args.runtime_source,
+        task_order=args.task_order,
+        training_mode=args.training_mode,
+        heldout_tasks=args.heldout_task,
         sequence_length=train_cfg.seq_len,
         batch_size=train_cfg.batch_size,
         eval_batches=eval_batches,
         default_epochs=train_cfg.epochs,
     )
+
+    domain_cfgs = {d.name: d for d in cfg.domains}
+    if domain_cfgs:
+        updated_tasks = []
+        for task in runtime_data.tasks:
+            d_cfg = domain_cfgs.get(task.name)
+            if d_cfg is not None:
+                task_examples, label_token_ids = load_task_examples(
+                    substrate, d_cfg, d_cfg.eval_split, train_cfg.seq_len
+                )
+                skip_reason = None
+                if not task_examples:
+                    skip_reason = f"label field '{d_cfg.label_field}' not in dataset or no labeled examples"
+                updated_tasks.append(
+                    replace(
+                        task,
+                        task_examples=task_examples,
+                        label_token_ids=label_token_ids,
+                        task_skip_reason=skip_reason,
+                    )
+                )
+            else:
+                updated_tasks.append(task)
+        runtime_data = replace(runtime_data, tasks=tuple(updated_tasks))
 
     domains = runtime_data.tasks
 
