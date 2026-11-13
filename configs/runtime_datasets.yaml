@@ -4,13 +4,6 @@ runtime:
   max_tasks: 3       # null = use all tasks
 
 evaluation:
-  split: test
-  max_examples: null
-  batch_size: 8
-  sequence_length: 512
-  probe_l2: 1.0e-3
-  calibration_bins: 15
-  min_factor_support: 20
   anchor:
     name: general_language_anchor
     texts:
@@ -70,7 +63,6 @@ evaluation:
         question: " Their negotiation strategy was to"
         choices: [" compromise", " measure a road", " end all talks"]
         answer: 0
-  symbolic_rankings: null
 
 datasets:
   - name: eurlex
@@ -83,13 +75,6 @@ datasets:
     test_split: "test[:500]"
     text_field: text
     separator: "\n\n"
-    legal_task:
-      label_field: labels
-      multilabel: true
-      expected_num_labels: 100
-      train_split: train
-      validation_split: validation
-      test_split: test
 
   - name: ledgar
     type: separate
@@ -101,13 +86,6 @@ datasets:
     test_split: "test[:2000]"
     text_field: text
     separator: "\n\n"
-    legal_task:
-      label_field: label
-      multilabel: false
-      expected_num_labels: 100
-      train_split: train
-      validation_split: validation
-      test_split: test
 
   - name: scotus
     type: separate
@@ -119,17 +97,10 @@ datasets:
     test_split: "test[:200]"
     text_field: text
     separator: "\n\n"
-    legal_task:
-      label_field: label
-      multilabel: false
-      expected_num_labels: 13
-      train_split: train
-      validation_split: validation
-      test_split: test
-
   - name: rocstories
     type: stories
     dataset: hamishivi/ROCStories
+    revision: cd2b3893a6ee30afada293d5a8f877c3023530e1
     train_split: train
     validation_split: validation
     test_split: test

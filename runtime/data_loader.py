@@ -1,4 +1,4 @@
-"""Unified runtime dataset loader for sequential A1-A4 experiments.
+"""Unified runtime dataset loader for sequential language-model experiments.
 
 Supported modes:
     separate: Each configured dataset becomes one sequential task.
@@ -44,54 +44,6 @@ class RuntimeData:
         }
 
 
-@dataclass(frozen=True)
-class LegalTaskSpec:
-    """Pinned supervised-task definition used by post-hoc legal evaluation."""
-
-    name: str
-    dataset: str
-    dataset_config: str | None
-    revision: str
-    text_field: str
-    label_field: str
-    multilabel: bool
-    train_split: str
-    validation_split: str
-    test_split: str
-    expected_num_labels: int | None = None
-
-    def split_name(self, split: str) -> str:
-        if split == "train":
-            return self.train_split
-        if split in {"validation", "eval"}:
-            return self.validation_split
-        if split == "test":
-            return self.test_split
-        raise ValueError("split must be 'train', 'validation', 'eval', or 'test'")
-
-
-@dataclass(frozen=True)
-class LabeledSplit:
-    """Tokenized documents, gold labels, and semantic-factor annotations."""
-
-    task_name: str
-    split: str
-    input_ids: np.ndarray
-    attention_mask: np.ndarray
-    transformed_input_ids: np.ndarray
-    transformed_attention_mask: np.ndarray
-    targets: np.ndarray
-    label_names: tuple[str, ...]
-    factor_names: tuple[str, ...]
-    factor_mask: np.ndarray
-    example_ids: tuple[str, ...]
-    multilabel: bool
-    fingerprint: str
-
-    def probe_targets(self) -> np.ndarray:
-        return self.targets if self.multilabel else np.argmax(self.targets, axis=1)
-
-
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
@@ -123,61 +75,6 @@ def load_runtime_config(config_path: str | Path) -> dict[str, Any]:
         raise ValueError("Configuration requires a nonempty datasets list.")
 
     return config
-
-
-def parse_legal_task_spec(dataset_config: dict[str, Any]) -> LegalTaskSpec | None:
-    """Parse one dataset's optional supervised legal-task definition."""
-    raw = dataset_config.get("legal_task")
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise ValueError(f"{dataset_config.get('name')}: legal_task must be a mapping")
-    revision = dataset_config.get("revision")
-    if not isinstance(revision, str) or not revision:
-        raise ValueError(
-            f"{dataset_config.get('name')}: legal_task requires a pinned revision"
-        )
-    label_field = raw.get("label_field")
-    if not isinstance(label_field, str) or not label_field:
-        raise ValueError(
-            f"{dataset_config.get('name')}: legal_task.label_field is required"
-        )
-    multilabel = raw.get("multilabel")
-    if not isinstance(multilabel, bool):
-        raise ValueError(
-            f"{dataset_config.get('name')}: legal_task.multilabel must be boolean"
-        )
-    expected = raw.get("expected_num_labels")
-    if expected is not None and (
-        isinstance(expected, bool) or not isinstance(expected, int) or expected < 2
-    ):
-        raise ValueError("expected_num_labels must be an integer >= 2 or null")
-    required = ("name", "dataset", "train_split", "validation_split", "test_split")
-    missing = [key for key in required if not dataset_config.get(key)]
-    if missing:
-        raise ValueError(
-            f"{dataset_config.get('name')}: legal task is missing {missing}"
-        )
-    return LegalTaskSpec(
-        name=str(dataset_config["name"]),
-        dataset=str(dataset_config["dataset"]),
-        dataset_config=dataset_config.get("config"),
-        revision=revision,
-        text_field=str(raw.get("text_field", dataset_config.get("text_field", "text"))),
-        label_field=label_field,
-        multilabel=multilabel,
-        train_split=str(raw.get("train_split", dataset_config["train_split"])),
-        validation_split=str(
-            raw.get("validation_split", dataset_config["validation_split"])
-        ),
-        test_split=str(raw.get("test_split", dataset_config["test_split"])),
-        expected_num_labels=expected,
-    )
-
-
-def legal_task_specs(config: dict[str, Any]) -> tuple[LegalTaskSpec, ...]:
-    specs = [parse_legal_task_spec(item) for item in config.get("datasets", [])]
-    return tuple(spec for spec in specs if spec is not None)
 
 
 # ---------------------------------------------------------------------
@@ -257,53 +154,6 @@ def load_split_texts(
     )
 
 
-def _label_names(dataset: Any, field: str, labels: list[Any]) -> tuple[str, ...]:
-    feature = getattr(dataset, "features", {}).get(field)
-    feature = getattr(feature, "feature", feature)
-    names = getattr(feature, "names", None)
-    if names:
-        return tuple(str(name) for name in names)
-    flat = [
-        int(label)
-        for value in labels
-        for label in (value if isinstance(value, list | tuple) else [value])
-    ]
-    if not flat:
-        raise ValueError(f"Cannot infer label vocabulary for empty field {field!r}")
-    return tuple(str(index) for index in range(max(flat) + 1))
-
-
-def _encode_document(
-    tokenizer: Any, text: str, sequence_length: int
-) -> tuple[np.ndarray, np.ndarray]:
-    encoded = tokenizer(
-        text,
-        add_special_tokens=True,
-        truncation=True,
-        max_length=sequence_length,
-        return_tensors="np",
-    )
-    ids = np.asarray(encoded["input_ids"][0], dtype=np.int32)[:sequence_length]
-    if "attention_mask" in encoded:
-        mask = np.asarray(encoded["attention_mask"][0], dtype=np.bool_)[
-            :sequence_length
-        ]
-    else:
-        mask = np.ones_like(ids, dtype=np.bool_)
-    pad_id = getattr(tokenizer, "pad_token_id", None)
-    if pad_id is None:
-        pad_id = getattr(tokenizer, "eos_token_id", None)
-    if pad_id is None:
-        raise ValueError("Tokenizer needs a pad or EOS token for labeled evaluation")
-    padding = sequence_length - len(ids)
-    if padding:
-        ids = np.pad(ids, (0, padding), constant_values=int(pad_id))
-        mask = np.pad(mask, (0, padding), constant_values=False)
-    if ids.shape != (sequence_length,) or mask.shape != (sequence_length,):
-        raise ValueError("Tokenizer returned malformed document arrays")
-    return ids, mask
-
-
 def array_fingerprint(value: np.ndarray) -> str:
     array = np.ascontiguousarray(value)
     digest = hashlib.sha256()
@@ -311,117 +161,6 @@ def array_fingerprint(value: np.ndarray) -> str:
     digest.update(str(tuple(array.shape)).encode("ascii"))
     digest.update(array.tobytes(order="C"))
     return digest.hexdigest()
-
-
-def load_labeled_split(
-    spec: LegalTaskSpec,
-    split: str,
-    tokenizer: Any,
-    *,
-    sequence_length: int,
-    max_examples: int | None = None,
-) -> LabeledSplit:
-    """Load one pinned supervised split and derive gold semantic-factor masks."""
-    if sequence_length < 2:
-        raise ValueError("sequence_length must be >= 2")
-    if max_examples is not None and (
-        isinstance(max_examples, bool)
-        or not isinstance(max_examples, int)
-        or max_examples < 1
-    ):
-        raise ValueError("max_examples must be a positive integer or null")
-    split_name = spec.split_name(split)
-    dataset = load_dataset_split(
-        spec.dataset,
-        split_name,
-        dataset_config=spec.dataset_config,
-        revision=spec.revision,
-    )
-    columns = set(getattr(dataset, "column_names", ()))
-    missing = {spec.text_field, spec.label_field} - columns
-    if missing:
-        raise ValueError(
-            f"{spec.name}/{split}: missing fields {sorted(missing)}; available={sorted(columns)}"
-        )
-    rows = list(dataset)
-    if max_examples is not None:
-        rows = rows[:max_examples]
-    labels = [row[spec.label_field] for row in rows]
-    label_names = _label_names(dataset, spec.label_field, labels)
-    if (
-        spec.expected_num_labels is not None
-        and len(label_names) != spec.expected_num_labels
-    ):
-        raise ValueError(
-            f"{spec.name}: expected {spec.expected_num_labels} labels, got {len(label_names)}"
-        )
-    if not rows:
-        raise ValueError(f"{spec.name}/{split}: no labeled examples")
-
-    input_ids = []
-    attention_masks = []
-    transformed_input_ids = []
-    transformed_attention_masks = []
-    targets = np.zeros((len(rows), len(label_names)), dtype=np.int8)
-    example_ids = []
-    for index, (row, raw_label) in enumerate(zip(rows, labels, strict=True)):
-        text = row.get(spec.text_field)
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError(f"{spec.name}/{split}: example {index} has no text")
-        ids, mask = _encode_document(tokenizer, text, sequence_length)
-        transformed_ids, transformed_mask = _encode_document(
-            tokenizer, text.lower(), sequence_length
-        )
-        input_ids.append(ids)
-        attention_masks.append(mask)
-        transformed_input_ids.append(transformed_ids)
-        transformed_attention_masks.append(transformed_mask)
-        values = raw_label if spec.multilabel else [raw_label]
-        if not isinstance(values, list | tuple):
-            raise ValueError(
-                f"{spec.name}/{split}: example {index} labels are malformed"
-            )
-        for label in values:
-            label_index = int(label)
-            if not 0 <= label_index < len(label_names):
-                raise ValueError(
-                    f"{spec.name}/{split}: label {label_index} is outside vocabulary"
-                )
-            targets[index, label_index] = 1
-        identity = row.get("id", row.get("case_id", index))
-        digest = hashlib.sha256(
-            f"{spec.dataset}\0{spec.dataset_config}\0{split_name}\0{identity}\0{text}".encode()
-        ).hexdigest()
-        example_ids.append(digest)
-
-    factor_names = tuple(f"{spec.name}:{name}" for name in label_names)
-    ids_array = np.stack(input_ids)
-    mask_array = np.stack(attention_masks)
-    transformed_ids_array = np.stack(transformed_input_ids)
-    transformed_mask_array = np.stack(transformed_attention_masks)
-    fingerprint_hash = hashlib.sha256()
-    fingerprint_hash.update(spec.revision.encode("utf-8"))
-    fingerprint_hash.update(split_name.encode("utf-8"))
-    fingerprint_hash.update(ids_array.tobytes(order="C"))
-    fingerprint_hash.update(mask_array.tobytes(order="C"))
-    fingerprint_hash.update(transformed_ids_array.tobytes(order="C"))
-    fingerprint_hash.update(transformed_mask_array.tobytes(order="C"))
-    fingerprint_hash.update(targets.tobytes(order="C"))
-    return LabeledSplit(
-        task_name=spec.name,
-        split=split,
-        input_ids=ids_array,
-        attention_mask=mask_array,
-        transformed_input_ids=transformed_ids_array,
-        transformed_attention_mask=transformed_mask_array,
-        targets=targets,
-        label_names=label_names,
-        factor_names=factor_names,
-        factor_mask=targets.astype(np.bool_),
-        example_ids=tuple(example_ids),
-        multilabel=spec.multilabel,
-        fingerprint=fingerprint_hash.hexdigest(),
-    )
 
 
 # ---------------------------------------------------------------------
@@ -970,7 +709,7 @@ def load_runtime_data(
 
         if len(story_configs) != 1:
             raise ValueError(
-                "Story mode requires exactly one dataset " "with type='stories'."
+                "Story mode requires exactly one dataset with type='stories'."
             )
 
         tasks, test_blocks, preprocessing_stats = build_story_tasks(
@@ -1064,17 +803,12 @@ def load_runtime_data(
 
 
 __all__ = [
-    "LabeledSplit",
-    "LegalTaskSpec",
     "RuntimeData",
     "array_fingerprint",
     "load_runtime_config",
     "load_runtime_data",
     "load_dataset_split",
     "load_split_texts",
-    "load_labeled_split",
-    "legal_task_specs",
-    "parse_legal_task_spec",
     "extract_texts",
     "encode_texts",
     "tokenize_texts",

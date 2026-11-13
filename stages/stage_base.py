@@ -32,11 +32,8 @@ except (ImportError, RuntimeError):
 from frozenllm.substrate import FrozenSubstrate, identity_modify
 from losses.shared import model_loss_terms
 from metrics.performance import (
-    accuracy_forgetting,
-    classification_metrics,
-    classification_predictions,
     mean_forgetting,
-    mean_seen_accuracy,
+    mean_seen_loss,
     perplexity,
     training_step_time,
 )
@@ -125,8 +122,6 @@ class DomainConfig:
     # Joins rows into one stream; use "\n\n" for one-document-per-row datasets.
     separator: str = ""
     epochs: int | None = None
-    label_field: str = "label"
-    label_tokens: tuple[str, ...] | list[str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not DOMAIN_NAME.match(self.name):
@@ -239,9 +234,6 @@ class Domain:
     train_blocks: np.ndarray
     eval_set: tuple[jax.Array, ...]
     epochs: int
-    task_examples: tuple[tuple[jax.Array, int, int], ...] = ()
-    label_token_ids: tuple[tuple[int, ...], ...] = ()
-    task_skip_reason: str | None = None
 
 
 def load_token_blocks(
@@ -270,71 +262,6 @@ def load_token_blocks(
     # Annotated: numpy is opaque to mypy (follow_imports = "skip").
     blocks: np.ndarray = np.asarray(ids[: n * seq_len], dtype=np.int32)
     return blocks.reshape(n, seq_len)
-
-
-def load_task_examples(
-    substrate: FrozenSubstrate,
-    domain: DomainConfig,
-    split: str,
-    seq_len: int,
-) -> tuple[tuple[tuple[jax.Array, int, int], ...], tuple[tuple[int, ...], ...]]:
-    if load_dataset is None or substrate.tokenizer is None:
-        return (), ()
-    try:
-        raw_ds = load_dataset(
-            domain.dataset, domain.dataset_config, split=split, trust_remote_code=True
-        )
-    except TypeError:
-        raw_ds = load_dataset(domain.dataset, domain.dataset_config, split=split)
-    if domain.label_field not in raw_ds.column_names:
-        return (), ()
-    labels = list(raw_ds[domain.label_field])
-    unique_labels = list(dict.fromkeys(labels))
-    verbalizers = (
-        [str(label) for label in unique_labels]
-        if domain.label_tokens is None
-        else list(domain.label_tokens)
-    )
-    if len(verbalizers) != len(unique_labels):
-        raise ValueError(
-            f"{domain.name}: label_tokens must have one entry per class "
-            f"({len(unique_labels)}), got {len(verbalizers)}"
-        )
-    label_token_ids = []
-    for verbalizer in verbalizers:
-        ids = substrate.tokenizer.encode(
-            f" {verbalizer}", add_special_tokens=False
-        )
-        if not ids:
-            raise ValueError(f"{domain.name}: label token {verbalizer!r} is empty")
-        label_token_ids.append(tuple(int(token_id) for token_id in ids))
-    label_index = {label: index for index, label in enumerate(unique_labels)}
-    pad_id = (
-        substrate.tokenizer.pad_token_id
-        if substrate.tokenizer.pad_token_id is not None
-        else substrate.tokenizer.eos_token_id
-    )
-    if pad_id is None:
-        raise ValueError(f"{domain.name}: tokenizer needs a pad or EOS token")
-    examples = []
-    for row, label in zip(raw_ds, labels, strict=True):
-        text = row.get(domain.text_field)
-        if not isinstance(text, str):
-            text = next(
-                (value for value in row.values() if isinstance(value, str) and value),
-                "",
-            )
-        ids = substrate.tokenizer.encode(
-            text, add_special_tokens=False, truncation=True, max_length=seq_len
-        )
-        if not ids:
-            continue
-        position = len(ids) - 1
-        padded = ids + [pad_id] * (seq_len - len(ids))
-        examples.append(
-            (jnp.asarray(padded, dtype=jnp.int32), label_index[label], position)
-        )
-    return tuple(examples), tuple(label_token_ids)
 
 
 def make_eval_set(
@@ -403,22 +330,11 @@ def prepare_domain(
     validation = load_token_blocks(
         substrate, domain, domain.eval_split, training.seq_len
     )
-    task_examples, label_token_ids = load_task_examples(
-        substrate, domain, domain.eval_split, training.seq_len
-    )
-    skip_reason = None
-    if not task_examples:
-        skip_reason = (
-            f"label field '{domain.label_field}' not in dataset or no labeled examples"
-        )
     return Domain(
         name=domain.name,
         train_blocks=train,
         eval_set=make_eval_set(validation, training.batch_size, training.eval_batches),
         epochs=training.epochs if domain.epochs is None else domain.epochs,
-        task_examples=task_examples,
-        label_token_ids=label_token_ids,
-        task_skip_reason=skip_reason,
     )
 
 
@@ -504,40 +420,6 @@ def evaluate(
     }
 
 
-def evaluate_task(
-    substrate: FrozenSubstrate,
-    adapter: ResidualAdapter,
-    params: AdapterParams,
-    examples: Sequence[tuple[jax.Array, int, int]],
-    label_token_ids: Sequence[Sequence[int]],
-) -> dict[str, float]:
-    if not examples or not label_token_ids:
-        return {}
-    width = max(len(item) for item in label_token_ids)
-    token_matrix = jnp.asarray(
-        [list(item) + [item[-1]] * (width - len(item)) for item in label_token_ids],
-        dtype=jnp.int32,
-    )
-    targets = np.asarray([example[1] for example in examples], dtype=np.int32)
-    prediction_batches = []
-    for start in range(0, len(examples), 32):
-        batch = examples[start : start + 32]
-        ids = jnp.stack([example[0] for example in batch])
-        positions = jnp.asarray([example[2] for example in batch], dtype=jnp.int32)
-        logits = substrate.run_with_interception(
-            ids, modify_fn=adapter.modify_fn(params), intercept_layers=adapter.layers
-        ).logits
-        prediction_batches.append(
-            np.asarray(classification_predictions(logits, positions, token_matrix))
-        )
-    predictions = np.concatenate(prediction_batches)
-    metrics = classification_metrics(targets, predictions)
-    return {
-        "task_accuracy": metrics["accuracy"],
-        "task_f1": metrics["macro_f1"],
-    }
-
-
 def resolve_split(domain: DomainConfig, split: str) -> str:
     """Map symbolic split name (test, eval/validation, train) to domain split string."""
     if split == "test":
@@ -592,44 +474,8 @@ def summarize(
     rows: Sequence[Mapping[str, Mapping[str, float]]],
 ) -> dict[str, Any]:
     loss = np.array([[row[n]["loss"] for n in names] for row in rows])
-    task_accuracy = np.array(
-        [[row[n].get("task_accuracy", np.nan) for n in names] for row in rows]
-    )
-    task_f1 = np.array(
-        [[row[n].get("task_f1", np.nan) for n in names] for row in rows]
-    )
     base_loss = [init[n]["base_loss"] for n in names]
     num_tasks = len(rows)
-    has_task_metrics = bool(np.isfinite(task_accuracy).any())
-    accuracy_forgetting_values: list[float | None] | None = None
-    if has_task_metrics:
-        accuracy_forgetting_values = [None]
-        for t in range(1, num_tasks):
-            val = float(accuracy_forgetting(task_accuracy, t))
-            accuracy_forgetting_values.append(
-                val if math.isfinite(val) else None
-            )
-
-    skipped: dict[str, str] = {}
-    for j, n in enumerate(names):
-        col = task_accuracy[:, j]
-        if not np.isfinite(col).all():
-            reason = next(
-                (
-                    str(row[n][k])
-                    for row in rows
-                    if n in row
-                    for k in ("task_skip_reason", "skip_reason", "reason", "skipped")
-                    if k in row[n] and row[n][k]
-                ),
-                None,
-            )
-            if reason is None:
-                if not np.isfinite(col).any():
-                    reason = f"label field not configured or missing for domain '{n}'"
-                else:
-                    reason = f"incomplete task accuracy metrics for domain '{n}' across checkpoints"
-            skipped[n] = reason
 
     return {
         "domains": list(names),
@@ -644,20 +490,10 @@ def summarize(
             ]
             for t in range(num_tasks)
         ],
-        "mean_seen_loss": [
-            float(mean_seen_accuracy(loss, t)) for t in range(num_tasks)
-        ],
+        "mean_seen_loss": [float(mean_seen_loss(loss, t)) for t in range(num_tasks)],
         # Undefined at t=0 (no earlier task), stored as null.
         "mean_forgetting": [None]
-        + [
-            float(mean_forgetting(loss, t, higher_is_better=False))
-            for t in range(1, num_tasks)
-        ],
-        "task_accuracy": task_accuracy.tolist() if has_task_metrics else None,
-        "task_f1": task_f1.tolist() if np.isfinite(task_f1).any() else None,
-        "accuracy_forgetting": accuracy_forgetting_values,
-        "skipped": skipped,
-        "task_skipped": skipped,
+        + [float(mean_forgetting(loss, t)) for t in range(1, num_tasks)],
     }
 
 
@@ -683,16 +519,6 @@ def run_sequential(
             row[d.name] = evaluate(
                 substrate, adapter, params, d.eval_set, jit=training.jit
             )
-            task_metrics = evaluate_task(
-                substrate,
-                adapter,
-                params,
-                d.task_examples,
-                d.label_token_ids,
-            )
-            row[d.name].update(task_metrics)
-            if not task_metrics and d.task_skip_reason:
-                row[d.name]["task_skip_reason"] = d.task_skip_reason
             writer.log("eval", after_task=after_task, domain=d.name, **row[d.name])
         if after_task < 0:
             log.info(
