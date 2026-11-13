@@ -49,6 +49,10 @@ dependencies = [
 gpu = [
     "jax[cuda12]>=0.4.30",
 ]
+visualization = [
+    "matplotlib>=3.8",
+    "pandas>=2.0",
+]
 hyperon = [
     "hyperon>=0.2.0",
 ]
@@ -94,6 +98,9 @@ include = [
     "losses*",
     "stages*",
     "metrics*",
+    "benchmark*",
+    "runtime*",
+    "training*",
 ]
 
 [tool.setuptools.package-data]

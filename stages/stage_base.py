@@ -33,7 +33,7 @@ from frozenllm.substrate import FrozenSubstrate, identity_modify
 from losses.shared import model_loss_terms
 from metrics.performance import (
     mean_forgetting,
-    mean_seen_accuracy,
+    mean_seen_loss,
     perplexity,
     training_step_time,
 )
@@ -243,9 +243,13 @@ def load_token_blocks(
         raise ImportError("The 'datasets' package is required to load token blocks.")
     if substrate.tokenizer is None:
         raise ValueError("The substrate has no tokenizer.")
-    texts = load_dataset(domain.dataset, domain.dataset_config, split=split)[
-        domain.text_field
-    ]
+    try:
+        raw_ds = load_dataset(
+            domain.dataset, domain.dataset_config, split=split, trust_remote_code=True
+        )
+    except TypeError:
+        raw_ds = load_dataset(domain.dataset, domain.dataset_config, split=split)
+    texts = raw_ds[domain.text_field]
     # One contiguous token stream; the ragged tail is dropped.
     ids = substrate.tokenizer(domain.separator.join(texts), return_tensors="np")[
         "input_ids"
@@ -472,6 +476,7 @@ def summarize(
     loss = np.array([[row[n]["loss"] for n in names] for row in rows])
     base_loss = [init[n]["base_loss"] for n in names]
     num_tasks = len(rows)
+
     return {
         "domains": list(names),
         "base_loss": base_loss,
@@ -485,15 +490,10 @@ def summarize(
             ]
             for t in range(num_tasks)
         ],
-        "mean_seen_loss": [
-            float(mean_seen_accuracy(loss, t)) for t in range(num_tasks)
-        ],
+        "mean_seen_loss": [float(mean_seen_loss(loss, t)) for t in range(num_tasks)],
         # Undefined at t=0 (no earlier task), stored as null.
         "mean_forgetting": [None]
-        + [
-            float(mean_forgetting(loss, t, higher_is_better=False))
-            for t in range(1, num_tasks)
-        ],
+        + [float(mean_forgetting(loss, t)) for t in range(1, num_tasks)],
     }
 
 

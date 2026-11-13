@@ -1,0 +1,68 @@
+"""Pure NumPy and standard-library metrics for A4 and future stages."""
+
+from metrics.a4.latency import (
+    interval_breakdown,
+    summarize_latency,
+    summarize_transfers,
+)
+from metrics.a4.operations import bank_growth_stability, consolidation_queue_metrics
+from metrics.a4.representation import (
+    bank_template_mutual_information,
+    capacity_sensitivity,
+    column_template_binding_stability,
+    cosine_geometry,
+    factor_organization,
+    human_template_review_summary,
+    key_log_probabilities,
+    query_silhouette,
+    select_factors,
+    symbolic_alignment_preservation,
+    symbolic_attention_contribution,
+    symbolic_commutator,
+    symbolic_gradient_conflict,
+    symbolic_key_entanglement,
+    symbolic_mixed_fisher_coupling,
+    value_alignment_error,
+)
+from metrics.a4.retrieval import (
+    RetrievalActivationMetrics,
+    RetrievalMetrics,
+    TemplateCoverageMetrics,
+    Tier3TriggerMetrics,
+    retrieval_activation_rate,
+    retrieval_metrics,
+    template_coverage,
+    tier3_trigger_rate,
+)
+
+__all__ = [
+    "bank_growth_stability",
+    "bank_template_mutual_information",
+    "capacity_sensitivity",
+    "column_template_binding_stability",
+    "consolidation_queue_metrics",
+    "cosine_geometry",
+    "factor_organization",
+    "human_template_review_summary",
+    "interval_breakdown",
+    "key_log_probabilities",
+    "query_silhouette",
+    "RetrievalActivationMetrics",
+    "RetrievalMetrics",
+    "retrieval_activation_rate",
+    "retrieval_metrics",
+    "select_factors",
+    "summarize_latency",
+    "summarize_transfers",
+    "symbolic_alignment_preservation",
+    "symbolic_attention_contribution",
+    "symbolic_commutator",
+    "symbolic_gradient_conflict",
+    "symbolic_key_entanglement",
+    "symbolic_mixed_fisher_coupling",
+    "TemplateCoverageMetrics",
+    "template_coverage",
+    "Tier3TriggerMetrics",
+    "tier3_trigger_rate",
+    "value_alignment_error",
+]

@@ -13,8 +13,8 @@ import torch
 if not hasattr(torch, "float4_e2m1fn_x2"):
     torch.float4_e2m1fn_x2 = getattr(torch, "float8_e4m3fn", torch.uint8)
 
-import torchax
-import torchax.interop as interop
+torchax: Any = None
+interop: Any = None
 
 T = TypeVar("T")
 
@@ -22,8 +22,13 @@ _torchax_enabled = False
 
 
 def enable_torchax() -> None:
-    global _torchax_enabled
+    global _torchax_enabled, torchax, interop
     if not _torchax_enabled:
+        import torchax as _torchax
+        import torchax.interop as _interop
+
+        torchax = _torchax
+        interop = _interop
         torchax.enable_globally()
         _torchax_enabled = True
 

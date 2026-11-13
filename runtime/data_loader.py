@@ -1,4 +1,4 @@
-"""Unified runtime dataset loader for sequential A1-A4 experiments.
+"""Unified runtime dataset loader for sequential language-model experiments.
 
 Supported modes:
     separate: Each configured dataset becomes one sequential task.
@@ -7,6 +7,7 @@ Supported modes:
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ class RuntimeData:
     test_blocks: dict[str, np.ndarray]
     task_order: tuple[str, ...]
     metadata: dict[str, Any]
+    training_tasks: tuple[Domain, ...] | None = None
+    heldout_tasks: tuple[str, ...] = ()
 
     def get_test_sets(self, batch_size: int, eval_batches: int):
         return {
@@ -84,6 +87,7 @@ def load_dataset_split(
     split: str,
     *,
     dataset_config: str | None = None,
+    revision: str | None = None,
     streaming: bool = False,
 ):
     """Load one Hugging Face dataset split."""
@@ -98,6 +102,7 @@ def load_dataset_split(
         dataset_name,
         name=dataset_config,
         split=split,
+        revision=revision,
         streaming=streaming,
     )
 
@@ -138,6 +143,7 @@ def load_split_texts(
     dataset = load_dataset_split(
         dataset_name=dataset_config["dataset"],
         dataset_config=dataset_config.get("config"),
+        revision=dataset_config.get("revision"),
         split=split,
         streaming=dataset_config.get("streaming", False),
     )
@@ -146,6 +152,15 @@ def load_split_texts(
         dataset,
         dataset_config.get("text_field", "text"),
     )
+
+
+def array_fingerprint(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(str(tuple(array.shape)).encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------
@@ -342,10 +357,19 @@ def build_separate_tasks(
             )
 
             stats[name] = {
+                "dataset": item["dataset"],
+                "config": item.get("config"),
+                "revision": item.get("revision"),
+                "train_split": item["train_split"],
+                "validation_split": item["validation_split"],
+                "test_split": item["test_split"],
                 "training_blocks": len(train_blocks),
                 "validation_blocks": len(validation_blocks),
                 "test_blocks": len(test_blocks[name]),
                 "dropped_training_blocks": (len(train_blocks) % batch_size),
+                "training_sha256": array_fingerprint(train_blocks),
+                "validation_sha256": array_fingerprint(validation_blocks),
+                "test_sha256": array_fingerprint(test_blocks[name]),
             }
 
     if not tasks:
@@ -396,6 +420,7 @@ def build_story_tasks(
     eval_batches: int,
     seed: int,
     default_epochs: int,
+    max_tasks: int | None = None,
 ) -> tuple[tuple[Domain, ...], dict[str, np.ndarray], dict[str, Any]]:
     """Build sequential story tasks with optional max_tasks limit.
 
@@ -409,15 +434,6 @@ def build_story_tasks(
     name = item["name"]
 
     stories_per_task = int(item.get("stories_per_task", 10))
-
-    max_tasks = load_runtime_config("configs/runtime_datasets.yaml")["runtime"].get(
-        "max_tasks"
-    )
-
-    if max_tasks is not None and (
-        isinstance(max_tasks, bool) or not isinstance(max_tasks, int) or max_tasks < 1
-    ):
-        raise ValueError("max_tasks must be a positive integer or null.")
 
     if max_tasks is not None and (
         isinstance(max_tasks, bool) or not isinstance(max_tasks, int) or max_tasks < 1
@@ -634,6 +650,10 @@ def load_runtime_data(
     config_path: str | Path,
     tokenizer: Any,
     *,
+    source: str | None = None,
+    task_order: tuple[str, ...] | list[str] | None = None,
+    training_mode: str | None = None,
+    heldout_tasks: tuple[str, ...] | list[str] | None = None,
     sequence_length: int = 128,
     batch_size: int = 16,
     eval_batches: int = 8,
@@ -646,8 +666,22 @@ def load_runtime_data(
     runtime_config = config["runtime"]
     datasets_config = config["datasets"]
 
-    mode = runtime_config["source"]
+    mode = runtime_config["source"] if source is None else source
     seed = int(runtime_config.get("seed", 42))
+    requested_order = tuple(task_order or runtime_config.get("task_order", ()))
+    training_mode = training_mode or str(
+        runtime_config.get("training_mode", "sequential")
+    )
+    heldout_tasks = tuple(
+        heldout_tasks
+        if heldout_tasks is not None
+        else runtime_config.get("heldout_tasks", ())
+    )
+
+    if mode not in {"separate", "stories"}:
+        raise ValueError("source must be 'separate' or 'stories'.")
+    if training_mode not in {"sequential", "joint"}:
+        raise ValueError("training_mode must be 'sequential' or 'joint'.")
 
     if sequence_length < 2:
         raise ValueError("sequence_length must be >= 2 for next-token training.")
@@ -675,7 +709,7 @@ def load_runtime_data(
 
         if len(story_configs) != 1:
             raise ValueError(
-                "Story mode requires exactly one dataset " "with type='stories'."
+                "Story mode requires exactly one dataset with type='stories'."
             )
 
         tasks, test_blocks, preprocessing_stats = build_story_tasks(
@@ -686,19 +720,69 @@ def load_runtime_data(
             eval_batches=eval_batches,
             seed=seed,
             default_epochs=default_epochs,
+            max_tasks=runtime_config.get("max_tasks"),
         )
 
     else:
         raise ValueError(f"Unsupported runtime mode: {mode!r}")
 
-    task_order = tuple(task.name for task in tasks)
+    if requested_order:
+        available = {task.name: task for task in tasks}
+        if set(requested_order) != set(available) or len(requested_order) != len(
+            available
+        ):
+            raise ValueError(
+                f"task_order must contain each task exactly once; available={sorted(available)}"
+            )
+        tasks = tuple(available[name] for name in requested_order)
+
+    heldout = tuple(str(name) for name in heldout_tasks)
+    unknown_heldout = sorted(set(heldout) - {task.name for task in tasks})
+    if unknown_heldout:
+        raise ValueError(f"Unknown held-out tasks: {unknown_heldout}")
+    if len(set(heldout)) != len(heldout):
+        raise ValueError("heldout_tasks must be unique")
+    source_tasks = tuple(task for task in tasks if task.name not in set(heldout))
+    if not source_tasks:
+        raise ValueError("At least one non-held-out training task is required")
+
+    if training_mode == "joint":
+        expanded = [
+            np.tile(
+                task.train_blocks[
+                    : (len(task.train_blocks) // batch_size) * batch_size
+                ],
+                (task.epochs, 1),
+            )
+            for task in source_tasks
+            if task.epochs > 0
+        ]
+        if not expanded:
+            joint_blocks = np.empty((0, sequence_length), dtype=np.int32)
+        else:
+            joint_blocks = np.concatenate(expanded, axis=0)
+        training_tasks = (
+            Domain(
+                name="joint",
+                train_blocks=joint_blocks,
+                eval_set=(),
+                epochs=1,
+            ),
+        )
+    else:
+        training_tasks = source_tasks
+
+    tasks = source_tasks
+    task_order_names = tuple(task.name for task in tasks)
 
     metadata = {
         "mode": mode,
         "seed": seed,
         "sequence_length": sequence_length,
         "batch_size": batch_size,
-        "task_order": list(task_order),
+        "task_order": list(task_order_names),
+        "training_mode": training_mode,
+        "heldout_tasks": list(heldout),
         "datasets": [
             item["name"]
             for item in datasets_config
@@ -711,13 +795,16 @@ def load_runtime_data(
     return RuntimeData(
         tasks=tasks,
         test_blocks=test_blocks,
-        task_order=task_order,
+        task_order=task_order_names,
         metadata=metadata,
+        training_tasks=training_tasks,
+        heldout_tasks=heldout,
     )
 
 
 __all__ = [
     "RuntimeData",
+    "array_fingerprint",
     "load_runtime_config",
     "load_runtime_data",
     "load_dataset_split",
