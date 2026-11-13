@@ -1,0 +1,21 @@
+residual_config: a3_true_pc.yaml
+
+objective:
+  key_weight: 1.0
+  value_weight: 1.0
+
+retrieval:
+  top_m: 8
+  minimum_templates: 10000
+
+training:
+  model: gpt2
+  seq_len: 128
+  batch_size: 2
+  epochs: 3
+  learning_rate: 0.0001
+  eval_batches: 8
+  log_every: 10
+  seed: 0
+  output_dir: runs
+  jit: true

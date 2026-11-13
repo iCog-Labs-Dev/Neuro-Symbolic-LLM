@@ -33,6 +33,7 @@ dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.6.0",
     "hnswlib>=0.8.0",
+    "faiss-cpu>=1.8.0",
 
     # Tier 3 queue
     "redis>=5.0.0",
@@ -72,6 +73,7 @@ dev = [
 ]
 
 [project.scripts]
+a4-metrics = "metrics.a4.cli:main"
 semantic-parser = "parser.semantic.cli:main"
 semantic-document-export = "parser.semantic.catalog_document_cli:main"
 
@@ -88,17 +90,21 @@ include = [
     "tier3*",
     "tiers*",
     "symbolic_pipeline*",
+    "symbolic_memory*",
     "substrate*",
     "configs.parser_config",
     "residual*",
     "losses*",
     "stages*",
     "metrics*",
+    "experiments*",
+    "scripts*",
 ]
 
 [tool.setuptools.package-data]
 "parser.ontology" = ["*.yaml", "bundles/*.yaml"]
 "configs.parser_config" = ["*.yaml", "*.jsonl"]
+"symbolic_memory" = ["native/*.cc"]
 
 # ── Black ──────────────────────────────────────────────────────────────────
 [tool.black]

@@ -68,6 +68,11 @@ jobs:
       - name: Run unit tests
         run: python -m pytest tests/unit/ -v --tb=short
 
+      - name: Run A4 stage tests
+        run: |
+          python -c "import fabricpc.graph_assembly"
+          python -m pytest tests/stages/stage_A/test_a4_model.py -v --tb=short
+
       - name: Run parser-to-miner contract integration
         run: >-
           python -m pytest

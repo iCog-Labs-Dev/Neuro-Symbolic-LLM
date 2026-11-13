@@ -1,0 +1,18 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -31,11 +31,11 @@
+
+ # External to MORK
+-freeze = { version="0.1.1", git="https://github.com/luketpeterson/Freeze.git" } #Fixes build on MacOS
+-gxhash = {version="3.5", git="https://github.com/ogxd/gxhash"} # for dag_serialization
++freeze = { version="0.1.1", git="https://github.com/luketpeterson/Freeze.git", rev="c0923ed8a0651155b93de54810f1564b136d5c47" } #Fixes build on MacOS
++gxhash = {version="3.5", git="https://github.com/ogxd/gxhash", rev="55bde471dc2e395dd17eb4e7055f323c0c29c19d"} # for dag_serialization
+
+ [workspace.dependencies.pathmap]
+ # for stability reasons, use local. For convenience, use git...
+ git = "https://github.com/Adam-Vandervorst/PathMap.git"
+-branch = "master"
++rev = "64f295eb0234f39905aea4385fb36568927ba8dd"
+ #path = "../PathMap"
+ features = ["zipper_tracking", "arena_compact"]
