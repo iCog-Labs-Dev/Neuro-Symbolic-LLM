@@ -54,27 +54,78 @@ MEASURED_METRICS = (
     "residual_compressibility",
     "effective_rank",
     "invariant_redundancy",
-    "fracture_index",
-    "overlap",
-    "taylor_delta",
-    "synergy",
+    "task_gradient_conflict",
     "token_accuracy",
-    "task_accuracy",
-    "task_f1",
-    "accuracy_forgetting",
     "expected_calibration_error",
+    "kl_to_base",
     "paired_seed_delta",
-    "mixed_curvature_coupling",
-    "off_support_leakage",
+    "parameter_update_commutator",
+    "operator_update_commutator",
     "update_commutator",
-    "causal_fingerprint_separability",
-    "category_naturality",
-    "ablation_fidelity",
     "heldout_transfer",
     "sequential_joint_gap",
     "anchor_kl",
-    "symbolic_retrieval",
     "long_range_coherence",
+    "inference_latency",
+    "peak_memory",
+)
+A4_SYMBOLIC_METRICS = (
+    "retrieval_precision_recall",
+    "retrieval_hit_rate",
+    "retrieval_mean_reciprocal_rank",
+    "retrieval_activation_rate",
+    "tier3_trigger_rate",
+    "template_coverage",
+    "key_alignment_nll",
+    "value_alignment_error",
+    "query_cluster_silhouette",
+    "template_factor_fracture",
+    "template_factor_overlap",
+    "symbolic_key_entanglement",
+    "symbolic_head_capacity",
+    "symbolic_alignment_preservation",
+    "symbolic_attention_contribution",
+    "symbolic_gradient_conflict",
+    "symbolic_mixed_fisher_coupling",
+    "symbolic_update_commutator",
+    "human_template_review",
+    "bank_growth_stability",
+    "consolidation_queue_metrics",
+    "cross_tier_latency",
+    "cuda_transfer_latency",
+)
+LATER_STAGE_SYMBOLIC_METRICS = (
+    "bank_template_mutual_information",
+    "column_template_binding_stability",
+)
+EXTERNAL_METRIC_SPECS = (
+    ("Validation loss", "validation_loss", "lower"),
+    ("Perplexity", "perplexity", "lower"),
+    ("Held-out test loss", "test_loss", "lower"),
+    ("Held-out test perplexity", "test_perplexity", "lower"),
+    ("Deployed LM loss", "deployed_loss", "lower"),
+    ("Deployed LM perplexity", "deployed_perplexity", "lower"),
+    ("Token accuracy", "token_accuracy", "higher"),
+    ("Token calibration ECE", "calibration", "lower"),
+    ("On-domain KL drift", "domain_kl", "lower"),
+    ("Validation-loss forgetting", "forgetting", "lower"),
+    ("Held-out transfer", "heldout_transfer", "higher"),
+    ("Sequential versus joint gap", "sequential_joint_gap", "lower"),
+    ("Anchor KL drift", "anchor_kl", "lower"),
+    ("Long-range coherence accuracy", "long_range", "higher"),
+)
+INTERNAL_METRIC_SPECS = (
+    ("Residual compressibility", "residual_compressibility", "higher"),
+    ("Effective rank", "effective_rank", "higher"),
+    ("Invariant redundancy", "invariant_redundancy", "lower"),
+    ("Task-gradient conflict", "task_gradient_conflict", "lower"),
+    ("Update commutator", "update_commutator", "lower"),
+)
+OPERATIONAL_METRIC_SPECS = (
+    ("Trainable parameters", "trainable_params", "lower"),
+    ("Training tokens/second", "tokens_per_second", "higher"),
+    ("Inference latency (seconds)", "inference_latency", "lower"),
+    ("Peak evaluator memory (bytes)", "peak_memory", "lower"),
 )
 
 
@@ -127,57 +178,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
-def _spearman_corr(x: list[float] | Any, y: list[float] | Any) -> float:
-    """Compute Spearman rank correlation between two vectors without external dependencies."""
-    xa = np.asarray(x, dtype=float)
-    ya = np.asarray(y, dtype=float)
-    if len(xa) < 2 or np.all(xa == xa[0]) or np.all(ya == ya[0]):
-        return 0.0
-    rx = np.argsort(np.argsort(xa)).astype(float)
-    ry = np.argsort(np.argsort(ya)).astype(float)
-    vx = rx - rx.mean()
-    vy = ry - ry.mean()
-    denom = np.sqrt(np.sum(vx**2) * np.sum(vy**2))
-    if denom == 0.0:
-        return 0.0
-    return float(np.sum(vx * vy) / denom)
-
-
-def compute_domain_overlap(
-    domain_atom_effects: dict[str, list[float] | Any],
-    eps: float = 1e-8,
-) -> dict[str, float]:
-    import jax
-    import jax.numpy as jnp
-
-    from metrics.representation import overlap
-
-    domain_names = sorted(domain_atom_effects)
-    normalized: dict[str, jax.Array] = {}
-    for name in domain_names:
-        raw = jnp.maximum(
-            jnp.asarray(domain_atom_effects[name], dtype=jnp.float32), 0.0
-        )
-        total = jnp.maximum(jnp.sum(raw), eps)
-        normalized[name] = raw / total
-
-    matrix: dict[str, float] = {}
-    for i, d1 in enumerate(domain_names):
-        for d2 in domain_names[i + 1 :]:
-            matrix[f"{d1}:{d2}"] = float(
-                overlap(normalized[d1], normalized[d2], eps=eps)
-            )
-    return matrix
-
-
-def compute_semantic_overlap(
-    category_atom_effects: dict[str, list[float] | Any],
-    eps: float = 1e-8,
-) -> dict[str, float]:
-    """Calculate overlap between semantic/category factors within a layer."""
-    return compute_domain_overlap(category_atom_effects, eps=eps)
-
-
 def _load_deployed_metrics(
     run: dict[str, Any], result: dict[str, Any]
 ) -> dict[str, Any]:
@@ -189,12 +189,7 @@ def _load_deployed_metrics(
     import jax
     import jax.numpy as jnp
 
-    from benchmark.evaluation import (
-        aggregate_lm_rows,
-        evaluate_legal_tasks,
-        evaluate_long_range,
-        extract_split_features,
-    )
+    from benchmark.evaluation import aggregate_lm_rows, evaluate_long_range
     from frozenllm.substrate import FrozenSubstrate, identity_modify
     from metrics.performance import (
         calibration_stats,
@@ -203,18 +198,12 @@ def _load_deployed_metrics(
         token_accuracy,
     )
     from metrics.representation import (
-        canonicalize_adapter_params,
         effective_rank,
         gradient_conflict,
         invariant_redundancy,
-        pairwise_ablation_interaction,
-        synergy_proxy,
-        taylor_delta,
     )
     from residual import ResidualAdapter, ResidualConfig
     from runtime.data_loader import (
-        legal_task_specs,
-        load_labeled_split,
         load_runtime_config,
         load_runtime_data,
         load_split_texts,
@@ -223,6 +212,9 @@ def _load_deployed_metrics(
     )
     from stages.results import load_params
     from stages.stage_base import TrainingConfig
+
+    if run.get("method") not in DEFAULT_CONFIGS:
+        return {"status": "unavailable", "reason": "unsupported Stage A method"}
 
     config_path = Path(run.get("materialized_config", run["config"]))
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -273,21 +265,22 @@ def _load_deployed_metrics(
         eval_batches=training.eval_batches,
         default_epochs=training.epochs,
     )
+    runtime_config = load_runtime_config(runtime_config_path)
+    evaluation_config = runtime_config.get("evaluation", {})
+    calibration_bins = int(evaluation_config.get("calibration_bins", 15))
     domains = runtime_data.tasks
     test_sets = runtime_data.get_test_sets(
         training.batch_size,
         training.eval_batches,
     )
-    metrics_by_domain: dict[str, dict[str, float]] = {}
+    metrics_by_domain: dict[str, dict[str, Any]] = {}
     batches_by_domain: dict[str, tuple[jax.Array, ...]] = {}
     latency: list[float] = []
 
     def deployed_with_params(
         deployed_params: dict[str, dict[str, jax.Array]],
         ids: jax.Array,
-        extra_layers: tuple[int, ...] = (),
     ) -> tuple[jax.Array, jax.Array, Any]:
-        intercept_layers = tuple(sorted(set(adapter.layers) | set(extra_layers)))
         if run["method"] != "a3":
             base_result = substrate.run_with_interception(
                 ids, modify_fn=identity_modify, intercept_layers=adapter.layers
@@ -295,7 +288,7 @@ def _load_deployed_metrics(
             adapted_result = substrate.run_with_interception(
                 ids,
                 modify_fn=adapter.modify_fn(deployed_params),
-                intercept_layers=intercept_layers,
+                intercept_layers=adapter.layers,
             )
             return base_result.logits, adapted_result.logits, adapted_result
         clean = substrate.run_with_interception(
@@ -317,7 +310,7 @@ def _load_deployed_metrics(
             )
 
         adapted_result = substrate.run_with_interception(
-            ids, modify_fn=modify, intercept_layers=intercept_layers
+            ids, modify_fn=modify, intercept_layers=adapter.layers
         )
         return clean.logits, adapted_result.logits, adapted_result
 
@@ -354,7 +347,7 @@ def _load_deployed_metrics(
     for domain in domains:
         batches = test_sets[domain.name]
         batches_by_domain[domain.name] = batches
-        rows = []
+        rows: list[dict[str, float | int]] = []
         conf_sums = []
         acc_sums = []
         count_sums = []
@@ -371,6 +364,7 @@ def _load_deployed_metrics(
                     modify_fn=identity_modify,
                     intercept_layers=adapter.layers,
                 ).logits
+                jax.block_until_ready(base)
                 start = time.perf_counter()
                 adapted = substrate.run_with_interception(
                     ids,
@@ -379,288 +373,82 @@ def _load_deployed_metrics(
                 ).logits
             jax.block_until_ready(adapted)
             latency.append(time.perf_counter() - start)
-            c_sum, a_sum, cnt = calibration_stats(adapted, ids)
+            c_sum, a_sum, cnt = calibration_stats(adapted, ids, bins=calibration_bins)
             conf_sums.append(c_sum)
             acc_sums.append(a_sum)
             count_sums.append(cnt)
+            token_count = int(np.asarray(ids[:, 1:] != -100).sum())
+            adapted_loss = float(substrate.compute_loss(adapted, ids, losses=("CE",)))
+            base_loss = float(substrate.compute_loss(base, ids, losses=("CE",)))
             rows.append(
-                (
-                    float(substrate.compute_loss(adapted, ids, losses=("CE",))),
-                    float(token_accuracy(adapted, ids)),
-                    float(kl_to_base(base, adapted)),
-                )
+                {
+                    "tokens": token_count,
+                    "loss_sum": adapted_loss * token_count,
+                    "base_loss_sum": base_loss * token_count,
+                    "kl_sum": float(kl_to_base(base, adapted)) * token_count,
+                    "correct": float(token_accuracy(adapted, ids)) * token_count,
+                }
             )
-        values = np.asarray(rows, dtype=float)
         if conf_sums:
             pooled_conf = jnp.sum(jnp.stack(conf_sums), axis=0)
             pooled_acc = jnp.sum(jnp.stack(acc_sums), axis=0)
             pooled_cnt = jnp.sum(jnp.stack(count_sums), axis=0)
             pooled_ece = float(ece_from_stats(pooled_conf, pooled_acc, pooled_cnt))
         else:
-            pooled_ece = 0.0
+            pooled_ece = None
+        aggregate = aggregate_lm_rows(rows)
         metrics_by_domain[domain.name] = {
-            "loss": float(values[:, 0].mean()) if len(values) else 0.0,
-            "ppl": float(np.exp(values[:, 0].mean())) if len(values) else 0.0,
-            "token_accuracy": float(values[:, 1].mean()) if len(values) else 0.0,
+            "status": aggregate["status"],
+            "loss": aggregate.get("loss"),
+            "ppl": aggregate.get("perplexity"),
+            "token_accuracy": aggregate.get("token_accuracy"),
             "ece": pooled_ece,
-            "kl": float(values[:, 2].mean()) if len(values) else 0.0,
+            "kl": aggregate.get("kl"),
         }
 
-    gradients = {}
+    gradients: dict[str, Any] = {}
     for name, batches in batches_by_domain.items():
         if not batches:
             continue
-        gradients[name] = jax.grad(lambda p, batch=batches[0]: loss_for(p, batch))(
-            params
-        )
-    conflict = {}
+        gradients[name] = jax.grad(
+            lambda p, task_batches=batches: jnp.mean(
+                jnp.stack([loss_for(p, ids) for ids in task_batches])
+            )
+        )(params)
+    conflict_pairs = {}
     names = list(gradients)
     for i, left in enumerate(names):
         for right in names[i + 1 :]:
-            conflict[f"{left}:{right}"] = float(
+            conflict_pairs[f"{left}:{right}"] = float(
                 gradient_conflict(gradients[left], gradients[right])
             )
 
     representation: dict[str, Any] = {
         "effective_rank": {},
         "invariant_redundancy": {},
-        "fracture_index": {},
-        "overlap": {},
-        "overlap_matrices": {},
-        "semantic_overlap": {},
-        "taylor_delta": {},
-        "synergy": {},
-        "synergy_proxy": {},
-        "measured_synergy": {},
-        "synergy_validation": {},
-        "cross_domain_conflict": conflict,
+        "task_gradient_conflict": {
+            "status": "measured" if conflict_pairs else "insufficient_data",
+            "estimator": "gradient_of_mean_ce_over_configured_evaluation_batches",
+            "evaluation_batches": {
+                name: len(batches_by_domain[name]) for name in names
+            },
+            "pairs": conflict_pairs,
+            "mean": (
+                float(np.mean(list(conflict_pairs.values())))
+                if conflict_pairs
+                else None
+            ),
+            "max": max(conflict_pairs.values()) if conflict_pairs else None,
+        },
     }
     for layer_name, block in params.items():
         if not layer_name.startswith("layer_"):
             continue
         a, b = block["A"], block["B"]
-        num_atoms = int(b.shape[0])
         representation["effective_rank"][layer_name] = float(effective_rank(a @ b))
         representation["invariant_redundancy"][layer_name] = float(
             invariant_redundancy(a, b)
         )
-        layer_domain_effects: dict[str, list[float]] = {d.name: [] for d in domains}
-        for atom in range(num_atoms):
-            ablated = {key: dict(value_map) for key, value_map in params.items()}
-            ablated[layer_name]["B"] = b.at[atom].set(jnp.zeros_like(b[atom]))
-            for domain in domains:
-                batches = batches_by_domain.get(domain.name, ())
-                if batches:
-                    full = float(loss_for(params, batches[0]))
-                    ablated_loss = float(loss_for(ablated, batches[0]))
-                    layer_domain_effects[domain.name].append(ablated_loss - full)
-                else:
-                    layer_domain_effects[domain.name].append(0.0)
-
-        layer_gradients = [
-            gradients[name][layer_name]["B"]
-            for name in names
-            if layer_name in gradients[name]
-        ]
-        if layer_gradients:
-            stacked_grads = jnp.stack(layer_gradients)
-            mean_gradient = jnp.mean(stacked_grads, axis=0)
-            fisher = jnp.mean(stacked_grads**2, axis=0)
-            atom_taylor = [
-                taylor_delta(mean_gradient[i], fisher[i], -b[i])
-                for i in range(num_atoms)
-            ]
-            metric_g = jnp.mean(fisher, axis=0)
-        else:
-            atom_taylor = [jnp.asarray(0.0)]
-            metric_g = jnp.ones(int(b.shape[1]), dtype=jnp.float32)
-
-        representation["taylor_delta"][layer_name] = float(
-            jnp.sum(jnp.asarray(atom_taylor))
-        )
-
-        proxy_pairs: dict[str, float] = {}
-        for i in range(num_atoms):
-            for j in range(i + 1, num_atoms):
-                delta_i = -b[i]
-                delta_j = -b[j]
-                proxy_pairs[f"{i}:{j}"] = float(
-                    synergy_proxy(delta_i, delta_j, metric_g)
-                )
-
-        top_atoms = sorted(
-            range(num_atoms),
-            key=lambda a: float(
-                np.mean([abs(layer_domain_effects[dn][a]) for dn in names])
-            ),
-            reverse=True,
-        )[: min(num_atoms, 8)]
-
-        measured_pairs: dict[str, float] = {}
-        if len(top_atoms) >= 2 and names:
-            eval_batch = batches_by_domain[names[0]][0]
-            loss_full = float(loss_for(params, eval_batch))
-            atom_single_losses: dict[int, float] = {}
-            for atom_i in top_atoms:
-                ab_i = {k: dict(v) for k, v in params.items()}
-                ab_i[layer_name]["B"] = b.at[atom_i].set(jnp.zeros_like(b[atom_i]))
-                atom_single_losses[atom_i] = float(loss_for(ab_i, eval_batch))
-
-            for idx_i, atom_i in enumerate(top_atoms):
-                loss_i = atom_single_losses[atom_i]
-                for atom_j in top_atoms[idx_i + 1 :]:
-                    loss_j = atom_single_losses[atom_j]
-                    ab_ij = {k: dict(v) for k, v in params.items()}
-                    ab_ij[layer_name]["B"] = b.at[atom_i].set(0.0).at[atom_j].set(0.0)
-                    loss_ij = float(loss_for(ab_ij, eval_batch))
-                    s_meas = float(
-                        pairwise_ablation_interaction(
-                            loss_full, loss_i, loss_j, loss_ij
-                        )
-                    )
-                    measured_pairs[f"{atom_i}:{atom_j}"] = s_meas
-
-        common_pairs = [k for k in measured_pairs if k in proxy_pairs]
-        if len(common_pairs) >= 3:
-            p_vals = [proxy_pairs[k] for k in common_pairs]
-            m_vals = [measured_pairs[k] for k in common_pairs]
-            val_corr = _spearman_corr(p_vals, m_vals)
-        else:
-            val_corr = None
-
-        representation["synergy_proxy"][layer_name] = {
-            "mean": float(np.mean(list(proxy_pairs.values()))) if proxy_pairs else 0.0,
-            "pairs": proxy_pairs,
-        }
-        representation["measured_synergy"][layer_name] = {
-            "mean": (
-                float(np.mean(list(measured_pairs.values()))) if measured_pairs else 0.0
-            ),
-            "pairs": measured_pairs,
-        }
-        representation["synergy_validation"][layer_name] = {
-            "spearman_correlation": val_corr,
-            "num_pairs": len(common_pairs),
-        }
-        representation["synergy"][layer_name] = (
-            float(np.mean(list(proxy_pairs.values()))) if proxy_pairs else 0.0
-        )
-
-    legal_metrics: dict[str, Any]
-    try:
-        runtime_config = load_runtime_config(runtime_config_path)
-        evaluation_config = runtime_config.get("evaluation", {})
-        max_examples = evaluation_config.get("max_examples")
-        labeled = {}
-        for task_spec in legal_task_specs(runtime_config):
-            labeled[task_spec.name] = {
-                split: load_labeled_split(
-                    task_spec,
-                    split,
-                    substrate.tokenizer,
-                    sequence_length=int(
-                        evaluation_config.get("sequence_length", training.seq_len)
-                    ),
-                    max_examples=max_examples,
-                )
-                for split in ("train", "validation", "test")
-            }
-
-        activation = str(config.get("adapter", {}).get("activation", "identity"))
-        for row in checkpoint_rows:
-            row["params"] = canonicalize_adapter_params(
-                row["params"], activation=activation
-            )
-        params = checkpoint_rows[-1]["params"]
-        probe_layer = substrate.architecture.num_layers - 1
-        if probe_layer in adapter.layers:
-            raise ValueError("The legal probe layer must not be an adapted layer")
-
-        def feature_fn(
-            feature_params: dict[str, dict[str, jax.Array]], split: Any
-        ) -> np.ndarray:
-            def batch_features(ids: np.ndarray, positions: np.ndarray) -> np.ndarray:
-                _, _, result = deployed_with_params(
-                    feature_params,
-                    jnp.asarray(ids),
-                    (probe_layer,),
-                )
-                hidden = result.hidden_state(probe_layer)
-                selected = hidden[jnp.arange(hidden.shape[0]), jnp.asarray(positions)]
-                return np.asarray(selected, dtype=np.float64)
-
-            return extract_split_features(
-                split,
-                batch_features,
-                batch_size=int(
-                    evaluation_config.get("batch_size", training.batch_size)
-                ),
-            )
-
-        components = [
-            {
-                "name": f"{layer_name}/sv_{atom}",
-                "layer": int(layer_name.removeprefix("layer_")),
-                "layer_name": layer_name,
-                "atom": atom,
-            }
-            for layer_name, block in params.items()
-            for atom in range(int(block["B"].shape[0]))
-        ]
-
-        def ablate_fn(
-            original: dict[str, dict[str, jax.Array]],
-            component: dict[str, Any],
-            retained: float,
-        ) -> dict[str, dict[str, jax.Array]]:
-            changed = {name: dict(block) for name, block in original.items()}
-            layer_name = str(component["layer_name"])
-            atom = int(component["atom"])
-            changed[layer_name]["B"] = (
-                changed[layer_name]["B"].at[atom].multiply(retained)
-            )
-            return changed
-
-        evaluation_output = Path(
-            run.get(
-                "evaluation_output_dir",
-                Path(run["output_dir"]) / run["run_name"] / "derived_evaluation",
-            )
-        )
-        legal_metrics = evaluate_legal_tasks(
-            labeled_splits=labeled,
-            checkpoints=checkpoint_rows,
-            feature_fn=feature_fn,
-            components=components,
-            ablate_fn=ablate_fn,
-            output_dir=evaluation_output / "legal",
-            alpha=float(evaluation_config.get("probe_l2", 1.0e-3)),
-            bins=int(evaluation_config.get("calibration_bins", 15)),
-            min_factor_support=int(evaluation_config.get("min_factor_support", 20)),
-        )
-        legal_metrics["feature_layer"] = probe_layer
-        legal_metrics["feature_pooling"] = "last_non_padding_token"
-        semantic = legal_metrics.get("representation", {})
-        if semantic.get("status") in {"measured", "ok", "partial"}:
-            representation["fracture_index"] = semantic["fracture"]
-            representation["overlap"] = semantic["overlap_matrix"]
-            representation["overlap_matrices"] = semantic["overlap_matrix"]
-            representation["semantic_overlap"] = semantic["overlap_matrix"]
-            representation["cross_domain_conflict"] = semantic["gradient_conflict"]
-            representation["mixed_curvature_coupling"] = semantic[
-                "mixed_curvature_coupling"
-            ]
-            representation["off_support_leakage"] = semantic["off_support_leakage"]
-            representation["causal_fingerprint_separability"] = semantic[
-                "causal_fingerprint_separability"
-            ]
-            representation["ablation_fidelity"] = semantic["ablation_fidelity"]
-            representation["category_naturality"] = semantic["category_naturality"]
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        legal_metrics = {
-            "status": "failed",
-            "reason": f"{type(exc).__name__}: {exc}",
-        }
 
     def evaluate_lm_batches(
         evaluation_params: dict[str, dict[str, jax.Array]],
@@ -671,7 +459,7 @@ def _load_deployed_metrics(
             base_logits, adapted_logits, _ = deployed_with_params(
                 evaluation_params, ids
             )
-            token_count = int(ids.shape[0] * max(ids.shape[1] - 1, 0))
+            token_count = int(np.asarray(ids[:, 1:] != -100).sum())
             adapted_loss = float(
                 substrate.compute_loss(adapted_logits, ids, losses=("CE",))
             )
@@ -688,8 +476,6 @@ def _load_deployed_metrics(
             )
         return aggregate_lm_rows(rows)
 
-    runtime_config = load_runtime_config(runtime_config_path)
-    evaluation_config = runtime_config.get("evaluation", {})
     anchor_config = evaluation_config.get("anchor")
     anchor_trajectory = []
     if isinstance(anchor_config, dict) and anchor_config.get("texts"):
@@ -720,7 +506,7 @@ def _load_deployed_metrics(
                 "trajectory": anchor_trajectory,
                 "final": anchor_trajectory[-1],
             }
-        except (RuntimeError, TypeError, ValueError) as exc:
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             anchor_kl = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
     else:
         anchor_kl = {
@@ -800,20 +586,16 @@ def _load_deployed_metrics(
             "status": "not_configured",
             "reason": "long-range probes are not configured",
         }
-    symbolic_retrieval = {
-        "status": "not_applicable",
-        "reason": "A1/A2/A3 have no symbolic retrieval head; evaluate A4 separately",
-    }
     peak_bytes = None
     for device in jax.devices():
         stats = device.memory_stats()
-        if stats:
-            peak_bytes = max(peak_bytes or 0, stats.get("peak_bytes_in_use", 0))
+        value = stats.get("peak_bytes_in_use") if stats else None
+        if value is not None:
+            peak_bytes = max(peak_bytes or 0, int(value))
     return {
         "status": "measured",
         "domains": metrics_by_domain,
         "representation": representation,
-        "legal_tasks": legal_metrics,
         "ops": {
             "inference_latency_mean_s": float(np.mean(latency)) if latency else None,
             "inference_latency_p95_s": (
@@ -824,11 +606,6 @@ def _load_deployed_metrics(
         "anchor_kl": anchor_kl,
         "heldout_transfer": heldout_transfer
         or {"status": "not_configured", "reason": "held-out datasets not configured"},
-        "joint_gap": {
-            "status": "deferred",
-            "reason": "computed after matching sequential and joint manifest records",
-        },
-        "symbolic_retrieval": symbolic_retrieval,
         "long_range_coherence": long_range,
     }
 
@@ -1086,6 +863,8 @@ def make_manifest(
     protocols: list[str] | tuple[str, ...] | None = None,
     task_order: list[str] | tuple[str, ...] | None = None,
     heldout_tasks: list[str] | tuple[str, ...] | None = None,
+    include_a4_plan: bool = False,
+    profile: str = "custom",
 ) -> dict[str, Any]:
     selected_protocols = tuple(protocols or (protocol,))
     if len(set(selected_protocols)) != len(selected_protocols):
@@ -1134,11 +913,61 @@ def make_manifest(
                 **condition,
             }
         )
+    a4_runs = []
+    if include_a4_plan:
+        parent_rows = {row["run_id"]: row for row in run_rows}
+        a4_runs = [
+            {
+                "schema": "nsllm.a4-child/v1",
+                "run_id": f"a4-{spec.run_id.removeprefix('a3-')}",
+                "method": "a4",
+                "parent_a3_run_id": spec.run_id,
+                "parent_a3_condition_sha256": parent_rows[spec.run_id][
+                    "condition_sha256"
+                ],
+                "seed": spec.seed,
+                "rank": spec.rank,
+                "k": spec.k,
+                "protocol": spec.protocol,
+                "task_order": list(spec.task_order),
+                "heldout_tasks": list(spec.heldout_tasks),
+                "parent_a3_checkpoint_path": None,
+                "parent_a3_checkpoint_sha256": None,
+                "parent_a3_model": None,
+                "parent_a3_layers": None,
+                "parent_a3_scale": None,
+                "parent_a3_activation": None,
+                "a3_parent_schema": "nsllm.a3-parent/v1",
+                "symbolic_bank_sha256": None,
+                "alignment_manifest_sha256": None,
+                "retrieval_probes_sha256": None,
+                "native_library_sha256": None,
+                "symbolic_dim": None,
+                "top_m": None,
+                "retrieval_backend": None,
+                "required_artifacts": [
+                    "parent_a3_checkpoint",
+                    "symbolic_bank",
+                    "alignment_manifest",
+                    "retrieval_probes",
+                    "retrieval_events",
+                    "bank_snapshots",
+                    "consolidation_events",
+                    "measurement_artifacts",
+                ],
+                "status": "requires_a4_implementation",
+                "symbolic_metrics": list(A4_SYMBOLIC_METRICS),
+                "deferred_later_stage_metrics": list(LATER_STAGE_SYMBOLIC_METRICS),
+            }
+            for spec in specs
+            if spec.method == "a3"
+        ]
     manifest = {
         "schema": 2,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repository": str(ROOT),
         "protocols": list(selected_protocols),
+        "profile": profile,
         "methods": methods,
         "seeds": seeds,
         "k_values": k_values,
@@ -1150,6 +979,7 @@ def make_manifest(
         "source": source,
         "measured_metrics": list(MEASURED_METRICS),
         "runs": run_rows,
+        "a4_runs": a4_runs,
     }
     _write_json(output_dir / "manifest.json", manifest)
     return manifest
@@ -1409,23 +1239,6 @@ def _result_record(raw: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         "mean_forgetting": (
             raw.get("mean_forgetting", [])[-1] if raw.get("mean_forgetting") else None
         ),
-        "accuracy_forgetting": (
-            raw.get("accuracy_forgetting", [])[-1]
-            if raw.get("accuracy_forgetting")
-            else None
-        ),
-        "task_accuracy": (
-            float(np.nanmean(np.asarray(raw["task_accuracy"], dtype=float)[-1]))
-            if raw.get("task_accuracy")
-            and np.isfinite(np.asarray(raw["task_accuracy"], dtype=float)[-1]).any()
-            else None
-        ),
-        "task_f1": (
-            float(np.nanmean(np.asarray(raw["task_f1"], dtype=float)[-1]))
-            if raw.get("task_f1")
-            and np.isfinite(np.asarray(raw["task_f1"], dtype=float)[-1]).any()
-            else None
-        ),
         "steps": raw.get("steps"),
         "tokens": raw.get("tokens"),
         "mean_step_time": raw.get("mean_step_time"),
@@ -1499,13 +1312,6 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                     for path in sorted(evaluation_dir.rglob("*"))
                     if path.is_file()
                 }
-            legal = deployed.get("legal_tasks", {})
-            aggregate = legal.get("aggregate", {})
-            if legal.get("status") == "measured":
-                record["task_accuracy"] = aggregate.get("task_accuracy")
-                record["task_f1"] = aggregate.get("task_macro_f1")
-                record["task_primary_score"] = aggregate.get("task_primary_score")
-                record["accuracy_forgetting"] = aggregate.get("task_score_forgetting")
         except (ImportError, KeyError, OSError, RuntimeError, ValueError) as exc:
             record["deployed_evaluation"] = {
                 "status": "unavailable",
@@ -1654,7 +1460,8 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
             continue
         from stages.results import load_params as load_saved_params
 
-        vectors = []
+        parameter_vectors = []
+        operator_vectors = []
         for record in group:
             run = next(
                 item for item in manifest["runs"] if item["run_id"] == record["run_id"]
@@ -1664,7 +1471,18 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
             loaded = (
                 _filter_adapter_params(load_saved_params(paths[-1])) if paths else {}
             )
-            vectors.append(
+            parameter_vectors.append(
+                np.concatenate(
+                    [
+                        array.ravel()
+                        for _, block in sorted(loaded.items())
+                        for array in (np.asarray(block["A"]), np.asarray(block["B"]))
+                    ]
+                )
+                if loaded
+                else np.asarray([])
+            )
+            operator_vectors.append(
                 np.concatenate(
                     [
                         (np.asarray(block["A"]) @ np.asarray(block["B"])).ravel()
@@ -1674,12 +1492,31 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                 if loaded
                 else np.asarray([])
             )
-        if vectors[0].shape != vectors[1].shape or not vectors[0].size:
+        if (
+            parameter_vectors[0].shape != parameter_vectors[1].shape
+            or operator_vectors[0].shape != operator_vectors[1].shape
+            or not parameter_vectors[0].size
+            or not operator_vectors[0].size
+        ):
             continue
-        denominator = 0.5 * (np.linalg.norm(vectors[0]) + np.linalg.norm(vectors[1]))
-        value = float(np.linalg.norm(vectors[0] - vectors[1]) / max(denominator, 1e-8))
+        parameter_scale = 0.5 * (
+            np.linalg.norm(parameter_vectors[0]) + np.linalg.norm(parameter_vectors[1])
+        )
+        operator_scale = 0.5 * (
+            np.linalg.norm(operator_vectors[0]) + np.linalg.norm(operator_vectors[1])
+        )
+        parameter_value = float(
+            np.linalg.norm(parameter_vectors[0] - parameter_vectors[1])
+            / max(parameter_scale, 1e-8)
+        )
+        operator_value = float(
+            np.linalg.norm(operator_vectors[0] - operator_vectors[1])
+            / max(operator_scale, 1e-8)
+        )
         for record in group:
-            record["update_commutator"] = value
+            record["parameter_update_commutator"] = parameter_value
+            record["operator_update_commutator"] = operator_value
+            record["update_commutator"] = operator_value
     evaluation = {
         "schema": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1716,7 +1553,6 @@ def _numeric_values(value: Any) -> list[float]:
 def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list[float]:
     deployed = record.get("deployed_evaluation", {})
     representation = deployed.get("representation", {})
-    legal_representation = deployed.get("legal_tasks", {}).get("representation", {})
     if metric == "residual_compressibility":
         curve = record.get("residual_compressibility") or {}
         value = curve.get(str(rank))
@@ -1730,45 +1566,35 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
         value = record.get("final_test_mean_ppl")
     elif metric == "forgetting":
         value = record.get("mean_forgetting")
-    elif metric == "accuracy_forgetting":
-        value = record.get("accuracy_forgetting")
-    elif metric == "task_accuracy":
-        value = record.get("task_accuracy")
-    elif metric == "task_f1":
-        value = record.get("task_f1")
-    elif metric == "task_primary":
-        value = record.get("task_primary_score")
-    elif metric == "calibration":
+    elif metric in {
+        "deployed_loss",
+        "deployed_perplexity",
+        "token_accuracy",
+        "calibration",
+        "domain_kl",
+    }:
+        field = {
+            "deployed_loss": "loss",
+            "deployed_perplexity": "ppl",
+            "token_accuracy": "token_accuracy",
+            "calibration": "ece",
+            "domain_kl": "kl",
+        }[metric]
         value = {
-            domain: values.get("ece")
+            domain: values.get(field)
             for domain, values in deployed.get("domains", {}).items()
-            if isinstance(values, dict)
+            if isinstance(values, dict) and values.get("status") == "measured"
         }
-    elif metric == "gradient_conflict":
-        value = legal_representation.get("gradient_conflict", {}).get("mean_conflict")
-    elif metric == "factor_overlap":
-        value = legal_representation.get("overlap_mean_off_diagonal")
-    elif metric == "fracture":
-        value = legal_representation.get("fracture_mean")
-    elif metric == "mixed_curvature":
-        value = legal_representation.get("mixed_curvature_coupling")
-    elif metric == "off_support_leakage":
-        value = legal_representation.get("off_support_leakage")
+    elif metric == "effective_rank":
+        value = representation.get("effective_rank")
+    elif metric == "invariant_redundancy":
+        value = representation.get("invariant_redundancy")
+    elif metric == "task_gradient_conflict":
+        value = representation.get("task_gradient_conflict", {}).get("mean")
     elif metric == "update_commutator":
-        value = record.get("update_commutator")
-    elif metric == "causal_fingerprint":
-        value = legal_representation.get("causal_fingerprint_separability", {}).get(
-            "score"
+        value = record.get(
+            "operator_update_commutator", record.get("update_commutator")
         )
-    elif metric == "category_alignment":
-        naturality = legal_representation.get("category_naturality", {})
-        value = (
-            naturality.get("value")
-            if naturality.get("status") in {"measured", "measured_proxy"}
-            else None
-        )
-    elif metric == "ablation_fidelity":
-        value = legal_representation.get("ablation_fidelity", {}).get("spearman")
     elif metric == "heldout_transfer":
         values = []
         if record.get("heldout_transfer"):
@@ -1786,13 +1612,6 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
             if anchor.get("status") == "measured"
             else None
         )
-    elif metric == "symbolic_retrieval":
-        symbolic = deployed.get("symbolic_retrieval", {})
-        value = (
-            symbolic.get("f1", {}).get("@4")
-            if symbolic.get("status") == "measured"
-            else None
-        )
     elif metric == "long_range":
         coherence = deployed.get("long_range_coherence", {})
         value = (
@@ -1800,6 +1619,8 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
         )
     elif metric == "trainable_params":
         value = record.get("trainable_params")
+    elif metric == "mean_step_time":
+        value = record.get("mean_step_time")
     elif metric == "tokens_per_second":
         value = (
             record["tokens"] / (record["steps"] * record["mean_step_time"])
@@ -1812,15 +1633,48 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
         value = deployed.get("ops", {}).get("inference_latency_mean_s")
     elif metric == "peak_memory":
         value = deployed.get("ops", {}).get("peak_memory_bytes")
-    elif metric == "taylor_delta":
-        value = representation.get("taylor_delta")
-    elif metric == "synergy_validation":
-        value = representation.get("synergy_validation")
-    elif metric == "synergy":
-        value = representation.get("synergy")
     else:
         value = None
     return _numeric_values(value)
+
+
+def metric_values_for_record(
+    record: dict[str, Any], metric: str, rank: int
+) -> list[float]:
+    """Public read-only metric extraction shared by reports and visualizations."""
+    return _report_metric_value(record, metric, rank)
+
+
+def select_a3_k(
+    records: list[dict[str, Any]],
+    *,
+    protocol: str,
+    rank: int,
+    order: tuple[str, ...],
+    heldout: tuple[str, ...],
+) -> dict[str, Any]:
+    """Apply the report's validation-loss A3 K-selection rule."""
+    candidates: dict[int, list[float]] = {}
+    for row in records:
+        if (
+            row.get("method") == "a3"
+            and row.get("protocol") == protocol
+            and row.get("rank", 16) == rank
+            and tuple(row.get("task_order", ())) == order
+            and tuple(row.get("heldout_tasks", ())) == heldout
+            and row.get("k") is not None
+            and row.get("final_mean_loss") is not None
+        ):
+            candidates.setdefault(int(row["k"]), []).append(
+                float(row["final_mean_loss"])
+            )
+    means = {k: float(np.mean(values)) for k, values in candidates.items()}
+    selected = min(means, key=lambda value: (means[value], value)) if means else None
+    return {
+        "selected_k": selected,
+        "mean_validation_loss_by_k": means,
+        "rule": "lowest mean validation loss; smaller K breaks ties",
+    }
 
 
 def _format_config_label(method: str, rank: int | None, k: int | None) -> str:
@@ -1887,41 +1741,9 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
     evaluation = _read_json(output_dir / "evaluation.json")
     records = [row for row in evaluation["records"] if row.get("status") != "invalid"]
     invalid = [row for row in evaluation["records"] if row.get("status") == "invalid"]
-    external_specs = [
-        ("Validation loss", "validation_loss", "lower"),
-        ("Perplexity", "perplexity", "lower"),
-        ("Held-out test loss", "test_loss", "lower"),
-        ("Held-out test perplexity", "test_perplexity", "lower"),
-        ("Task accuracy", "task_accuracy", "higher"),
-        ("Task primary score", "task_primary", "higher"),
-        ("Task macro-F1", "task_f1", "higher"),
-        ("Token calibration ECE", "calibration", "lower"),
-        ("Validation-loss forgetting", "forgetting", "lower"),
-        ("Task-score forgetting", "accuracy_forgetting", "lower"),
-        ("Held-out transfer", "heldout_transfer", "higher"),
-        ("Sequential versus joint gap", "sequential_joint_gap", "lower"),
-        ("Anchor KL drift", "anchor_kl", "lower"),
-        ("Symbolic retrieval F1@4", "symbolic_retrieval", "higher"),
-        ("Long-range coherence accuracy", "long_range", "higher"),
-    ]
-    internal_specs = [
-        ("Residual compressibility", "residual_compressibility", "higher"),
-        ("Semantic-factor fracture", "fracture", "context"),
-        ("Semantic-factor overlap", "factor_overlap", "lower"),
-        ("Semantic-factor gradient conflict", "gradient_conflict", "lower"),
-        ("Mixed curvature coupling proxy", "mixed_curvature", "lower"),
-        ("Off-support leakage", "off_support_leakage", "lower"),
-        ("Update commutator", "update_commutator", "lower"),
-        ("Causal fingerprint separability", "causal_fingerprint", "higher"),
-        ("Lowercase category naturality proxy", "category_alignment", "lower"),
-        ("Quadratic ablation fidelity Spearman", "ablation_fidelity", "higher"),
-    ]
-    operational_specs = [
-        ("Trainable parameters", "trainable_params", "lower"),
-        ("Training tokens/second", "tokens_per_second", "higher"),
-        ("Inference latency (seconds)", "inference_latency", "lower"),
-        ("Peak evaluator memory (bytes)", "peak_memory", "lower"),
-    ]
+    external_specs = EXTERNAL_METRIC_SPECS
+    internal_specs = INTERNAL_METRIC_SPECS
+    operational_specs = OPERATIONAL_METRIC_SPECS
     base_conditions = sorted(
         {
             (
@@ -1935,7 +1757,7 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
         key=lambda item: (item[0], item[1], item[2], item[3]),
     )
     lines = [
-        "# Stage A Metrics Report",
+        "# A1/A2/A3 Continuous Residual Benchmark Report",
         "",
         f"- Completed valid runs: {len(records)}/{evaluation['planned_runs']}",
         f"- Invalid runs excluded: {len(invalid)}",
@@ -1965,29 +1787,20 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
     )
     selected_k_by_condition: dict[tuple[Any, ...], int] = {}
     for protocol, rank, order, heldout in base_conditions:
-        candidates = {}
-        for row in records:
-            if (
-                row.get("method") == "a3"
-                and row.get("protocol") == protocol
-                and row.get("rank", 16) == rank
-                and tuple(row.get("task_order", ())) == order
-                and tuple(row.get("heldout_tasks", ())) == heldout
-                and row.get("k") is not None
-                and row.get("final_mean_loss") is not None
-            ):
-                candidates.setdefault(int(row["k"]), []).append(
-                    float(row["final_mean_loss"])
-                )
-        if candidates:
-            selected_k = min(
-                candidates, key=lambda value: (np.mean(candidates[value]), value)
-            )
+        selection = select_a3_k(
+            records,
+            protocol=protocol,
+            rank=rank,
+            order=order,
+            heldout=heldout,
+        )
+        selected_k = selection["selected_k"]
+        if selected_k is not None:
             selected_k_by_condition[(protocol, rank, order, heldout)] = selected_k
             lines.append(
                 f"| {protocol} | {rank} | {' -> '.join(order)} | {selected_k} | "
-                f"{np.mean(candidates[selected_k]):.6g} | lowest mean validation loss; "
-                "smaller K breaks ties |"
+                f"{selection['mean_validation_loss_by_k'][selected_k]:.6g} | "
+                f"{selection['rule']} |"
             )
 
     summary_candidates = []
@@ -2103,7 +1916,7 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
                         (protocol, rank, order, heldout)
                     )
                     if (
-                        metric in {"test_loss", "task_f1", "forgetting"}
+                        metric in {"test_loss", "token_accuracy", "forgetting"}
                         and metric_seeds
                         and (k == selected_k or selected_k is None)
                     ):
@@ -2148,65 +1961,6 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
                             f"| {method.upper()} after checkpoint {checkpoint} | {cells} |"
                         )
 
-            task_names = sorted(
-                {
-                    task
-                    for method in ("a1", "a2", "a3")
-                    for row in method_rows[method]
-                    if int(row["seed"]) in fair_seeds
-                    for task in row.get("deployed_evaluation", {})
-                    .get("legal_tasks", {})
-                    .get("final", {})
-                }
-            )
-            if task_names:
-                lines.extend(
-                    [
-                        "",
-                        "### Final Legal Task Metrics",
-                        "",
-                        "| Task / metric | A1 | A2 | A3 | Matched seeds |",
-                        "|---|---:|---:|---:|---:|",
-                    ]
-                )
-                for task in task_names:
-                    for key, label in (
-                        ("task_primary_score", "primary score"),
-                        ("task_f1", "macro-F1"),
-                    ):
-                        by_method = {}
-                        for method in ("a1", "a2", "a3"):
-                            by_method[method] = {
-                                int(row["seed"]): float(value)
-                                for row in method_rows[method]
-                                if int(row["seed"]) in fair_seeds
-                                for value in [
-                                    row.get("deployed_evaluation", {})
-                                    .get("legal_tasks", {})
-                                    .get("final", {})
-                                    .get(task, {})
-                                    .get(key)
-                                ]
-                                if value is not None
-                            }
-                        task_seed_sets = [
-                            set(by_method[method]) for method in ("a1", "a2", "a3")
-                        ]
-                        task_seeds = (
-                            set.intersection(*task_seed_sets)
-                            if all(task_seed_sets)
-                            else set()
-                        )
-                        cells = [
-                            _cell(
-                                [by_method[method][seed] for seed in sorted(task_seeds)]
-                            )
-                            for method in ("a1", "a2", "a3")
-                        ]
-                        lines.append(
-                            f"| {task} {label} | {' | '.join(cells)} | {len(task_seeds)} |"
-                        )
-
     lines.extend(["", "## General Summary", ""])
     if not summary_candidates:
         lines.append(
@@ -2238,10 +1992,6 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
             f"- Internal metric coverage: {measured_internal}/{total_internal} run-metric cells."
         )
         lines.append(
-            "- Fracture and overlap use gold legal-label semantic factors and canonical "
-            "singular components, never domain identity or raw adapter coordinates."
-        )
-        lines.append(
             "- N/A means a prerequisite was not configured or no fully matched cohort exists; "
             "it is never interpreted as zero."
         )
@@ -2249,6 +1999,17 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
             "- This summary is descriptive and intentionally does not collapse heterogeneous "
             "metrics into a single composite score."
         )
+
+    lines.extend(
+        [
+            "",
+            "## Scope",
+            "",
+            "Symbolic metrics are intentionally excluded until A4 supplies checkpoint, bank, "
+            "alignment labels, retrieval probes, and measurement artifacts. See manifest "
+            "`a4_runs` for blocked A4 child specs.",
+        ]
+    )
 
     path = output_dir / "REPORT.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
