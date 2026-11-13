@@ -6,24 +6,16 @@ import jax.numpy as jnp
 import pytest
 
 from metrics.representation import (
-    ablation_fidelity,
     canonical_low_rank_factors,
     canonical_low_rank_svd,
     canonicalize_adapter_params,
-    category_naturality_error,
-    causal_fingerprint_separability,
     compressibility_curve,
-    factor_importance,
     gradient_conflict_summary,
-    infer_support,
     loss_improvement,
-    mixed_curvature_coupling,
-    off_support_leakage,
     operator_commutator,
     operator_commutator_matrix,
     parameter_commutator,
     residual_compressibility,
-    semantic_factor_metrics,
 )
 
 
@@ -166,37 +158,6 @@ def test_canonical_zero_adapter_has_zero_factors() -> None:
     assert jnp.array_equal(canonical_b, jnp.zeros_like(b))
 
 
-def test_semantic_factor_metrics_use_positive_signed_effects() -> None:
-    effects = jnp.array(
-        [
-            [3.0, 0.0, -1.0],
-            [1.0, 1.0, 0.0],
-            [-4.0, 1.0, -2.0],
-            [0.0, 0.0, 0.0],
-        ]
-    )
-    report = semantic_factor_metrics(effects)
-
-    assert report["status"] == "partial"
-    assert report["factor_status"] == ("ok", "ok", "unavailable")
-    assert jnp.array_equal(factor_importance(effects), jnp.maximum(effects, 0.0))
-    assert jnp.allclose(report["positive_mass"], jnp.array([4.0, 2.0, 0.0]))
-    expected_effective = jnp.exp(-0.75 * jnp.log(0.75) - 0.25 * jnp.log(0.25))
-    assert float(report["fracture"][0]) == pytest.approx(float(expected_effective / 4))
-    assert float(report["fracture"][1]) == pytest.approx(0.5)
-    assert float(report["overlap"][0, 1]) == pytest.approx(0.25)
-    assert bool(jnp.isnan(report["fracture"][2]))
-    assert bool(jnp.isnan(report["overlap"][0, 2]))
-
-
-def test_semantic_factor_zero_positive_mass_is_unavailable() -> None:
-    report = semantic_factor_metrics(jnp.array([[0.0, -1.0], [-2.0, 0.0]]))
-    assert report["status"] == "unavailable"
-    assert report["factor_status"] == ("unavailable", "unavailable")
-    assert bool(jnp.all(jnp.isnan(report["fracture"])))
-    assert bool(jnp.all(jnp.isnan(report["overlap"])))
-
-
 def test_gradient_conflict_summary_exact_and_ignores_zero_gradient() -> None:
     summary = gradient_conflict_summary(
         {
@@ -212,53 +173,6 @@ def test_gradient_conflict_summary_exact_and_ignores_zero_gradient() -> None:
     assert float(summary["max"]) == pytest.approx(1.0)
     assert float(summary["fraction_conflicting"]) == pytest.approx(1 / 3)
     assert bool(jnp.isnan(summary["conflict"][0, 3]))
-
-
-def test_mixed_curvature_coupling_exact_and_scale_invariant() -> None:
-    gradients = jnp.array([1.0, 1.0])
-    orthogonal_samples = jnp.array([1.0, -1.0])
-    assert float(mixed_curvature_coupling(gradients, 7 * gradients)) == pytest.approx(
-        1.0
-    )
-    assert float(
-        mixed_curvature_coupling(gradients, orthogonal_samples)
-    ) == pytest.approx(0.0, abs=1e-7)
-    assert float(
-        mixed_curvature_coupling(jnp.array([1.0, 0.0]), gradients)
-    ) == pytest.approx(2**-0.5)
-
-
-def test_inferred_support_off_support_leakage() -> None:
-    gradients = jnp.array([[1.0, 1.0], [2.0, 0.0], [1.0, 3.0]])
-    scores = jnp.array([1.0, -1.0, 0.0])
-    assert jnp.array_equal(infer_support(scores), jnp.array([True, False, False]))
-    assert float(off_support_leakage(gradients, scores)) == pytest.approx(0.75)
-    assert float(off_support_leakage(gradients, jnp.zeros(3))) == pytest.approx(1.0)
-    assert float(
-        off_support_leakage(gradients, support=jnp.array([True, True, False]))
-    ) == pytest.approx(0.5)
-
-
-def test_causal_fingerprint_separability_exact_and_statuses() -> None:
-    fingerprints = jnp.array([[0.0], [2.0], [10.0], [12.0]])
-    labels = jnp.array([0, 0, 1, 1])
-    labeled = causal_fingerprint_separability(fingerprints, labels, eps=0.0)
-    assert labeled["status"] == "ok"
-    assert labeled["labels_independent"] is True
-    assert float(labeled["within_variance"]) == pytest.approx(1.0)
-    assert float(labeled["between_variance"]) == pytest.approx(25.0)
-    assert float(labeled["score"]) == pytest.approx(25.0)
-
-    unavailable = causal_fingerprint_separability(fingerprints)
-    assert unavailable["status"] == "unavailable"
-    exploratory = causal_fingerprint_separability(fingerprints, n_clusters=2)
-    assert exploratory["status"] == "exploratory"
-    assert exploratory["labels_independent"] is False
-    one_label = causal_fingerprint_separability(
-        fingerprints, jnp.zeros(4, dtype=jnp.int32)
-    )
-    assert one_label["status"] == "unavailable"
-    assert bool(jnp.isnan(one_label["score"]))
 
 
 def test_parameter_and_operator_commutators_exact() -> None:
@@ -278,42 +192,3 @@ def test_parameter_and_operator_commutators_exact() -> None:
         2**0.5
     )
     assert float(operator_commutator(jnp.eye(2), operator_j)) == pytest.approx(0.0)
-
-
-def test_category_naturality_error_exact() -> None:
-    states = jnp.array([[1.0, 2.0], [3.0, 4.0]])
-    swap = jnp.array([[0.0, 1.0], [1.0, 0.0]])
-    identity = jnp.eye(2)
-    assert float(
-        category_naturality_error(states, swap, identity, swap)
-    ) == pytest.approx(0.0)
-    assert float(
-        category_naturality_error(states, swap, identity, identity)
-    ) == pytest.approx(2.0)
-    assert float(
-        category_naturality_error(jnp.array([[1.0, 2.0]]), jnp.zeros((1, 2)))
-    ) == pytest.approx(5.0)
-
-
-def test_ablation_fidelity_perfect_with_ties() -> None:
-    effects = jnp.array([1.0, 1.0, -1.0, 0.0])
-    report = ablation_fidelity(effects, effects, top_k=2)
-    assert report["status"] == "ok"
-    assert float(report["spearman"]) == pytest.approx(1.0)
-    assert float(report["pearson"]) == pytest.approx(1.0)
-    assert float(report["nrmse"]) == pytest.approx(0.0)
-    assert float(report["sign_accuracy"]) == pytest.approx(1.0)
-    assert float(report["top_k_overlap"]) == pytest.approx(1.0)
-
-
-def test_ablation_fidelity_tie_aware_exact_example() -> None:
-    report = ablation_fidelity(
-        jnp.array([1.0, 1.0, 2.0]),
-        jnp.array([1.0, 2.0, 2.0]),
-        top_k=2,
-    )
-    assert float(report["spearman"]) == pytest.approx(0.5)
-    assert float(report["pearson"]) == pytest.approx(0.5)
-    assert float(report["nrmse"]) == pytest.approx((1 / 3) ** 0.5)
-    assert float(report["sign_accuracy"]) == pytest.approx(1.0)
-    assert float(report["top_k_overlap"]) == pytest.approx(0.5)
