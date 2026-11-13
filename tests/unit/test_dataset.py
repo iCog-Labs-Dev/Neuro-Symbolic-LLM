@@ -40,7 +40,7 @@ def test_builder_preserves_exact_source_and_writes_parse_results(tmp_path):
     accepted, rejected = builder.generate(["  Mira left.  ", "  "])
     assert len(accepted) == len(rejected) == 1
     assert accepted[0].result.document.source_text == "  Mira left.  "
-    assert accepted[0].result.contract_version == "2.0.0"
+    assert accepted[0].result.contract_version == "1.0.0"
     path = tmp_path / "nested" / "documents.jsonl"
     builder.write_jsonl(accepted, path)
     record = json.loads(path.read_text(encoding="utf-8"))

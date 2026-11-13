@@ -373,3 +373,36 @@ def test_distilled_precision_respects_requested_device(monkeypatch, tmp_path) ->
 
     assert loader.call_args.kwargs["torch_dtype"] == torch.float32
     assert loader.call_args.kwargs["device_map"] == "cpu"
+
+
+def test_restores_quote_case_and_records_repair() -> None:
+    source = "Students own a car."
+    payload = _has_payload(source)
+    payload["entities"][0] = {
+        "id": "students",
+        "entity_type": "Entity",
+        "mention": {"text": "students"},
+    }
+    payload["assertions"][0]["arguments"][0]["entity_id"] = "students"
+    parser, _ = _teacher(json.dumps(payload))
+
+    result = parser.parse(source)
+
+    mention = result.extraction.entities[0].mention
+    assert mention is not None
+    assert mention.text == "Students"
+    assert result.locate(mention) == (0, 8)
+    assert [repair.kind for repair in result.provenance.repairs] == [
+        "quote_case",
+        "predicate_contract",
+    ]
+
+
+def test_quote_with_other_words_is_still_rejected() -> None:
+    source = "Students own a car."
+    payload = _has_payload(source)
+    payload["entities"][0]["mention"] = {"text": "pupils"}
+    parser, _ = _teacher(json.dumps(payload))
+
+    with pytest.raises(SemanticParseError, match="not in the source text"):
+        parser.parse(source)

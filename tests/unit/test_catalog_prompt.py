@@ -245,3 +245,14 @@ def test_parser_exposes_active_prompt_identity_without_generation():
     ).version
 
     assert parser.prompt_version == expected
+
+
+def test_routed_extraction_prompt_with_discourse_keeps_one_input_section():
+    source = "The committee discussed the proposal, but it postponed the vote."
+    prompt = catalog_prompt.build_routed_extraction_prompt(
+        source, catalog=load_ontology_catalog(), run_discourse=True
+    )
+
+    assert prompt.text.count(source) == 1
+    assert len(catalog_prompt._INPUT_HEADING.findall(prompt.text)) == 1
+    assert "FINAL COMBINED EXTRACTION REQUIREMENTS" in prompt.text

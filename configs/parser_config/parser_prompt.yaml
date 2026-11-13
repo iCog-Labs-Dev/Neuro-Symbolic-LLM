@@ -1,5 +1,5 @@
 
-prompt_version: parser-router-v2
+prompt_version: parser-router-v1
 
 system_prompt: |
   You are a routing component for an ontology-guided

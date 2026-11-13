@@ -25,9 +25,7 @@ TREATMENT_SOURCE = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+# ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 def valid_result_data() -> dict[str, Any]:
@@ -387,9 +385,7 @@ def treatment_extraction() -> SemanticExtraction:
     )
 
 
-# ---------------------------------------------------------------------------
-# Structured contract tests
-# ---------------------------------------------------------------------------
+# ── Structured contract tests ────────────────────────────────────────────────
 
 
 def test_accepts_the_current_structured_parse_contract():
@@ -573,9 +569,7 @@ def test_rejects_rule_with_non_hypothetical_literal():
         SemanticParseResult.model_validate(data)
 
 
-# ---------------------------------------------------------------------------
-# Explicit entity tests
-# ---------------------------------------------------------------------------
+# ── Explicit entity tests ────────────────────────────────────────────────────
 
 
 def test_accepts_explicit_entity_with_source_mention():
@@ -637,9 +631,7 @@ def test_rejects_explicit_entity_with_symbolic_content():
         SemanticParseResult.model_validate(data)
 
 
-# ---------------------------------------------------------------------------
-# Implicit proposition tests
-# ---------------------------------------------------------------------------
+# ── Implicit proposition tests ───────────────────────────────────────────────
 
 
 def test_accepts_implicit_proposition():
@@ -800,9 +792,7 @@ def test_locates_implicit_proposition_evidence():
     assert result.document.source_text[start:end] == quote.text
 
 
-# ---------------------------------------------------------------------------
-# Combined general and discourse extraction tests
-# ---------------------------------------------------------------------------
+# ── Combined general and discourse extraction tests ──────────────────────────
 
 
 def test_combined_extraction_contains_general_and_discourse_semantics():
@@ -974,9 +964,7 @@ def test_combined_extraction_preserves_evidence_grounding():
             assert result.document.source_text[start:end] == quote.text
 
 
-# ---------------------------------------------------------------------------
-# Treatment regression tests
-# ---------------------------------------------------------------------------
+# ── Treatment regression tests ───────────────────────────────────────────────
 
 
 def test_treatment_combined_extraction_contains_all_relations():
