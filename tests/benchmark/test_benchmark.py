@@ -12,16 +12,16 @@ import pytest
 import yaml
 
 from benchmark.core import (
+    A4_SYMBOLIC_METRICS,
     BENCHMARK_RUNTIME_SOURCE,
     DEFAULT_CONFIGS,
     DEFAULT_RUNTIME_CONFIG,
+    LATER_STAGE_SYMBOLIC_METRICS,
+    MEASURED_METRICS,
     _command,
     _filter_adapter_params,
     _materialize,
-    _spearman_corr,
     _write_json,
-    compute_domain_overlap,
-    compute_semantic_overlap,
     evaluate_manifest,
     expand_specs,
     make_manifest,
@@ -33,13 +33,7 @@ from metrics.performance import (
     ece_from_stats,
     expected_calibration_error,
 )
-from metrics.representation import (
-    pairwise_ablation_interaction,
-    synergy,
-    synergy_proxy,
-)
 from runtime import data_loader
-from stages.stage_base import summarize
 
 
 def test_ece_finite_when_bins_are_empty() -> None:
@@ -208,32 +202,59 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
     assert "No complete matched A1/A2/A3 cohort is available" in report
     for metric in (
         "Residual compressibility",
-        "Semantic-factor fracture",
-        "Semantic-factor overlap",
-        "Semantic-factor gradient conflict",
-        "Mixed curvature coupling proxy",
-        "Off-support leakage",
+        "Effective rank",
+        "Invariant redundancy",
+        "Task-gradient conflict",
         "Update commutator",
-        "Causal fingerprint separability",
-        "Lowercase category naturality proxy",
-        "Quadratic ablation fidelity Spearman",
         "Validation loss",
         "Perplexity",
-        "Task accuracy",
-        "Task primary score",
-        "Task macro-F1",
+        "Held-out test loss",
+        "Held-out test perplexity",
+        "Deployed LM loss",
+        "Deployed LM perplexity",
+        "Token accuracy",
         "Token calibration ECE",
+        "On-domain KL drift",
         "Validation-loss forgetting",
         "Held-out transfer",
         "Sequential versus joint gap",
         "Anchor KL drift",
-        "Symbolic retrieval F1@4",
         "Long-range coherence accuracy",
     ):
         assert f"| {metric} |" in report
+    for removed in (
+        "Task accuracy",
+        "Task primary score",
+        "Task macro-F1",
+        "Task-score forgetting",
+    ):
+        assert f"| {removed} |" not in report
+    internal_section = report.split("### Internal Metrics", 1)[1].split(
+        "### Operational Metrics", 1
+    )[0]
+    internal_rows = [
+        line.split("|", 2)[1].strip()
+        for line in internal_section.splitlines()
+        if line.startswith("| ") and not line.startswith("| Metric")
+    ]
+    assert internal_rows == [
+        "Residual compressibility",
+        "Effective rank",
+        "Invariant redundancy",
+        "Task-gradient conflict",
+        "Update commutator",
+    ]
+    assert "## Scope" in report
+    assert "Symbolic metrics are intentionally excluded" in report
+    assert (
+        "checkpoint, bank, alignment labels, retrieval probes, and measurement artifacts"
+        in report
+    )
+    assert "manifest `a4_runs`" in report
+    assert "| Symbolic" not in report
 
 
-def test_report_groups_by_configuration_and_shows_na_for_unimplemented(
+def test_report_groups_by_configuration_and_shows_na_for_unmeasured_metrics(
     tmp_path: Path,
 ) -> None:
     evaluation = {
@@ -289,86 +310,8 @@ def test_report_groups_by_configuration_and_shows_na_for_unimplemented(
     assert (
         "| Metric | A1 | A2 | A3 | A2-A1 paired delta | A3-A1 paired delta |" in report
     )
-    assert (
-        "| Mixed curvature coupling proxy | N/A | N/A | N/A | N/A | N/A | lower | 0 |"
-        in report
-    )
+    assert "| Effective rank | N/A | N/A | N/A | N/A | N/A | higher | 0 |" in report
     assert "| Validation loss | 2 (n=1) | 1.9 (n=1) | 1.8 (n=1)" in report
-
-
-def test_summarize_mixed_task_availability_nan_aware() -> None:
-    names = ["eurlex", "ledgar", "scotus"]
-    init = {
-        "eurlex": {"base_loss": 3.0},
-        "ledgar": {"base_loss": 3.0},
-        "scotus": {"base_loss": 3.0},
-    }
-    rows = [
-        {
-            "eurlex": {
-                "loss": 2.5,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_skip_reason": "label field 'label' not in dataset columns ['text', 'labels']",
-            },
-            "ledgar": {
-                "loss": 2.4,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_accuracy": 0.20,
-                "task_f1": 0.15,
-            },
-            "scotus": {
-                "loss": 2.6,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_accuracy": 0.10,
-                "task_f1": 0.08,
-            },
-        },
-        {
-            "eurlex": {"loss": 2.6, "ppl": 1.0, "kl": 0.0},
-            "ledgar": {
-                "loss": 1.8,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_accuracy": 0.80,
-                "task_f1": 0.75,
-            },
-            "scotus": {
-                "loss": 2.5,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_accuracy": 0.15,
-                "task_f1": 0.12,
-            },
-        },
-        {
-            "eurlex": {"loss": 2.7, "ppl": 1.0, "kl": 0.0},
-            "ledgar": {
-                "loss": 1.9,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_accuracy": 0.75,
-                "task_f1": 0.70,
-            },
-            "scotus": {
-                "loss": 1.7,
-                "ppl": 1.0,
-                "kl": 0.0,
-                "task_accuracy": 0.90,
-                "task_f1": 0.85,
-            },
-        },
-    ]
-    summary = summarize(names, init, rows)
-    assert "eurlex" in summary["skipped"]
-    assert "label" in summary["skipped"]["eurlex"]
-    assert "ledgar" not in summary["skipped"]
-    assert "scotus" not in summary["skipped"]
-    assert summary["accuracy_forgetting"][0] is None
-    assert summary["accuracy_forgetting"][1] is None
-    assert summary["accuracy_forgetting"][2] == pytest.approx(0.05)
 
 
 def test_nan_and_inf_sanitized_to_valid_json(tmp_path: Path) -> None:
@@ -394,6 +337,62 @@ def test_nan_and_inf_sanitized_to_valid_json(tmp_path: Path) -> None:
     assert loaded["list"] == [1.0, None, 3.0]
 
 
+def test_measured_metrics_match_supported_scope() -> None:
+    assert set(MEASURED_METRICS) == {
+        "loss_matrix",
+        "perplexity",
+        "mean_forgetting",
+        "optimizer_steps",
+        "tokens",
+        "mean_step_time",
+        "estimated_tokens_per_second",
+        "params_unchanged",
+        "residual_compressibility",
+        "effective_rank",
+        "invariant_redundancy",
+        "task_gradient_conflict",
+        "token_accuracy",
+        "expected_calibration_error",
+        "kl_to_base",
+        "paired_seed_delta",
+        "parameter_update_commutator",
+        "operator_update_commutator",
+        "update_commutator",
+        "heldout_transfer",
+        "sequential_joint_gap",
+        "anchor_kl",
+        "long_range_coherence",
+        "inference_latency",
+        "peak_memory",
+    }
+    assert set(A4_SYMBOLIC_METRICS) == {
+        "retrieval_precision_recall",
+        "retrieval_hit_rate",
+        "retrieval_mean_reciprocal_rank",
+        "retrieval_activation_rate",
+        "tier3_trigger_rate",
+        "template_coverage",
+        "key_alignment_nll",
+        "value_alignment_error",
+        "query_cluster_silhouette",
+        "template_factor_fracture",
+        "template_factor_overlap",
+        "symbolic_key_entanglement",
+        "symbolic_head_capacity",
+        "symbolic_alignment_preservation",
+        "symbolic_attention_contribution",
+        "symbolic_gradient_conflict",
+        "symbolic_mixed_fisher_coupling",
+        "symbolic_update_commutator",
+        "human_template_review",
+        "bank_growth_stability",
+        "consolidation_queue_metrics",
+        "cross_tier_latency",
+        "cuda_transfer_latency",
+    }
+    assert set(A4_SYMBOLIC_METRICS).isdisjoint(MEASURED_METRICS)
+
+
 def test_resume_rejects_unverified_result_files(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "test-run"
     run_dir.mkdir(parents=True)
@@ -408,109 +407,6 @@ def test_resume_rejects_unverified_result_files(tmp_path: Path) -> None:
     assert "missing artifacts" in str(reason)
 
 
-def test_domain_overlap_within_layer() -> None:
-    domain_effects = {
-        "domain_A": [1.0, 0.0, 0.0, 0.0],
-        "domain_B": [0.5, 0.5, 0.0, 0.0],
-        "domain_C": [0.0, 0.0, 1.0, 1.0],
-    }
-    matrix = compute_domain_overlap(domain_effects)
-
-    assert matrix["domain_A:domain_B"] == pytest.approx(0.5)
-    assert matrix["domain_A:domain_C"] == pytest.approx(0.0)
-    assert matrix["domain_B:domain_C"] == pytest.approx(0.0)
-
-
-def test_domain_overlap_identical_domains_give_one() -> None:
-    domain_effects = {
-        "d1": [0.2, 0.4, 0.6, 0.8],
-        "d2": [0.2, 0.4, 0.6, 0.8],
-    }
-    matrix = compute_domain_overlap(domain_effects)
-    assert matrix["d1:d2"] == pytest.approx(1.0)
-
-
-def test_domain_overlap_ignores_negative_contributions() -> None:
-    domain_effects = {
-        "d1": [1.0, -2.0, 0.0],
-        "d2": [1.0, -1.0, 0.0],
-    }
-    matrix = compute_domain_overlap(domain_effects)
-    assert matrix["d1:d2"] == pytest.approx(1.0)
-
-
-def test_semantic_category_overlap() -> None:
-    cat_effects = {
-        "concept_syntax": [0.8, 0.2, 0.0, 0.0],
-        "concept_semantics": [0.0, 0.0, 0.5, 0.5],
-        "concept_discourse": [0.4, 0.1, 0.25, 0.25],
-    }
-    cat_matrix = compute_semantic_overlap(cat_effects)
-    assert "concept_discourse:concept_semantics" in cat_matrix
-    assert "concept_semantics:concept_syntax" in cat_matrix
-    assert cat_matrix["concept_semantics:concept_syntax"] == pytest.approx(0.0)
-    assert cat_matrix["concept_discourse:concept_semantics"] == pytest.approx(0.5)
-
-
-def test_synergy_proxy_diagonal_metric() -> None:
-    delta_i = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
-    delta_j = jnp.array([4.0, 5.0, 6.0], dtype=jnp.float32)
-    g_diag = jnp.array([0.5, 1.0, 2.0], dtype=jnp.float32)
-
-    val = float(synergy_proxy(delta_i, delta_j, g_diag))
-    assert val == pytest.approx(48.0)
-
-
-def test_synergy_proxy_matrix_metric() -> None:
-    delta_i = jnp.array([1.0, 2.0], dtype=jnp.float32)
-    delta_j = jnp.array([3.0, 4.0], dtype=jnp.float32)
-    g_matrix = jnp.array([[2.0, 0.5], [0.5, 1.0]], dtype=jnp.float32)
-    val = float(synergy_proxy(delta_i, delta_j, g_matrix))
-    assert val == pytest.approx(19.0)
-
-
-def test_synergy_backward_compat() -> None:
-    d1 = jnp.array([1.0, 2.0])
-    d2 = jnp.array([3.0, 4.0])
-    fisher = jnp.array([0.5, 1.5])
-    assert float(synergy(d1, d2, fisher)) == float(synergy_proxy(d1, d2, fisher))
-
-
-def test_measured_pairwise_ablation_interaction_additive() -> None:
-    s_ij = float(
-        pairwise_ablation_interaction(
-            loss_full=10.0,
-            loss_ablate_i=12.0,
-            loss_ablate_j=13.0,
-            loss_ablate_ij=15.0,
-        )
-    )
-    assert s_ij == pytest.approx(0.0)
-
-
-def test_measured_pairwise_ablation_interaction_synergistic() -> None:
-    s_ij = float(
-        pairwise_ablation_interaction(
-            loss_full=10.0,
-            loss_ablate_i=12.0,
-            loss_ablate_j=13.0,
-            loss_ablate_ij=17.0,
-        )
-    )
-    assert s_ij == pytest.approx(2.0)
-
-
-def test_spearman_correlation_validation() -> None:
-    proxy_vals = [1.0, 2.0, 3.0, 4.0, 5.0]
-    measured_vals = [2.0, 4.0, 6.0, 8.0, 10.0]
-    corr = _spearman_corr(proxy_vals, measured_vals)
-    assert corr == pytest.approx(1.0)
-
-    rev_vals = [5.0, 4.0, 3.0, 2.0, 1.0]
-    corr_rev = _spearman_corr(proxy_vals, rev_vals)
-    assert corr_rev == pytest.approx(-1.0)
-
-
 def test_expand_specs_and_make_manifest(tmp_path: Path) -> None:
     manifest = make_manifest(
         tmp_path,
@@ -520,7 +416,68 @@ def test_expand_specs_and_make_manifest(tmp_path: Path) -> None:
         rank_values=[16],
     )
     assert len(manifest["runs"]) == 6
+    assert manifest["a4_runs"] == []
     assert (tmp_path / "manifest.json").is_file()
+
+
+def test_make_manifest_can_add_blocked_a4_child_plans(tmp_path: Path) -> None:
+    task_order = ["scotus", "ledgar", "eurlex"]
+    manifest = make_manifest(
+        tmp_path,
+        seeds=[3],
+        methods=["a1", "a3"],
+        k_values=[1, 4],
+        rank_values=[8],
+        protocol="heldout",
+        task_order=task_order,
+        heldout_tasks=["eurlex"],
+        include_a4_plan=True,
+    )
+
+    assert len(manifest["runs"]) == 3
+    a3_runs = {run["run_id"]: run for run in manifest["runs"] if run["method"] == "a3"}
+    assert len(manifest["a4_runs"]) == len(a3_runs) == 2
+    for child in manifest["a4_runs"]:
+        parent = a3_runs[child["parent_a3_run_id"]]
+        assert child["run_id"] == parent["run_id"].replace("a3-", "a4-", 1)
+        assert child["schema"] == "nsllm.a4-child/v1"
+        assert child["method"] == "a4"
+        assert child["parent_a3_condition_sha256"] == parent["condition_sha256"]
+        for field in ("seed", "rank", "k", "protocol"):
+            assert child[field] == parent[field]
+        assert child["task_order"] == task_order
+        assert child["heldout_tasks"] == ["eurlex"]
+        assert child["status"] == "requires_a4_implementation"
+        assert child["symbolic_metrics"] == list(A4_SYMBOLIC_METRICS)
+        assert child["deferred_later_stage_metrics"] == list(
+            LATER_STAGE_SYMBOLIC_METRICS
+        )
+        assert child["required_artifacts"] == [
+            "parent_a3_checkpoint",
+            "symbolic_bank",
+            "alignment_manifest",
+            "retrieval_probes",
+            "retrieval_events",
+            "bank_snapshots",
+            "consolidation_events",
+            "measurement_artifacts",
+        ]
+        for hash_field in (
+            "parent_a3_checkpoint_sha256",
+            "symbolic_bank_sha256",
+            "alignment_manifest_sha256",
+            "retrieval_probes_sha256",
+            "native_library_sha256",
+        ):
+            assert child[hash_field] is None
+
+    persisted = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert persisted["a4_runs"] == manifest["a4_runs"]
+    assert persisted["measured_metrics"] == list(MEASURED_METRICS)
+
+    evaluation = evaluate_manifest(tmp_path)
+    assert evaluation["planned_runs"] == len(manifest["runs"]) == 3
+    assert evaluation["completed_runs"] == 0
 
 
 def test_real_default_configs_materialize(tmp_path: Path) -> None:
@@ -541,7 +498,7 @@ def test_real_default_configs_materialize(tmp_path: Path) -> None:
         assert config["training"]["epochs"] == 1
 
 
-def test_benchmark_commands_select_legal_runtime_datasets(tmp_path: Path) -> None:
+def test_benchmark_commands_select_separate_runtime_datasets(tmp_path: Path) -> None:
     specs = expand_specs(
         tmp_path,
         seeds=[0],

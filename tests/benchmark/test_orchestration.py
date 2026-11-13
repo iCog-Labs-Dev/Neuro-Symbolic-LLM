@@ -147,7 +147,7 @@ def test_global_eval_delegates_to_common_evaluator(
         return report
 
     monkeypatch.setattr("benchmark.core.report_manifest", write_report)
-    result = evaluate_all_stages(root, report_rank=16)
+    result = evaluate_all_stages(root, report_rank=16, generate_visualizations=False)
     assert result["global_evaluation"]["methods"] == ["a1", "a2", "a3"]
     assert result["global_evaluation"]["report_path"] == str(report)
 
@@ -162,6 +162,7 @@ def test_global_eval_can_report_partial_coverage(
         root,
         generate_report=False,
         require_complete=False,
+        generate_visualizations=False,
     )
     assert len(result["global_evaluation"]["incomplete_runs"]) == 3
     assert result["global_evaluation"]["report_path"] is None

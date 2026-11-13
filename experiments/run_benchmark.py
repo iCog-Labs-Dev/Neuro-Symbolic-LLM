@@ -43,8 +43,16 @@ def main() -> int:
     parser.add_argument("--task-order", nargs="+", default=None)
     parser.add_argument("--heldout-task", action="append", default=None)
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--include-a4-plan", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--report-rank", type=int, default=4)
+    parser.add_argument("--no-visualization", action="store_true")
+    parser.add_argument(
+        "--visualization-dir",
+        type=Path,
+        default=None,
+        help="Generated report root; defaults to repository/report_and_visualization.",
+    )
     args = parser.parse_args()
     output_dir = args.output_dir.resolve()
     defaults = {
@@ -77,6 +85,8 @@ def main() -> int:
             protocols=protocols,
             task_order=args.task_order,
             heldout_tasks=args.heldout_task,
+            include_a4_plan=args.include_a4_plan,
+            profile=args.profile,
         )
         print(f"planned {len(manifest['runs'])} runs: {output_dir / 'manifest.json'}")
     elif args.command == "train":
@@ -88,7 +98,18 @@ def main() -> int:
             f"evaluated {evaluation['completed_runs']}/{evaluation['planned_runs']} runs"
         )
     else:
-        print(report_manifest(output_dir, report_rank=args.report_rank))
+        report_path = report_manifest(output_dir, report_rank=args.report_rank)
+        print(report_path)
+        if not args.no_visualization:
+            from benchmark.visualization import generate_reports_and_visualizations
+
+            generated = generate_reports_and_visualizations(
+                output_dir,
+                output_dir=args.visualization_dir,
+                report_rank=args.report_rank,
+                repository_root=ROOT,
+            )
+            print(f"visualizations: {generated['output_dir']}")
     return 0
 
 

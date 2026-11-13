@@ -1,77 +1,17 @@
 from __future__ import annotations
 
-import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
-from benchmark.evaluation import (
-    aggregate_lm_rows,
-    evaluate_long_range,
-    evaluate_symbolic_rankings,
-    evaluate_task_probe,
-    fit_task_probe,
-    semantic_factor_effects,
-)
+from benchmark.evaluation import aggregate_lm_rows, evaluate_long_range
 from runtime import data_loader
-from runtime.data_loader import LabeledSplit
 
-
-def _split(name: str, targets: np.ndarray, *, multilabel: bool) -> LabeledSplit:
-    count = len(targets)
-    width = targets.shape[1]
-    ids = np.arange(count * 4, dtype=np.int32).reshape(count, 4)
-    return LabeledSplit(
-        task_name=name,
-        split="test",
-        input_ids=ids,
-        attention_mask=np.ones_like(ids, dtype=bool),
-        transformed_input_ids=ids,
-        transformed_attention_mask=np.ones_like(ids, dtype=bool),
-        targets=targets,
-        label_names=tuple(str(index) for index in range(width)),
-        factor_names=tuple(f"{name}:{index}" for index in range(width)),
-        factor_mask=targets.astype(bool),
-        example_ids=tuple(str(index) for index in range(count)),
-        multilabel=multilabel,
-        fingerprint=f"{name}-fingerprint",
-    )
-
-
-def test_frozen_multilabel_probe_is_operational() -> None:
-    targets = np.asarray([[1, 0], [1, 0], [0, 1], [0, 1]], dtype=np.int8)
-    train = _split("eurlex", targets, multilabel=True)
-    validation = _split("eurlex", targets, multilabel=True)
-    features = np.asarray([[2, 0], [1, 0], [0, 1], [0, 2]], dtype=float)
-    probe, _ = fit_task_probe(
-        train,
-        validation,
-        features,
-        features,
-        alpha=1e-3,
-        bins=5,
-        acquisition_checkpoint=0,
-    )
-    metrics, probabilities, losses = evaluate_task_probe(probe, validation, features)
-    assert metrics["micro_f1"] == 1.0
-    assert probabilities.shape == targets.shape
-    assert losses.shape == targets.shape
-
-
-def test_semantic_effects_use_each_labels_own_loss() -> None:
-    factors = np.asarray([[1, 0], [1, 1]], dtype=bool)
-    full = np.asarray([[0.1, 0.2], [0.2, 0.3]])
-    ablated = np.asarray([[[0.6, 9.0], [0.7, 8.0]]])
-    result = semantic_factor_effects(
-        full,
-        ablated,
-        factors,
-        min_support=1,
-    )
-    assert result["signed_effects"][0, 0] == np.mean([0.5, 0.5])
-    assert result["signed_effects"][0, 1] == 7.7
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_lm_aggregation_is_token_weighted() -> None:
@@ -93,137 +33,241 @@ def test_lm_aggregation_is_token_weighted() -> None:
             },
         ]
     )
-    assert result["loss"] == pytest.approx(2.5)
-    assert result["token_accuracy"] == pytest.approx(0.25)
+
+    expected = {
+        "tokens": 4,
+        "loss": 2.5,
+        "base_loss": 3.5,
+        "perplexity": math.exp(2.5),
+        "base_perplexity": math.exp(3.5),
+        "kl": 0.25,
+        "token_accuracy": 0.25,
+    }
+    assert result["status"] == "measured"
+    assert {key: result[key] for key in expected} == pytest.approx(expected)
 
 
-def test_long_range_reports_families_and_distance() -> None:
+def test_lm_aggregation_reports_no_evaluated_tokens() -> None:
+    assert aggregate_lm_rows([]) == {"status": "insufficient_data", "tokens": 0}
+    assert aggregate_lm_rows(
+        [
+            {
+                "tokens": 0,
+                "loss_sum": 0.0,
+                "base_loss_sum": 0.0,
+                "kl_sum": 0.0,
+                "correct": 0,
+            }
+        ]
+    ) == {"status": "insufficient_data", "tokens": 0}
+
+
+@pytest.mark.parametrize("tokens", [-1, 1.5, True])
+def test_lm_aggregation_rejects_invalid_token_counts(tokens: Any) -> None:
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        aggregate_lm_rows(
+            [
+                {
+                    "tokens": tokens,
+                    "loss_sum": 0.0,
+                    "base_loss_sum": 0.0,
+                    "kl_sum": 0.0,
+                    "correct": 0,
+                }
+            ]
+        )
+
+
+def _long_range_item(**overrides: Any) -> dict[str, Any]:
+    item = {
+        "id": "near",
+        "family": "relation",
+        "distance": "near",
+        "context": "context",
+        "question": " question",
+        "choices": [" correct", " wrong"],
+        "answer": 0,
+    }
+    item.update(overrides)
+    return item
+
+
+def test_long_range_reports_groups_and_expands_inline_filler() -> None:
+    prompts: list[str] = []
     config = {
         "schema": "long-range/v1",
         "items": [
-            {
-                "id": "x",
-                "family": "relation",
-                "distance": "near",
-                "context": "ctx",
-                "question": " q",
-                "choices": [" correct", " wrong"],
-                "answer": 0,
-            }
+            _long_range_item(),
+            _long_range_item(
+                id="far",
+                distance="far",
+                filler=" filler",
+                filler_repeat=2,
+            ),
         ],
     }
-    result = evaluate_long_range(
-        config, lambda prompt, choice: 1.0 if "correct" in choice else 0.0
+
+    def score(prompt: str, choice: str) -> float:
+        prompts.append(prompt)
+        if "filler" in prompt:
+            return 1.0 if choice == " wrong" else 0.0
+        return 1.0 if choice == " correct" else 0.0
+
+    result = evaluate_long_range(config, score)
+
+    assert result["accuracy"] == 0.5
+    assert result["by_family"]["relation"]["accuracy"] == 0.5
+    assert result["by_distance"] == {"far": 0.0, "near": 1.0}
+    assert result["near_far_gap"] == 1.0
+    assert prompts[-1] == "context filler filler question"
+    assert result["items"][1]["predicted"] == 1
+
+
+def test_long_range_rejects_invalid_answers_and_scores() -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        evaluate_long_range(
+            {"schema": "long-range/v1", "items": [_long_range_item(answer=2)]},
+            lambda _prompt, _choice: 0.0,
+        )
+
+    with pytest.raises(ValueError, match="finite number"):
+        evaluate_long_range(
+            {"schema": "long-range/v1", "items": [_long_range_item()]},
+            lambda _prompt, _choice: float("nan"),
+        )
+
+
+def test_shipped_runtime_config_keeps_external_lm_protocols() -> None:
+    config = data_loader.load_runtime_config(ROOT / "configs/runtime_datasets.yaml")
+
+    assert set(config["evaluation"]) == {"anchor", "long_range"}
+    assert config["evaluation"]["anchor"]["name"] == "general_language_anchor"
+    assert len(config["evaluation"]["anchor"]["texts"]) == 5
+    assert config["evaluation"]["long_range"]["schema"] == "long-range/v1"
+    assert isinstance(config["evaluation"]["long_range"]["items"], list)
+    assert all(
+        isinstance(dataset.get("revision"), str) and len(dataset["revision"]) == 40
+        for dataset in config["datasets"]
     )
-    assert result["accuracy"] == 1.0
-    assert result["by_family"]["relation"]["accuracy"] == 1.0
 
 
-def test_symbolic_rankings_are_operational(tmp_path: Path) -> None:
-    path = tmp_path / "rankings.jsonl"
-    path.write_text(
-        json.dumps({"retrieved": ["a", "b"], "relevant": ["a"]}) + "\n",
+class _Dataset:
+    column_names = ["body"]
+
+    def __getitem__(self, field: str) -> list[str]:
+        assert field == "body"
+        return [" first ", "", "second"]
+
+
+def test_lm_text_loading_forwards_pinned_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def load_dataset(name: str, **kwargs: Any) -> _Dataset:
+        calls.append((name, kwargs))
+        return _Dataset()
+
+    monkeypatch.setattr(data_loader, "load_dataset", load_dataset)
+    texts = data_loader.load_split_texts(
+        {
+            "dataset": "owner/corpus",
+            "config": "subset",
+            "revision": "a" * 40,
+            "text_field": "body",
+        },
+        "train[:10]",
+    )
+
+    assert texts == ["first", "second"]
+    assert calls == [
+        (
+            "owner/corpus",
+            {
+                "name": "subset",
+                "split": "train[:10]",
+                "revision": "a" * 40,
+                "streaming": False,
+            },
+        )
+    ]
+
+
+def test_array_fingerprint_captures_layout_independent_values_shape_and_dtype() -> None:
+    blocks = np.asarray([[1, 2], [3, 4]], dtype=np.int32)
+    fingerprint = data_loader.array_fingerprint(blocks)
+
+    assert data_loader.array_fingerprint(np.asfortranarray(blocks)) == fingerprint
+    assert data_loader.array_fingerprint(blocks.reshape(1, 4)) != fingerprint
+    assert data_loader.array_fingerprint(blocks.astype(np.int64)) != fingerprint
+
+
+@dataclass(frozen=True)
+class _Task:
+    name: str
+    train_blocks: np.ndarray
+    eval_set: tuple[Any, ...]
+    epochs: int
+
+
+def test_runtime_data_applies_task_order_heldout_and_joint_protocols(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "runtime.yaml"
+    config_path.write_text(
+        "runtime:\n"
+        "  source: separate\n"
+        "  task_order: [second, first]\n"
+        "  training_mode: joint\n"
+        "  heldout_tasks: [second]\n"
+        "datasets:\n"
+        "  - {name: first, type: separate}\n"
+        "  - {name: second, type: separate}\n",
         encoding="utf-8",
     )
-    result = evaluate_symbolic_rankings(path, cutoffs=(1, 2))
-    assert result["status"] == "measured"
-    assert result["precision"]["@1"] == 1.0
+    first_blocks = np.arange(6, dtype=np.int32).reshape(3, 2)
+    second_blocks = np.arange(8, dtype=np.int32).reshape(4, 2)
 
+    def build_tasks(*_args: Any, **_kwargs: Any):
+        tasks = (
+            _Task("first", first_blocks, (), 2),
+            _Task("second", second_blocks, (), 3),
+        )
+        return tasks, {"first": first_blocks, "second": second_blocks}, {}
 
-@dataclass
-class _ClassLabel:
-    names: list[str]
+    monkeypatch.setattr(data_loader, "build_separate_tasks", build_tasks)
+    monkeypatch.setattr(data_loader, "Domain", _Task)
 
-
-@dataclass
-class _Sequence:
-    feature: _ClassLabel
-
-
-class _Dataset(list):
-    def __init__(self, rows, feature):
-        super().__init__(rows)
-        self.column_names = list(rows[0])
-        self.features = {"text": object(), "labels": feature, "label": feature}
-
-
-class _Tokenizer:
-    pad_token_id = 0
-
-    def __call__(self, text, **kwargs):
-        length = kwargs["max_length"]
-        values = [min(ord(char), 255) for char in text][:length]
-        mask = [1] * len(values)
-        values += [0] * (length - len(values))
-        mask += [0] * (length - len(mask))
-        return {
-            "input_ids": np.asarray([values], dtype=np.int32),
-            "attention_mask": np.asarray([mask], dtype=np.int32),
-        }
-
-
-def _config(multilabel: bool) -> dict:
-    return {
-        "name": "eurlex" if multilabel else "scotus",
-        "dataset": "coastalcph/lex_glue",
-        "config": "eurlex" if multilabel else "scotus",
-        "revision": "abc123",
-        "text_field": "text",
-        "train_split": "train",
-        "validation_split": "validation",
-        "test_split": "test",
-        "legal_task": {
-            "label_field": "labels" if multilabel else "label",
-            "multilabel": multilabel,
-            "expected_num_labels": 3,
-        },
-    }
-
-
-def test_loads_multilabel_targets_and_semantic_factors(monkeypatch) -> None:
-    dataset = _Dataset(
-        [{"text": "alpha", "labels": [0, 2]}, {"text": "beta", "labels": [1]}],
-        _Sequence(_ClassLabel(["a", "b", "c"])),
+    runtime = data_loader.load_runtime_data(
+        config_path,
+        tokenizer=object(),
+        sequence_length=2,
+        batch_size=2,
+        eval_batches=1,
     )
-    calls = []
 
-    def load(*args, **kwargs):
-        calls.append((args, kwargs))
-        return dataset
-
-    monkeypatch.setattr(data_loader, "load_dataset_split", load)
-    spec = data_loader.parse_legal_task_spec(_config(True))
-    assert spec is not None
-    split = data_loader.load_labeled_split(
-        spec, "test", _Tokenizer(), sequence_length=8
+    assert [task.name for task in runtime.tasks] == ["first"]
+    assert runtime.task_order == ("first",)
+    assert runtime.heldout_tasks == ("second",)
+    assert runtime.metadata["training_mode"] == "joint"
+    assert runtime.training_tasks is not None
+    assert [task.name for task in runtime.training_tasks] == ["joint"]
+    np.testing.assert_array_equal(
+        runtime.training_tasks[0].train_blocks,
+        np.tile(first_blocks[:2], (2, 1)),
     )
-    np.testing.assert_array_equal(split.targets, [[1, 0, 1], [0, 1, 0]])
-    np.testing.assert_array_equal(split.factor_mask, split.targets.astype(bool))
-    assert split.factor_names == ("eurlex:a", "eurlex:b", "eurlex:c")
-    assert len(split.fingerprint) == 64
-    assert calls[0][1]["revision"] == "abc123"
-    assert calls[0][0][1] == "test"
+    assert set(runtime.test_blocks) == {"first", "second"}
 
-
-def test_loads_single_label_targets(monkeypatch) -> None:
-    dataset = _Dataset(
-        [{"text": "one", "label": 2}, {"text": "two", "label": 0}],
-        _ClassLabel(["x", "y", "z"]),
+    sequential = data_loader.load_runtime_data(
+        config_path,
+        tokenizer=object(),
+        task_order=("first", "second"),
+        training_mode="sequential",
+        heldout_tasks=(),
+        sequence_length=2,
+        batch_size=2,
+        eval_batches=1,
     )
-    monkeypatch.setattr(
-        data_loader, "load_dataset_split", lambda *args, **kwargs: dataset
-    )
-    spec = data_loader.parse_legal_task_spec(_config(False))
-    assert spec is not None
-    split = data_loader.load_labeled_split(
-        spec, "validation", _Tokenizer(), sequence_length=6
-    )
-    np.testing.assert_array_equal(split.probe_targets(), [2, 0])
-    assert split.multilabel is False
-
-
-def test_legal_task_requires_pinned_revision() -> None:
-    config = _config(False)
-    del config["revision"]
-    with pytest.raises(ValueError, match="pinned revision"):
-        data_loader.parse_legal_task_spec(config)
+    assert sequential.training_tasks is sequential.tasks
+    assert sequential.task_order == ("first", "second")

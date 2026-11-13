@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+GENERATED_REPORT_PREFIX = "report_and_visualization/"
+
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -48,7 +50,16 @@ def source_fingerprint(root: Path) -> dict[str, Any]:
     commit = git("rev-parse", "HEAD")
     diff = git("diff", "--binary", "HEAD")
     untracked = git("ls-files", "--others", "--exclude-standard")
-    untracked_paths = [] if not untracked else sorted(untracked.splitlines())
+    untracked_paths = (
+        []
+        if not untracked
+        else sorted(
+            path
+            for path in untracked.splitlines()
+            if path != GENERATED_REPORT_PREFIX.rstrip("/")
+            and not path.startswith(GENERATED_REPORT_PREFIX)
+        )
+    )
     untracked_source_hashes = {
         relative: sha256_file(root / relative)
         for relative in untracked_paths

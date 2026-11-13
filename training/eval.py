@@ -66,6 +66,8 @@ def evaluate_all_stages(
     generate_report: bool = True,
     report_rank: int = 4,
     require_complete: bool = True,
+    generate_visualizations: bool = True,
+    visualization_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Evaluate and compare all matched A1/A2/A3 runs in one benchmark root.
 
@@ -92,6 +94,15 @@ def evaluate_all_stages(
     report_path = (
         report_manifest(root, report_rank=report_rank) if generate_report else None
     )
+    visualization = None
+    if generate_report and generate_visualizations:
+        from benchmark.visualization import generate_reports_and_visualizations
+
+        visualization = generate_reports_and_visualizations(
+            root,
+            output_dir=visualization_dir,
+            report_rank=report_rank,
+        )
     if require_complete and evaluation["completed_runs"] != evaluation["planned_runs"]:
         raise RuntimeError(
             "Evaluation excluded invalid or missing runs: "
@@ -102,6 +113,7 @@ def evaluate_all_stages(
         "incomplete_runs": incomplete,
         "evaluation_path": str(root / "evaluation.json"),
         "report_path": None if report_path is None else str(report_path),
+        "visualization": visualization,
     }
     return evaluation
 
@@ -131,6 +143,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Evaluate available runs while retaining explicit coverage gaps.",
     )
+    parser.add_argument("--no-visualization", action="store_true")
+    parser.add_argument("--visualization-dir", type=Path, default=None)
     return parser
 
 
@@ -142,6 +156,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         generate_report=not args.no_report,
         report_rank=args.report_rank,
         require_complete=not args.allow_incomplete,
+        generate_visualizations=not args.no_visualization,
+        visualization_dir=args.visualization_dir,
     )
     global_result = evaluation["global_evaluation"]
     print(
