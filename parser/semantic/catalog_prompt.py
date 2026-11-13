@@ -37,9 +37,10 @@ class DiscoursePrompt:
     text: str
 
 
-# ---------------------------------------------------------------------------
-# Ontology rendering
-# ---------------------------------------------------------------------------
+# ── Ontology rendering ───────────────────────────────────────────────────────
+
+
+_INPUT_HEADING = re.compile(r"^[ \t]*## \d+\. INPUT\b", re.MULTILINE)
 
 
 def _general_catalog_versions(
@@ -123,9 +124,7 @@ def _discourse_catalog_guide(catalog: OntologyCatalog) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Configuration loading
-# ---------------------------------------------------------------------------
+# ── Configuration loading ────────────────────────────────────────────────────
 
 
 def _load_prompt_config(path: Path, label: str) -> tuple[str, str]:
@@ -181,9 +180,7 @@ def _prompt_fingerprint(guidance: str) -> str:
     return sha256(guidance.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# General semantic prompt
-# ---------------------------------------------------------------------------
+# ── General semantic prompt ──────────────────────────────────────────────────
 
 
 def build_catalog_document_prompt(
@@ -245,9 +242,7 @@ def build_catalog_document_prompt(
     )
 
 
-# ---------------------------------------------------------------------------
-# Discourse prompt
-# ---------------------------------------------------------------------------
+# ── Discourse prompt ─────────────────────────────────────────────────────────
 
 
 _DISCOURSE_GUIDANCE = """
@@ -340,9 +335,7 @@ def build_discourse_prompt(
     )
 
 
-# ---------------------------------------------------------------------------
-# Routing prompt
-# ---------------------------------------------------------------------------
+# ── Routing prompt ───────────────────────────────────────────────────────────
 
 
 def build_router_prompt(source_text: str) -> CatalogDocumentPrompt:
@@ -408,8 +401,6 @@ def build_routed_extraction_prompt(
         )
 
     input_section_match = input_sections[0]
-
-    source_marker = input_section_match.group(0)
 
     general_instructions = general.text[: input_section_match.start()]
 
@@ -481,7 +472,6 @@ def build_routed_extraction_prompt(
     Do not return a separate DiscourseExtraction object.
     """
         + "\n\n"
-        + source_marker
         + input_section
     )
 

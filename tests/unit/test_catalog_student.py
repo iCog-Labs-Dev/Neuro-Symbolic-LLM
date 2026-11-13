@@ -37,7 +37,7 @@ def test_pair_rebuilds_the_current_extraction_target() -> None:
 
 def test_pair_preserves_teacher_prompt_provenance() -> None:
     pair = _pair()
-    teacher_prompt_version = "parser-router-v2|general-v1+sha256.teacher"
+    teacher_prompt_version = "parser-router-v1|general-v1+sha256.teacher"
     pair["parser"]["prompt_version"] = teacher_prompt_version
 
     _, _, result = validate_catalog_student_pair(
