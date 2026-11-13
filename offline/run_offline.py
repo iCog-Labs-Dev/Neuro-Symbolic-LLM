@@ -661,7 +661,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--progress-every",
         type=int,
-        default=25,
+        default=5,
     )
 
     return parser
@@ -873,11 +873,14 @@ def run_loader_with_progress(
 
 def prepare_dataset(
     args: argparse.Namespace,
-    source_name: str,
-    source_domain: str,
+    source: dict[str, Any],
     prepared_path: Path,
 ) -> None:
-    """Prepare a dataset or reuse valid existing records."""
+    """Reuse prepared data only when its count matches the YAML configuration."""
+
+    source_name = source["name"]
+    source_domain = source["domain"]
+    requested_count = int(source["count"])
 
     log_step(
         1,
@@ -887,21 +890,53 @@ def prepare_dataset(
     print(f"Dataset: {source_name}")
     print(f"Type: {source_domain}")
 
-    if not args.force and valid_jsonl(prepared_path):
+    existing_count = count_jsonl(prepared_path)
+    existing_valid = valid_jsonl(prepared_path)
+
+    # Reuse only if the existing dataset is valid and has
+    # exactly the number of records requested in the YAML.
+    if not args.force and existing_valid and existing_count == requested_count:
         print(
-            f"Reusing prepared dataset: {count_jsonl(prepared_path)} records",
+            f"Reusing prepared dataset: {existing_count} records",
             flush=True,
         )
         return
 
+    # Do not silently reuse an incompatible dataset when
+    # preparation has explicitly been disabled.
     if args.skip_preparation:
-        raise FileNotFoundError(f"Valid prepared dataset not found: {prepared_path}")
+        raise FileNotFoundError(
+            f"Prepared dataset does not match the configuration. "
+            f"Requested: {requested_count}; found: {existing_count}. "
+            f"Path: {prepared_path}"
+        )
 
+    # Preserve the previous dataset before regeneration.
     if prepared_path.exists():
         archive_incomplete(
             [prepared_path],
             f"{source_name}-dataset",
             prepared_path.parent / "recovery",
+        )
+
+    if existing_valid and existing_count != requested_count:
+        print(
+            f"Record count changed: {existing_count} -> {requested_count}.",
+            flush=True,
+        )
+        print(
+            "Preserved previous dataset. Regenerating.",
+            flush=True,
+        )
+    elif args.force:
+        print(
+            "Forced dataset regeneration. Previous dataset preserved.",
+            flush=True,
+        )
+    else:
+        print(
+            "Prepared dataset missing or invalid. Generating.",
+            flush=True,
         )
 
     command = [
@@ -921,13 +956,23 @@ def prepare_dataset(
 
     run_loader_with_progress(command)
 
+    # Verify the newly generated dataset.
     if not valid_jsonl(prepared_path):
         raise RuntimeError(
-            f"Dataset preparation did not produce valid records: {prepared_path}"
+            f"Dataset preparation did not produce valid records: " f"{prepared_path}"
+        )
+
+    actual_count = count_jsonl(prepared_path)
+
+    if actual_count != requested_count:
+        raise RuntimeError(
+            f"Dataset preparation count mismatch for {source_name!r}: "
+            f"requested {requested_count}, prepared {actual_count}. "
+            "Teacher extraction will not start."
         )
 
     print(
-        f"Prepared: {count_jsonl(prepared_path)} records",
+        f"Prepared: {actual_count} records",
         flush=True,
     )
 
@@ -1252,6 +1297,17 @@ def run_parser(
             flush=True,
         )
 
+        print(
+            "\nPARSER ERROR DETAILS:",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            parser_output[-12000:],
+            file=sys.stderr,
+            flush=True,
+        )
+
         raise RuntimeError(f"Parser CLI failed with exit code {returncode}.")
 
     # ---------------------------------------------------------
@@ -1443,7 +1499,7 @@ def run_parser(
 def adapt_documents(
     parsed_path: Path,
     output_dir: Path,
-    progress_every: int = 25,
+    progress_every: int = 5,
 ) -> tuple[int, int]:
     """Convert validated semantic results into miner documents."""
 
@@ -1648,7 +1704,6 @@ def run_source(
     """Run the complete pipeline for one configured dataset."""
 
     source_name = source["name"]
-    source_domain = source["domain"]
 
     data_dir = resolve_path(args.data_dir)
     output_root = resolve_path(args.output_dir)
@@ -1665,8 +1720,7 @@ def run_source(
     # Stage 1
     prepare_dataset(
         args,
-        source_name,
-        source_domain,
+        source,
         prepared_path,
     )
 
