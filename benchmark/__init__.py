@@ -1,2 +1,1 @@
-"""Compact benchmark orchestration for Stage A residual methods."""
-
+"""Benchmark orchestration for the continuous A1/A2/A3 residual methods."""
