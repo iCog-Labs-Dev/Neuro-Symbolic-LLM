@@ -121,8 +121,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--eval-checkpoint", type=Path, default=None)
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--eval-batches", type=int, default=None)
+    parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument(
+        "--runtime-source",
+        choices=("separate", "stories"),
+        default=None,
+        help="Override runtime.source from the shared dataset configuration.",
+    )
     parser.add_argument("--no-jit", action="store_true")
     parser.add_argument("--report-internals", action="store_true")
+    parser.add_argument(
+        "--training-mode", choices=("sequential", "joint"), default="sequential"
+    )
+    parser.add_argument("--task-order", nargs="+", default=None)
+    parser.add_argument("--heldout-task", action="append", default=[])
 
     return parser.parse_args(argv)
 
@@ -293,8 +305,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     runtime_data = load_runtime_data(
-        config_path=DEFAULT_RUNTIME_CONFIG,
+        config_path=args.runtime_config,
         tokenizer=substrate.tokenizer,
+        source=args.runtime_source,
+        task_order=args.task_order,
+        training_mode=args.training_mode,
+        heldout_tasks=args.heldout_task,
         sequence_length=train_cfg.seq_len,
         batch_size=train_cfg.batch_size,
         eval_batches=eval_batches,
@@ -302,6 +318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     domains = runtime_data.tasks
+    training_tasks = runtime_data.training_tasks or domains
 
     test_sets = runtime_data.get_test_sets(
         train_cfg.batch_size,
@@ -543,7 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         params, summary = train(
             params=params,
-            tasks=domains,
+            tasks=training_tasks,
             forward_fn=a2_forward,
             loss_fn=a2_loss,
             loss_config=obj,
@@ -551,6 +568,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config=train_cfg,
             writer=writer,
             eval_fn=evaluate_a2,
+            evaluation_tasks=domains,
         )
 
         # -----------------------------------------------------
@@ -618,6 +636,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary,
         )
 
+        if not frozen["params_unchanged"]:
+            raise RuntimeError("Frozen substrate parameters changed during training.")
+
     # ---------------------------------------------------------
     # Final experiment summary
     # ---------------------------------------------------------
@@ -628,10 +649,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         frozen,
         start_time=start_time,
     )
-
-    if not frozen["params_unchanged"]:
-        log.error("Frozen substrate parameters changed during training.")
-        return 1
 
     return 0
 

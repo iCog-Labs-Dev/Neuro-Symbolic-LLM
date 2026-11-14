@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -11,7 +12,7 @@ import jax
 import numpy as np
 import optax
 
-from metrics.performance import perplexity, training_step_time
+from metrics.performance import perplexity
 from stages.results import RunWriter
 from stages.stage_base import (
     TrainingConfig,
@@ -72,6 +73,7 @@ def train(
     config: TrainingConfig,
     writer: RunWriter,
     eval_fn: Callable,
+    evaluation_tasks: Sequence[Any] | None = None,
     pc_gradient_fn: Callable | None = None,
     checkpoint_fn: Callable | None = None,
     after_task_fn: Callable | None = None,
@@ -96,7 +98,12 @@ def train(
     if pc_gradient_fn is None and (forward_fn is None or loss_fn is None):
         raise ValueError("forward_fn and loss_fn are required for standard training.")
 
-    names = [task.name for task in tasks]
+    eval_tasks = (
+        tuple(evaluation_tasks) if evaluation_tasks is not None else tuple(tasks)
+    )
+    if not eval_tasks:
+        raise ValueError("At least one evaluation task is required.")
+    names = [task.name for task in eval_tasks]
 
     optimizer_state = optimizer.init(params)
 
@@ -117,7 +124,7 @@ def train(
 
         results = {}
 
-        for task in tasks:
+        for task in eval_tasks:
             result = eval_fn(
                 params,
                 task.eval_set,
@@ -197,6 +204,9 @@ def train(
         )
 
         task_step = 0
+        task_seed = int.from_bytes(
+            hashlib.sha256(task.name.encode()).digest()[:4], "big"
+        )
 
         # Print task number only, not dataset/task names.
         log.info(
@@ -225,7 +235,7 @@ def train(
             stream = batches(
                 task.train_blocks,
                 config.batch_size,
-                config.seed + task_idx * 10000 + epoch - 1,
+                config.seed + task_seed + epoch - 1,
             )
 
             # -----------------------------------------------------
@@ -240,16 +250,12 @@ def train(
                 global_step += 1
 
                 key = jax.random.fold_in(
-                    base_key,
-                    global_step,
+                    jax.random.fold_in(base_key, task_seed),
+                    task_step,
                 )
 
-                (grads, metrics), step_time = training_step_time(
-                    train_step,
-                    params,
-                    batch,
-                    key,
-                )
+                step_start = time.perf_counter()
+                grads, metrics = train_step(params, batch, key)
 
                 updates, optimizer_state = optimizer.update(
                     grads,
@@ -261,6 +267,8 @@ def train(
                     params,
                     updates,
                 )
+                jax.block_until_ready((params, metrics))
+                step_time = time.perf_counter() - step_start
 
                 scalars = _to_scalars(metrics)
 
@@ -370,11 +378,13 @@ def train(
         writer.save_checkpoint(
             f"task_{task_idx}_{task.name}",
             saved_params,
+            opt_state=None if checkpoint_fn is not None else optimizer_state,
             global_step=global_step,
             task=task_idx,
             domain=task.name,
             epoch=epochs,
             step=task_step,
+            deployment_only=checkpoint_fn is not None,
         )
 
         # Evaluate after each task for continual-learning metrics.

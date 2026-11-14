@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 
 os.environ.setdefault("GLOG_minloglevel", "3")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -32,6 +33,7 @@ from runtime.data_loader import load_runtime_data  # noqa: E402
 from stages.results import (  # noqa: E402
     RunWriter,
     default_run_name,
+    load_params,
     run_metadata,
 )
 from stages.stage_A.a1 import (  # noqa: E402
@@ -74,7 +76,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--eval-batches", type=int, default=None)
+    parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument(
+        "--runtime-source",
+        choices=("separate", "stories"),
+        default=None,
+        help="Override runtime.source from the shared dataset configuration.",
+    )
     parser.add_argument("--no-jit", action="store_true", default=False)
+    parser.add_argument(
+        "--training-mode", choices=("sequential", "joint"), default="sequential"
+    )
+    parser.add_argument("--task-order", nargs="+", default=None)
+    parser.add_argument("--heldout-task", action="append", default=[])
 
     return parser.parse_args(argv)
 
@@ -112,8 +126,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Prepare shared runtime datasets.
     runtime_data = load_runtime_data(
-        config_path=DEFAULT_RUNTIME_CONFIG,
+        config_path=args.runtime_config,
         tokenizer=substrate.tokenizer,
+        source=args.runtime_source,
+        task_order=args.task_order,
+        training_mode=args.training_mode,
+        heldout_tasks=args.heldout_task,
         sequence_length=train_cfg.seq_len,
         batch_size=train_cfg.batch_size,
         eval_batches=eval_batches,
@@ -122,6 +140,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Checkpoint evaluation.
     if args.eval_checkpoint is not None:
+        params = {
+            layer: {name: jnp.asarray(value) for name, value in values.items()}
+            for layer, values in load_params(args.eval_checkpoint).items()
+        }
+        adapter.validate_params(params)
         results = {}
 
         test_sets = runtime_data.get_test_sets(
@@ -151,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     domains = runtime_data.tasks
+    training_tasks = runtime_data.training_tasks or domains
 
     run_name = args.run_name or default_run_name("a1")
 
@@ -193,7 +217,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Shared training engine with A1-specific forward and loss functions.
         params, summary = train(
             params=params,
-            tasks=domains,
+            tasks=training_tasks,
             forward_fn=partial(
                 a1_forward,
                 substrate=substrate,
@@ -214,6 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 adapter,
                 jit=train_cfg.jit,
             ),
+            evaluation_tasks=domains,
         )
 
         frozen = substrate.verify_frozen()
@@ -246,16 +271,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         writer.write_json("results.json", summary)
 
+        if not frozen["params_unchanged"]:
+            raise RuntimeError("Frozen substrate parameters changed during training.")
+
     log_final_summary(
         log,
         summary,
         frozen,
         start_time=start_time,
     )
-
-    if not frozen["params_unchanged"]:
-        log.error("Frozen substrate parameters changed during training.")
-        return 1
 
     return 0
 

@@ -8,6 +8,8 @@ on:
     branches:
       - main
       - Base
+      - benchmark
+      - runtime
       - A2
       - a2-final
       - symbolic_head
@@ -60,7 +62,7 @@ jobs:
           key: pip-${{ hashFiles('pyproject.toml') }}
 
       - name: Install dependencies
-        run: python -m pip install -e ".[dev,miner]"
+        run: python -m pip install -e ".[dev,miner,visualization]"
 
       - name: Require the released miner contract
         run: python -c "from hybrid_miner.contracts.semantic_document import SemanticDocument, SemanticRule; from hybrid_miner.ontology.bundle import OntologyBundle"
@@ -74,4 +76,13 @@ jobs:
           tests/integration/test_catalog_bundle.py
           tests/integration/test_catalog_document_parser.py
           tests/integration/test_catalog_document_export.py
+          -v --tb=short
+
+      - name: Run benchmark schema and report tests
+        run: >-
+          python -m pytest
+          tests/benchmark/test_orchestration.py
+          tests/benchmark/test_evaluation.py
+          tests/benchmark/test_benchmark.py
+          tests/benchmark/test_research_audits.py
           -v --tb=short

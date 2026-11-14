@@ -87,6 +87,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--eval-batches", type=int, default=None)
     parser.add_argument("--split", type=str, default="test")
+    parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument(
+        "--runtime-source",
+        choices=("separate", "stories"),
+        default=None,
+        help="Override runtime.source from the shared dataset configuration.",
+    )
 
     parser.add_argument(
         "--energy-curve",
@@ -99,6 +106,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--training-mode", choices=("sequential", "joint"), default="sequential"
+    )
+    parser.add_argument("--task-order", nargs="+", default=None)
+    parser.add_argument("--heldout-task", action="append", default=[])
 
     return parser.parse_args(argv)
 
@@ -268,6 +280,7 @@ def run_one(
     n_trainable = sum(int(leaf.size) for leaf in jax.tree_util.tree_leaves(params))
 
     domains = runtime_data.tasks
+    training_tasks = runtime_data.training_tasks or domains
 
     # -------------------------------------------------------------
     # Evaluation callback
@@ -313,7 +326,9 @@ def run_one(
         train_cfg.output_dir,
         run_name,
     ) as writer:
-        writer.write_config(cfg.to_dict())
+        effective_config = cfg.to_dict()
+        effective_config["a3_hybrid"] = effective_config.pop("objective")
+        writer.write_config(effective_config)
 
         writer.write_json(
             "meta.json",
@@ -364,7 +379,7 @@ def run_one(
 
         params, summary = train(
             params=params,
-            tasks=domains,
+            tasks=training_tasks,
             forward_fn=None,
             loss_fn=None,
             loss_config=None,
@@ -375,6 +390,7 @@ def run_one(
             pc_gradient_fn=make_a3_gradient_fn(model),
             checkpoint_fn=model.adapter_params,
             after_task_fn=after_task_fn,
+            evaluation_tasks=domains,
         )
 
         # ---------------------------------------------------------
@@ -431,6 +447,9 @@ def run_one(
             summary,
         )
 
+        if not frozen["params_unchanged"]:
+            raise RuntimeError("Frozen substrate parameters changed during training.")
+
     # -------------------------------------------------------------
     # Final experiment summary
     # -------------------------------------------------------------
@@ -441,10 +460,6 @@ def run_one(
         frozen,
         start_time=start_time,
     )
-
-    if not frozen["params_unchanged"]:
-        log.error("Frozen substrate parameters changed during training.")
-        return 1
 
     return 0
 
@@ -498,8 +513,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     eval_batches = train_cfg.eval_batches
 
     runtime_data = load_runtime_data(
-        config_path=DEFAULT_RUNTIME_CONFIG,
+        config_path=args.runtime_config,
         tokenizer=substrate.tokenizer,
+        source=args.runtime_source,
+        task_order=args.task_order,
+        training_mode=args.training_mode,
+        heldout_tasks=args.heldout_task,
         sequence_length=train_cfg.seq_len,
         batch_size=train_cfg.batch_size,
         eval_batches=eval_batches,
