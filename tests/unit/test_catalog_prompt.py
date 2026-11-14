@@ -41,8 +41,18 @@ def test_prompt_uses_general_catalog_signatures_and_examples():
     assert "Source text:\nNora sang." in prompt.text
 
 
-def test_routed_prompt_keeps_input_heading_and_source_once():
+def test_routed_prompt_keeps_input_heading_and_source_once(monkeypatch):
     source = "Although it rained, Mira left."
+    build_general = catalog_prompt.build_catalog_document_prompt
+
+    def legacy_heading(*args, **kwargs):
+        general = build_general(*args, **kwargs)
+        return catalog_prompt.CatalogDocumentPrompt(
+            version=general.version,
+            text=general.text.replace("## 14. INPUT", "## 13. INPUT"),
+        )
+
+    monkeypatch.setattr(catalog_prompt, "build_catalog_document_prompt", legacy_heading)
     prompt = catalog_prompt.build_routed_extraction_prompt(
         source, catalog=load_ontology_catalog(), run_discourse=True
     )
