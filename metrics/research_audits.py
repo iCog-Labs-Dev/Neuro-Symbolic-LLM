@@ -6,6 +6,7 @@ interventions, not inferred semantic labels. See docs/benchmark_metrics.md.
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
 import numpy as np
@@ -19,30 +20,27 @@ def _array(value: Any, name: str, ndim: int) -> np.ndarray:
 
 
 def factor_organization(importance: Any) -> dict[str, Any]:
-    """Fracture and overlap, with rows=factors and columns=components."""
-    values = _array(importance, "factor_importance", 2)
-    if (values < 0).any():
-        raise ValueError("factor importance must be nonnegative")
-    totals = values.sum(axis=1)
-    valid = totals > 0
-    p = np.divide(
-        values, totals[:, None], out=np.zeros_like(values), where=valid[:, None]
-    )
-    entropy = -np.sum(np.where(p > 0, p * np.log(np.maximum(p, 1e-300)), 0), axis=1)
-    fracture = np.exp(entropy) / values.shape[1]
-    selected = p[valid]
-    overlap = np.minimum(selected[:, None, :], selected[None, :, :]).sum(axis=2)
-    pairs = overlap[np.triu_indices(len(selected), 1)]
+    """Adapt the shared Base-branch factor metrics to the audit report schema."""
+    try:
+        shared_metrics = import_module("metrics.a4.representation")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"metrics.a4", "metrics.a4.representation"}:
+            raise
+        return {
+            "status": "unavailable",
+            "reason": "shared factor metrics from Base PR #20 are not available",
+            "mean_fracture": None,
+            "mean_overlap": None,
+        }
+    shared = shared_metrics.factor_organization(importance)
+    fractures = [value for value in shared["fracture"] if value is not None]
     return {
-        "fracture": [
-            float(value) if is_valid else None
-            for value, is_valid in zip(fracture, valid, strict=True)
-        ],
-        "valid_factor_indices": np.flatnonzero(valid).tolist(),
-        "zero_effect_factor_indices": np.flatnonzero(~valid).tolist(),
-        "mean_fracture": float(fracture[valid].mean()) if valid.any() else None,
-        "overlap": overlap.tolist(),
-        "mean_overlap": float(pairs.mean()) if pairs.size else None,
+        "fracture": shared["fracture"],
+        "valid_factor_indices": shared["valid_factor_indices"],
+        "zero_effect_factor_indices": shared["zero_effect_factor_indices"],
+        "mean_fracture": float(np.mean(fractures)) if fractures else None,
+        "overlap": shared["overlap_matrix"],
+        "mean_overlap": shared["mean_off_diagonal_overlap"],
     }
 
 

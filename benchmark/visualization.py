@@ -350,6 +350,15 @@ def _metric_samples(
 
 
 def _na_reason(method: str, metric: str, cohort: HeadlineCohort | None) -> str:
+    if metric in {"representation_fracture", "factor_overlap"} and cohort:
+        for row in cohort.records.get(method, ()):
+            factor = (
+                row.get("research_audits", {})
+                .get("metrics", {})
+                .get("factor_organization", {})
+            )
+            if factor.get("status") == "unavailable":
+                return str(factor.get("reason", "shared factor metrics unavailable"))
     if metric in AUDIT_METRICS:
         return "requires valid, checkpoint-bound audit evidence with a matching protocol across methods"
     if metric in UNAVAILABLE_REASONS:

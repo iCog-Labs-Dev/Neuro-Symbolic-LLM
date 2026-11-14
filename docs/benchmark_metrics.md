@@ -57,6 +57,10 @@ checkpoints, not K rounds of online inference on test targets.
 PR #20's factor-organization implementation also tracks factors with no
 measured contribution. These factors remain undefined and are listed by index;
 they are excluded from means and overlap rather than being assigned a score.
+Fracture and overlap reuse that implementation from `metrics.a4.representation`.
+Until it is present in the checkout (for example, after the Base branch changes
+are integrated), those two measurements are reported as N/A, even if factor
+importance evidence is supplied. Other audit measurements remain available.
 The other metrics introduced by that PR concern symbolic-head retrieval,
 template geometry and CPU/GPU transfer, outside this report's scope.
 

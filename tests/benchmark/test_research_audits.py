@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +32,7 @@ from metrics.research_audits import (
 
 
 def test_factor_fracture_and_overlap_match_paper_examples():
+    pytest.importorskip("metrics.a4.representation")
     result = factor_organization([[1, 0, 0, 0], [1, 1, 1, 1], [0, 1, 0, 0]])
     assert result["fracture"] == pytest.approx([0.25, 1.0, 0.25])
     assert result["overlap"][0][2] == 0
@@ -40,6 +42,50 @@ def test_factor_fracture_and_overlap_match_paper_examples():
     assert partial["mean_overlap"] is None
     with pytest.raises(ValueError, match="nonnegative"):
         factor_organization([[-1, 2]])
+
+
+def test_factor_organization_reuses_shared_metrics(monkeypatch):
+    contributions = [[1, 0], [0, 0]]
+    shared = {
+        "fracture": [0.5, None],
+        "valid_factor_indices": [0],
+        "zero_effect_factor_indices": [1],
+        "overlap_matrix": [[1.0]],
+        "mean_off_diagonal_overlap": None,
+    }
+    calls = []
+
+    def shared_factor_organization(values):
+        calls.append(values)
+        return shared
+
+    def load_module(name):
+        assert name == "metrics.a4.representation"
+        return SimpleNamespace(factor_organization=shared_factor_organization)
+
+    monkeypatch.setattr("metrics.research_audits.import_module", load_module)
+    result = factor_organization(contributions)
+    assert calls == [contributions]
+    assert result["mean_fracture"] == 0.5
+    assert result["overlap"] == [[1.0]]
+    assert result["zero_effect_factor_indices"] == [1]
+
+
+def test_factor_organization_unavailable_does_not_block_other_audits(monkeypatch):
+    def missing_module(name):
+        raise ModuleNotFoundError("missing shared metrics", name="metrics.a4")
+
+    monkeypatch.setattr("metrics.research_audits.import_module", missing_module)
+    result = evaluate_audits(
+        {
+            "schema": "a1-a3-research-audit/v1",
+            "factor_importance": [[1, 0]],
+            "mixed_hessian": [[2]],
+        }
+    )
+    assert result["factor_organization"]["status"] == "unavailable"
+    assert result["factor_organization"]["mean_fracture"] is None
+    assert result["mixed_curvature"] == 2
 
 
 def test_audit_formulas_and_missing_information():
@@ -112,6 +158,10 @@ def test_k_selection_uses_shared_seed_and_fingerprint():
 
 def test_audit_inputs_are_checkpoint_bound(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("benchmark.core._load_deployed_metrics", lambda *args: {})
+    monkeypatch.setattr(
+        "metrics.research_audits.factor_organization",
+        lambda values: {"mean_fracture": 0.5},
+    )
     checkpoint = tmp_path / "outputs" / "run" / "params" / "task_0_x.npz"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"checkpoint")
