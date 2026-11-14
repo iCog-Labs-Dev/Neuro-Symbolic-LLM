@@ -51,7 +51,6 @@ def main() -> int:
     parser.add_argument("--task-order", nargs="+", default=None)
     parser.add_argument("--heldout-task", action="append", default=None)
     parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--include-a4-plan", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--report-rank", type=int, default=4)
     parser.add_argument("--no-visualization", action="store_true")
@@ -94,7 +93,6 @@ def main() -> int:
             protocols=protocols,
             task_order=args.task_order,
             heldout_tasks=args.heldout_task,
-            include_a4_plan=args.include_a4_plan,
             profile=args.profile,
         )
         print(f"planned {len(manifest['runs'])} runs: {output_dir / 'manifest.json'}")

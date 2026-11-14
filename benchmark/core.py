@@ -69,35 +69,6 @@ MEASURED_METRICS = (
     "inference_latency",
     "peak_memory",
 )
-A4_SYMBOLIC_METRICS = (
-    "retrieval_precision_recall",
-    "retrieval_hit_rate",
-    "retrieval_mean_reciprocal_rank",
-    "retrieval_activation_rate",
-    "tier3_trigger_rate",
-    "template_coverage",
-    "key_alignment_nll",
-    "value_alignment_error",
-    "query_cluster_silhouette",
-    "template_factor_fracture",
-    "template_factor_overlap",
-    "symbolic_key_entanglement",
-    "symbolic_head_capacity",
-    "symbolic_alignment_preservation",
-    "symbolic_attention_contribution",
-    "symbolic_gradient_conflict",
-    "symbolic_mixed_fisher_coupling",
-    "symbolic_update_commutator",
-    "human_template_review",
-    "bank_growth_stability",
-    "consolidation_queue_metrics",
-    "cross_tier_latency",
-    "cuda_transfer_latency",
-)
-LATER_STAGE_SYMBOLIC_METRICS = (
-    "bank_template_mutual_information",
-    "column_template_binding_stability",
-)
 EXTERNAL_METRIC_SPECS = (
     ("Validation loss", "validation_loss", "lower"),
     ("Perplexity", "perplexity", "lower"),
@@ -884,7 +855,6 @@ def make_manifest(
     protocols: list[str] | tuple[str, ...] | None = None,
     task_order: list[str] | tuple[str, ...] | None = None,
     heldout_tasks: list[str] | tuple[str, ...] | None = None,
-    include_a4_plan: bool = False,
     profile: str = "custom",
 ) -> dict[str, Any]:
     selected_protocols = tuple(protocols or (protocol,))
@@ -936,55 +906,6 @@ def make_manifest(
                 **condition,
             }
         )
-    a4_runs = []
-    if include_a4_plan:
-        parent_rows = {row["run_id"]: row for row in run_rows}
-        a4_runs = [
-            {
-                "schema": "nsllm.a4-child/v1",
-                "run_id": f"a4-{spec.run_id.removeprefix('a3-')}",
-                "method": "a4",
-                "parent_a3_run_id": spec.run_id,
-                "parent_a3_condition_sha256": parent_rows[spec.run_id][
-                    "condition_sha256"
-                ],
-                "seed": spec.seed,
-                "rank": spec.rank,
-                "k": spec.k,
-                "protocol": spec.protocol,
-                "task_order": list(spec.task_order),
-                "heldout_tasks": list(spec.heldout_tasks),
-                "parent_a3_checkpoint_path": None,
-                "parent_a3_checkpoint_sha256": None,
-                "parent_a3_model": None,
-                "parent_a3_layers": None,
-                "parent_a3_scale": None,
-                "parent_a3_activation": None,
-                "a3_parent_schema": "nsllm.a3-parent/v1",
-                "symbolic_bank_sha256": None,
-                "alignment_manifest_sha256": None,
-                "retrieval_probes_sha256": None,
-                "native_library_sha256": None,
-                "symbolic_dim": None,
-                "top_m": None,
-                "retrieval_backend": None,
-                "required_artifacts": [
-                    "parent_a3_checkpoint",
-                    "symbolic_bank",
-                    "alignment_manifest",
-                    "retrieval_probes",
-                    "retrieval_events",
-                    "bank_snapshots",
-                    "consolidation_events",
-                    "measurement_artifacts",
-                ],
-                "status": "requires_a4_implementation",
-                "symbolic_metrics": list(A4_SYMBOLIC_METRICS),
-                "deferred_later_stage_metrics": list(LATER_STAGE_SYMBOLIC_METRICS),
-            }
-            for spec in specs
-            if spec.method == "a3"
-        ]
     manifest = {
         "schema": 2,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1002,7 +923,6 @@ def make_manifest(
         "source": source,
         "measured_metrics": list(MEASURED_METRICS),
         "runs": run_rows,
-        "a4_runs": a4_runs,
     }
     _write_json(output_dir / "manifest.json", manifest)
     return manifest
@@ -2167,9 +2087,8 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
             "",
             "## Scope",
             "",
-            "Symbolic metrics are intentionally excluded until A4 supplies checkpoint, bank, "
-            "alignment labels, retrieval probes, and measurement artifacts. See manifest "
-            "`a4_runs` for blocked A4 child specs.",
+            "This report covers continuous residual methods A1, A2, and A3. "
+            "Symbolic-head metrics are outside its scope.",
         ]
     )
 

@@ -13,11 +13,9 @@ import pytest
 import yaml
 
 from benchmark.core import (
-    A4_SYMBOLIC_METRICS,
     BENCHMARK_RUNTIME_SOURCE,
     DEFAULT_CONFIGS,
     DEFAULT_RUNTIME_CONFIG,
-    LATER_STAGE_SYMBOLIC_METRICS,
     MEASURED_METRICS,
     _command,
     _filter_adapter_params,
@@ -260,12 +258,7 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
         "Ablation rank correlation",
     ]
     assert "## Scope" in report
-    assert "Symbolic metrics are intentionally excluded" in report
-    assert (
-        "checkpoint, bank, alignment labels, retrieval probes, and measurement artifacts"
-        in report
-    )
-    assert "manifest `a4_runs`" in report
+    assert "Symbolic-head metrics are outside its scope" in report
     assert "| Symbolic" not in report
 
 
@@ -382,32 +375,6 @@ def test_measured_metrics_match_supported_scope() -> None:
         "inference_latency",
         "peak_memory",
     }
-    assert set(A4_SYMBOLIC_METRICS) == {
-        "retrieval_precision_recall",
-        "retrieval_hit_rate",
-        "retrieval_mean_reciprocal_rank",
-        "retrieval_activation_rate",
-        "tier3_trigger_rate",
-        "template_coverage",
-        "key_alignment_nll",
-        "value_alignment_error",
-        "query_cluster_silhouette",
-        "template_factor_fracture",
-        "template_factor_overlap",
-        "symbolic_key_entanglement",
-        "symbolic_head_capacity",
-        "symbolic_alignment_preservation",
-        "symbolic_attention_contribution",
-        "symbolic_gradient_conflict",
-        "symbolic_mixed_fisher_coupling",
-        "symbolic_update_commutator",
-        "human_template_review",
-        "bank_growth_stability",
-        "consolidation_queue_metrics",
-        "cross_tier_latency",
-        "cuda_transfer_latency",
-    }
-    assert set(A4_SYMBOLIC_METRICS).isdisjoint(MEASURED_METRICS)
 
 
 def test_resume_rejects_unverified_result_files(tmp_path: Path) -> None:
@@ -433,68 +400,7 @@ def test_expand_specs_and_make_manifest(tmp_path: Path) -> None:
         rank_values=[16],
     )
     assert len(manifest["runs"]) == 6
-    assert manifest["a4_runs"] == []
     assert (tmp_path / "manifest.json").is_file()
-
-
-def test_make_manifest_can_add_blocked_a4_child_plans(tmp_path: Path) -> None:
-    task_order = ["scotus", "ledgar", "eurlex"]
-    manifest = make_manifest(
-        tmp_path,
-        seeds=[3],
-        methods=["a1", "a3"],
-        k_values=[1, 4],
-        rank_values=[8],
-        protocol="heldout",
-        task_order=task_order,
-        heldout_tasks=["eurlex"],
-        include_a4_plan=True,
-    )
-
-    assert len(manifest["runs"]) == 3
-    a3_runs = {run["run_id"]: run for run in manifest["runs"] if run["method"] == "a3"}
-    assert len(manifest["a4_runs"]) == len(a3_runs) == 2
-    for child in manifest["a4_runs"]:
-        parent = a3_runs[child["parent_a3_run_id"]]
-        assert child["run_id"] == parent["run_id"].replace("a3-", "a4-", 1)
-        assert child["schema"] == "nsllm.a4-child/v1"
-        assert child["method"] == "a4"
-        assert child["parent_a3_condition_sha256"] == parent["condition_sha256"]
-        for field in ("seed", "rank", "k", "protocol"):
-            assert child[field] == parent[field]
-        assert child["task_order"] == task_order
-        assert child["heldout_tasks"] == ["eurlex"]
-        assert child["status"] == "requires_a4_implementation"
-        assert child["symbolic_metrics"] == list(A4_SYMBOLIC_METRICS)
-        assert child["deferred_later_stage_metrics"] == list(
-            LATER_STAGE_SYMBOLIC_METRICS
-        )
-        assert child["required_artifacts"] == [
-            "parent_a3_checkpoint",
-            "symbolic_bank",
-            "alignment_manifest",
-            "retrieval_probes",
-            "retrieval_events",
-            "bank_snapshots",
-            "consolidation_events",
-            "measurement_artifacts",
-        ]
-        for hash_field in (
-            "parent_a3_checkpoint_sha256",
-            "symbolic_bank_sha256",
-            "alignment_manifest_sha256",
-            "retrieval_probes_sha256",
-            "native_library_sha256",
-        ):
-            assert child[hash_field] is None
-
-    persisted = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
-    assert persisted["a4_runs"] == manifest["a4_runs"]
-    assert persisted["measured_metrics"] == list(MEASURED_METRICS)
-
-    evaluation = evaluate_manifest(tmp_path)
-    assert evaluation["planned_runs"] == len(manifest["runs"]) == 3
-    assert evaluation["completed_runs"] == 0
 
 
 def test_real_default_configs_materialize(tmp_path: Path) -> None:
