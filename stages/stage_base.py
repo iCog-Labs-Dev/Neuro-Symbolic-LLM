@@ -81,27 +81,36 @@ class TrainingConfig:
     model: str = "gpt2"
     seq_len: int = 128
     batch_size: int = 8
-    # Default epochs per domain; a domain's ``epochs`` overrides it.
     epochs: int = 3
     learning_rate: float = 1.0e-3
     eval_batches: int = 8
+    test_batches: int = 8
     log_every: int = 10
     seed: int = 0
-    # Fresh Adam moments at each domain boundary.
     reset_optimizer: bool = True
     output_dir: str = "runs"
     jit: bool = True
 
     def __post_init__(self) -> None:
-        for name in ("seq_len", "batch_size", "eval_batches", "log_every"):
+        for name in (
+            "seq_len",
+            "batch_size",
+            "eval_batches",
+            "test_batches",
+            "log_every",
+        ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+
         if self.epochs < 0:
             raise ValueError(f"epochs must be >= 0, got {self.epochs}")
+
         if self.seq_len < 2:
             raise ValueError("seq_len must be >= 2 for next-token training.")
-        if not math.isfinite(self.learning_rate) or not self.learning_rate > 0:
+
+        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
+
         if not isinstance(self.jit, bool):
             raise ValueError(f"jit must be a boolean, got {self.jit!r}")
 
@@ -160,32 +169,164 @@ def load_configs(
     objective_cls: type[Any],
     objective_section: str = "objective",
 ) -> RunConfig:
+    """Load stage configuration together with shared training settings.
+
+    Shared configuration:
+        configs/training.yaml
+
+    Stage configuration:
+        configs/stage_A/<stage>.yaml
+
+    Shared settings provide the common defaults.
+    Explicit stage settings override them.
+    """
+
     if objective_section not in {"objective", "a3_hybrid"}:
         raise ValueError(f"Unsupported objective section: {objective_section}")
 
-    raw = yaml.safe_load(path.read_text()) or {}
+    # ---------------------------------------------------------
+    # Load stage-specific configuration
+    # ---------------------------------------------------------
+
+    stage_path = Path(path)
+
+    if not stage_path.is_file():
+        raise FileNotFoundError(f"Stage configuration not found: {stage_path}")
+
+    raw = yaml.safe_load(stage_path.read_text(encoding="utf-8")) or {}
 
     unknown = sorted(set(raw) - set(SECTIONS))
-    if unknown:
-        raise ValueError(f"Unknown config sections in {path}: {unknown}.")
 
-    # Runtime datasets are now managed centrally by runtime/data_loader.py.
-    # Keep optional domains temporarily for backward compatibility.
+    if unknown:
+        raise ValueError(f"Unknown config sections in {stage_path}: {unknown}.")
+
+    # ---------------------------------------------------------
+    # Load shared configuration
+    # ---------------------------------------------------------
+
+    repo_root = Path(__file__).resolve().parents[1]
+    shared_path = repo_root / "configs" / "training.yaml"
+
+    if not shared_path.is_file():
+        raise FileNotFoundError(
+            f"Shared training configuration not found: {shared_path}"
+        )
+
+    shared = yaml.safe_load(shared_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(shared, Mapping):
+        raise ValueError("Shared training configuration must be a YAML mapping.")
+
+    allowed_sections = {"model", "training", "evaluation"}
+    unknown = sorted(set(shared) - allowed_sections)
+
+    if unknown:
+        raise ValueError(f"Unknown shared configuration sections: {unknown}")
+
+    model = shared.get("model") or {}
+    training = shared.get("training") or {}
+    evaluation = shared.get("evaluation") or {}
+
+    for name, section in (
+        ("model", model),
+        ("training", training),
+        ("evaluation", evaluation),
+    ):
+        if not isinstance(section, Mapping):
+            raise ValueError(
+                f"Shared configuration section {name!r} " "must be a mapping."
+            )
+
+    # ---------------------------------------------------------
+    # Merge adapter configuration
+    # ---------------------------------------------------------
+
+    shared_adapter = {
+        key: model[key]
+        for key in (
+            "rank",
+            "alpha",
+            "activation",
+            "init_std",
+            "layers",
+            "seed",
+        )
+        if key in model
+    }
+
+    stage_adapter = raw.get("adapter") or {}
+
+    if not isinstance(stage_adapter, Mapping):
+        raise ValueError("Stage adapter configuration must be a mapping.")
+
+    adapter_config = {
+        **shared_adapter,
+        **stage_adapter,
+    }
+
+    adapter = ResidualConfig.from_dict(adapter_config)
+
+    # ---------------------------------------------------------
+    # Merge training configuration
+    # ---------------------------------------------------------
+
+    shared_training = {}
+
+    if "name" in model:
+        shared_training["model"] = model["name"]
+
+    for key in ("seq_len", "batch_size", "seed"):
+        if key in model:
+            shared_training[key] = model[key]
+
+    shared_training.update(training)
+
+    # Map evaluation settings to TrainingConfig.
+    if "validation_batches" in evaluation:
+        shared_training["eval_batches"] = evaluation["validation_batches"]
+
+    if "test_batches" in evaluation:
+        shared_training["test_batches"] = evaluation["test_batches"]
+
+    stage_training = raw.get("training") or {}
+
+    if not isinstance(stage_training, Mapping):
+        raise ValueError("Stage training configuration must be a mapping.")
+
+    # Explicit stage settings override shared defaults.
+    training_config = {
+        **shared_training,
+        **stage_training,
+    }
+
+    training_cfg = TrainingConfig.from_dict(training_config)
+
+    # ---------------------------------------------------------
+    # Load stage-specific objective
+    # ---------------------------------------------------------
+
+    objective = objective_cls.from_dict(raw.get(objective_section) or {})
+
+    # ---------------------------------------------------------
+    # Load optional legacy domains
+    # ---------------------------------------------------------
+
     domains_raw = raw.get("domains", [])
 
     if not isinstance(domains_raw, list):
-        raise ValueError(f"{path}: 'domains' must be a list when provided.")
+        raise ValueError(f"{stage_path}: 'domains' must be a list.")
 
     domains = tuple(DomainConfig.from_dict(domain) for domain in domains_raw)
 
     names = [domain.name for domain in domains]
+
     if len(set(names)) != len(names):
-        raise ValueError(f"{path}: domain names must be unique, got {names}.")
+        raise ValueError(f"{stage_path}: domain names must be unique, got {names}.")
 
     return RunConfig(
-        adapter=ResidualConfig.from_dict(raw.get("adapter") or {}),
-        objective=objective_cls.from_dict(raw.get(objective_section) or {}),
-        training=TrainingConfig.from_dict(raw.get("training") or {}),
+        adapter=adapter,
+        objective=objective,
+        training=training_cfg,
         domains=domains,
     )
 
