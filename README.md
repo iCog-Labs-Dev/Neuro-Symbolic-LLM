@@ -78,8 +78,6 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-All required runtime dependencies and integrations should be declared centrally in `pyproject.toml`.
-
 ## Local Models — Ollama
 
 The semantic parser supports local LLMs through Ollama.
