@@ -41,6 +41,21 @@ def test_prompt_uses_general_catalog_signatures_and_examples():
     assert "Source text:\nNora sang." in prompt.text
 
 
+def test_routed_prompt_keeps_input_heading_and_source_once():
+    source = "Although it rained, Mira left."
+    prompt = catalog_prompt.build_routed_extraction_prompt(
+        source, catalog=load_ontology_catalog(), run_discourse=True
+    )
+    headings = [
+        line.strip()
+        for line in prompt.text.splitlines()
+        if line.lstrip().startswith("## ") and line.strip().endswith(". INPUT")
+    ]
+    assert len(headings) == 1
+    assert prompt.text.count(f"Source text:\n{source}") == 1
+    assert prompt.text.index(headings[0]) < prompt.text.index(f"Source text:\n{source}")
+
+
 def test_prompt_excludes_discourse_predicate_signatures():
     prompt = build_catalog_document_prompt(
         "Although it rained, Mira left.",

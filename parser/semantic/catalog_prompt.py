@@ -473,6 +473,18 @@ def build_routed_extraction_prompt(
         + input_section
     )
 
+    # Preserve the input heading when a routed prompt splits instructions from input.
+    input_heading = next(
+        (
+            line
+            for line in general.text.splitlines()
+            if line.lstrip().startswith("## ") and line.strip().endswith(". INPUT")
+        ),
+        None,
+    )
+    if input_heading and input_heading not in combined and input_section:
+        combined = combined[: -len(input_section)] + input_heading + input_section
+
     return CatalogDocumentPrompt(
         version=(
             f"{general.version}|"
