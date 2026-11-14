@@ -38,7 +38,7 @@ dependencies = [
 
     # Symbolic Processing and Hybrid Miner
     "hyperon>=0.2.0",
-    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.0",
+    "hybrid-miner @ git+https://github.com/iCog-Labs-Dev/hybrid-miner.git@v0.1.1",
 
     # MORK Service and Retrieval
     "fastapi>=0.110.0",
