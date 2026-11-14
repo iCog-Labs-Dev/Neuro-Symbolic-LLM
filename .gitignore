@@ -141,3 +141,6 @@ runs/
 models/
 .local-tools/
 .review-notes/
+
+# Generated inside the MORK build image.
+/docker/mork/Cargo.lock
