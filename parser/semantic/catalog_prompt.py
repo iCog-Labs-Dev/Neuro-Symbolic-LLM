@@ -402,10 +402,11 @@ def build_routed_extraction_prompt(
 
     input_section_match = input_sections[0]
 
+    input_heading = input_section_match.group(0)
+
     general_instructions = general.text[: input_section_match.start()]
 
     input_section = general.text[input_section_match.end() :]
-
     combined = (
         discourse_guidance
         + "\n\n"
@@ -472,6 +473,8 @@ def build_routed_extraction_prompt(
     Do not return a separate DiscourseExtraction object.
     """
         + "\n\n"
+        + input_heading
+        + "\n"
         + input_section
     )
 
