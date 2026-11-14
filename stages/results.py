@@ -161,7 +161,11 @@ def verify_artifact_index(run_dir: Path | str) -> bool:
     root = Path(run_dir)
     try:
         payload = json.loads((root / ARTIFACT_INDEX_NAME).read_text(encoding="utf-8"))
-        if type(payload.get("version")) is not int or payload["version"] != 1:
+        if (
+            not isinstance(payload.get("version"), int)
+            or isinstance(payload.get("version"), bool)
+            or payload["version"] != 1
+        ):
             return False
         recorded = payload.get("artifacts")
         if not isinstance(recorded, dict):

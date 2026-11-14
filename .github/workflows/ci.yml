@@ -9,6 +9,7 @@ on:
       - main
       - Base
       - benchmark
+      - runtime
       - A2
       - a2-final
       - symbolic_head

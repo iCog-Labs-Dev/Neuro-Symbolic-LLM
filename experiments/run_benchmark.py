@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -16,6 +17,13 @@ from benchmark.core import (  # noqa: E402
     report_manifest,
     train_manifest,
 )
+
+
+class _Profile(TypedDict):
+    seeds: list[int]
+    ranks: list[int]
+    k: list[int]
+    protocols: list[str]
 
 
 def main() -> int:
@@ -55,7 +63,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     output_dir = args.output_dir.resolve()
-    defaults = {
+    profiles: dict[str, _Profile] = {
         "smoke": {"seeds": [0], "ranks": [16], "k": [4], "protocols": ["sequential"]},
         "headline": {
             "seeds": [0, 1, 2],
@@ -69,7 +77,8 @@ def main() -> int:
             "k": [1, 2, 4, 8],
             "protocols": ["sequential", "joint", "heldout", "commutator"],
         },
-    }[args.profile]
+    }
+    defaults = profiles[args.profile]
     seeds = args.seeds or defaults["seeds"]
     ranks = args.ranks or defaults["ranks"]
     k_values = args.k or defaults["k"]

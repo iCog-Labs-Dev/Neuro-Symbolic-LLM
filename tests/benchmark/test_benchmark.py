@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -271,7 +272,7 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
 def test_report_groups_by_configuration_and_shows_na_for_unmeasured_metrics(
     tmp_path: Path,
 ) -> None:
-    evaluation = {
+    evaluation: dict[str, Any] = {
         "completed_runs": 4,
         "planned_runs": 4,
         "domains": ["d1"],

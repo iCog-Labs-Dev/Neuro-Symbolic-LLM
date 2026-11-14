@@ -746,6 +746,7 @@ def load_runtime_data(
     if not source_tasks:
         raise ValueError("At least one non-held-out training task is required")
 
+    training_tasks: tuple[Domain, ...]
     if training_mode == "joint":
         expanded = [
             np.tile(

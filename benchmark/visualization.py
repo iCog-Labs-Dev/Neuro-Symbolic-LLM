@@ -1058,8 +1058,10 @@ def _write_stage_report(
 
     lines.extend(["", "## Data Availability", ""])
     if inventory:
-        for event, keys in inventory.items():
-            lines.append(f"- `{event}`: {', '.join(f'`{key}`' for key in keys)}")
+        for event_name, event_keys in inventory.items():
+            lines.append(
+                f"- `{event_name}`: {', '.join(f'`{key}`' for key in event_keys)}"
+            )
     else:
         lines.append("- `metrics.jsonl`: N/A (no event records found)")
 
@@ -1106,8 +1108,8 @@ def _write_stage_report(
             ]
         )
     elif method == "a2":
-        keys = ("loss_task", "loss_total", "loss_cpc", "loss_hid", "loss_stab")
-        series = _training_series(artifacts, keys)
+        loss_keys = ("loss_task", "loss_total", "loss_cpc", "loss_hid", "loss_stab")
+        series = _training_series(artifacts, loss_keys)
         path = figures_dir / "auxiliary_losses.png"
         if plt is not None:
             _plot_lines(
@@ -1219,7 +1221,7 @@ def _write_stage_report(
             grid = np.full((len(ks), len(ranks)), np.nan)
             for row_index, k in enumerate(ks):
                 for column_index, rank in enumerate(ranks):
-                    values = []
+                    metric_values: list[float] = []
                     for artifact in sweep_artifacts:
                         if (
                             artifact.record.get("k") != k
@@ -1233,10 +1235,11 @@ def _write_stage_report(
                             if metric == "compressibility_c4"
                             else artifact.record.get(metric)
                         )
-                        values.append(_finite(raw_value))
-                    values = [value for value in values if value is not None]
-                    if values:
-                        grid[row_index, column_index] = fmean(values)
+                        number = _finite(raw_value)
+                        if number is not None:
+                            metric_values.append(number)
+                    if metric_values:
+                        grid[row_index, column_index] = fmean(metric_values)
             path = figures_dir / f"k_rank_{_slug(metric)}.png"
             if plt is not None:
                 _plot_heatmap(
@@ -1259,9 +1262,11 @@ def _write_stage_report(
         step_series: dict[str, list[tuple[float, float]]] = defaultdict(list)
         for artifact in sweep_artifacts:
             value = _finite(artifact.record.get("mean_step_time"))
-            k = _finite(artifact.record.get("k"))
-            if value is not None and k is not None:
-                step_series[f"rank {artifact.record.get('rank')}"].append((k, value))
+            k_value = _finite(artifact.record.get("k"))
+            if value is not None and k_value is not None:
+                step_series[f"rank {artifact.record.get('rank')}"].append(
+                    (k_value, value)
+                )
         path = figures_dir / "step_time_vs_k.png"
         if plt is not None:
             _plot_lines(

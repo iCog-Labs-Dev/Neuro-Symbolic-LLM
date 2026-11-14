@@ -38,7 +38,7 @@ def _vector(value: Any, name: str) -> np.ndarray:
 def _positive_integer(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
-    return value
+    return int(value)
 
 
 def key_log_probabilities(queries: Any, keys: Any) -> np.ndarray:
@@ -552,11 +552,11 @@ def symbolic_commutator(
         scale_source = "reference parameter norm"
     parameter_difference = float(np.linalg.norm(left - right))
     denominator = parameter_scale + eps
-    parameter_commutator = (
-        parameter_difference / denominator
-        if denominator > 0
-        else 0.0 if parameter_difference == 0 else None
-    )
+    parameter_commutator = None
+    if denominator > 0:
+        parameter_commutator = parameter_difference / denominator
+    elif parameter_difference == 0:
+        parameter_commutator = 0.0
 
     def outputs(value: Any, name: str) -> np.ndarray:
         try:
@@ -803,11 +803,11 @@ def symbolic_attention_contribution(
     if set(head_off) != set(names):
         raise ValueError("head_on and head_off metric names must match exactly")
 
-    if isinstance(higher_is_better, (bool, np.bool_)):
+    if isinstance(higher_is_better, bool | np.bool_):
         directions = {name: bool(higher_is_better) for name in names}
     elif isinstance(higher_is_better, Mapping):
         if set(higher_is_better) != set(names) or any(
-            not isinstance(value, (bool, np.bool_))
+            not isinstance(value, bool | np.bool_)
             for value in higher_is_better.values()
         ):
             raise ValueError("higher_is_better must provide a boolean for every metric")
@@ -816,7 +816,7 @@ def symbolic_attention_contribution(
         raise ValueError("higher_is_better must be a boolean or metric mapping")
 
     def scalar(value: Any, name: str) -> float:
-        if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+        if isinstance(value, bool | np.bool_) or not np.isscalar(value):
             raise ValueError(f"{name} must be a finite scalar")
         try:
             result = float(value)
@@ -889,7 +889,7 @@ def human_template_review_summary(
 
     labels = None
     if reviewer_ids is not None:
-        if isinstance(reviewer_ids, (str, bytes)) or not isinstance(
+        if isinstance(reviewer_ids, str | bytes) or not isinstance(
             reviewer_ids, Sequence
         ):
             raise ValueError("reviewer_ids must be a sequence of nonempty strings")
@@ -902,11 +902,11 @@ def human_template_review_summary(
         if relevant.ndim == 2 and len(set(labels)) != len(labels):
             raise ValueError("reviewer_ids must be unique for reviewer columns")
 
-    reviewer_count = (
-        relevant.shape[1]
-        if relevant.ndim == 2
-        else len(dict.fromkeys(labels)) if labels is not None else None
-    )
+    reviewer_count = None
+    if relevant.ndim == 2:
+        reviewer_count = relevant.shape[1]
+    elif labels is not None:
+        reviewer_count = len(dict.fromkeys(labels))
     if relevant.ndim == 1 or relevant.shape[1] < 2:
         agreement: dict[str, Any] = {
             "status": "unavailable",

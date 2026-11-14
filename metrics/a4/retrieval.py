@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ class TemplateCoverageMetrics:
 
 
 def _checked_sequence(value: object, *, name: str) -> Sequence[object]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
         raise ValueError(f"{name} must be a sequence")
     return value
 
@@ -68,7 +69,7 @@ def _checked_ids(values: object, *, name: str) -> tuple[str, ...]:
         raise ValueError(f"{name} contains an empty or non-string ID")
     if len(set(ids)) != len(ids):
         raise ValueError(f"{name} contains duplicate IDs")
-    return ids
+    return cast(tuple[str, ...], ids)
 
 
 def _checked_events(
@@ -79,7 +80,7 @@ def _checked_events(
         raise ValueError("At least one event record is required")
     if any(not isinstance(event, Mapping) for event in sequence):
         raise ValueError("Each event must be a mapping")
-    return tuple(sequence)  # type: ignore[return-value]
+    return cast(tuple[Mapping[str, object], ...], tuple(sequence))
 
 
 def _event_bool(event: Mapping[str, object], name: str) -> bool:

@@ -376,6 +376,8 @@ def test_interval_breakdown_rejects_invalid_decompositions(
     seconds: object, counters: object, mode: object
 ) -> None:
     with pytest.raises(ValueError):
-        interval_breakdown(  # type: ignore[arg-type]
-            seconds, counters, return_mode=mode
+        interval_breakdown(
+            seconds,  # type: ignore[arg-type]
+            counters,  # type: ignore[arg-type]
+            return_mode=mode,  # type: ignore[arg-type]
         )

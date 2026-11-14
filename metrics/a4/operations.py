@@ -6,15 +6,24 @@ import math
 from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from statistics import fmean
-from typing import Any
+from typing import Any, TypedDict, cast
+
+
+class _QueueEvent(TypedDict):
+    enqueue: float
+    start: float | None
+    finish: float | None
+    injected: bool | None
+    accepted: bool | None
+    depth: int
 
 
 def _records(value: object, name: str) -> tuple[Mapping[str, object], ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
         raise ValueError(f"{name} must be a sequence of mappings")
     if any(not isinstance(row, Mapping) for row in value):
         raise ValueError(f"each {name} record must be a mapping")
-    return tuple(value)  # type: ignore[return-value]
+    return cast(tuple[Mapping[str, object], ...], tuple(value))
 
 
 def _finite_number(value: object, name: str) -> float:
@@ -91,7 +100,7 @@ def consolidation_queue_metrics(
             "event_count": 0,
         }
 
-    normalized = []
+    normalized: list[_QueueEvent] = []
     required = ("enqueue", "start", "finish", "injected", "accepted", "depth")
     for index, row in enumerate(rows):
         missing = [name for name in required if name not in row]
@@ -109,7 +118,7 @@ def consolidation_queue_metrics(
             raise ValueError("event start cannot precede enqueue")
         if finish is not None and start is None:
             raise ValueError("event finish requires a start timestamp")
-        if finish is not None and finish < start:
+        if finish is not None and start is not None and finish < start:
             raise ValueError("event finish cannot precede start")
         if injected is True and accepted is not True:
             raise ValueError("an injected event must be accepted")
@@ -130,9 +139,19 @@ def consolidation_queue_metrics(
     in_progress = [
         row for row in normalized if row["start"] is not None and row["finish"] is None
     ]
-    waits = [float(row["start"] - row["enqueue"]) for row in started]
-    processing = [float(row["finish"] - row["start"]) for row in finished]
-    end_to_end = [float(row["finish"] - row["enqueue"]) for row in finished]
+    waits = [
+        start - row["enqueue"] for row in started if (start := row["start"]) is not None
+    ]
+    processing = [
+        finish - start
+        for row in finished
+        if (finish := row["finish"]) is not None and (start := row["start"]) is not None
+    ]
+    end_to_end = [
+        finish - row["enqueue"]
+        for row in finished
+        if (finish := row["finish"]) is not None
+    ]
 
     acceptance_decisions = [
         row["accepted"] for row in normalized if row["accepted"] is not None
@@ -151,10 +170,10 @@ def consolidation_queue_metrics(
     )
     observation_start = min(enqueue_times)
     observation_end = max(
-        float(
-            row["finish"]
-            if row["finish"] is not None
-            else row["start"] if row["start"] is not None else row["enqueue"]
+        next(
+            value
+            for value in (row["finish"], row["start"], row["enqueue"])
+            if value is not None
         )
         for row in normalized
     )

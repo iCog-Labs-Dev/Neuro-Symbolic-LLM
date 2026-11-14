@@ -167,7 +167,7 @@ def test_loss_metrics_accept_jax_arrays() -> None:
 @pytest.mark.parametrize("t", [-1, 3, 1.0])
 def test_invalid_t_raises(t: object) -> None:
     with pytest.raises(ValueError):
-        mean_seen_loss(LOSS, t)
+        mean_seen_loss(LOSS, t)  # type: ignore[arg-type]
 
 
 def test_forgetting_is_undefined_at_t0() -> None:

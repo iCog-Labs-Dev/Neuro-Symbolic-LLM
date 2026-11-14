@@ -5,22 +5,23 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from statistics import fmean
+from typing import cast
 
 
 def _checked_rows(rows: object, *, name: str) -> tuple[Mapping[str, object], ...]:
-    if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
+    if isinstance(rows, str | bytes) or not isinstance(rows, Sequence):
         raise ValueError(f"{name} must be a sequence of mappings")
     if not rows:
         raise ValueError(f"At least one {name} is required")
     if any(not isinstance(row, Mapping) for row in rows):
         raise ValueError(f"Each {name} must be a mapping")
-    return tuple(rows)  # type: ignore[return-value]
+    return cast(tuple[Mapping[str, object], ...], tuple(rows))
 
 
 def _checked_seconds(value: object, name: str, *, positive: bool = False) -> float:
     bound = "positive" if positive else "nonnegative"
     message = f"{name} must be a finite {bound} number of seconds"
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(message)
     try:
         seconds = float(value)

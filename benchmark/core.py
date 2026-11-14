@@ -648,7 +648,6 @@ def _filter_adapter_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compressibility_curve(deltas: dict[int, float]) -> dict[int, float]:
-
     return _compressibility_detail(deltas)["curve"] or {}
 
 
@@ -893,6 +892,8 @@ def make_manifest(
         raise ValueError("protocols must be unique")
     specs = []
     base_order = tuple(task_order or EXPECTED_DOMAINS)
+    orders: tuple[tuple[str, ...], ...]
+    heldout_variants: tuple[tuple[str, ...], ...]
     for selected in selected_protocols:
         if selected == "commutator":
             orders = (base_order, tuple(reversed(base_order)))
@@ -1500,13 +1501,13 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
     for record in records:
         if record.get("protocol") != "commutator" or record.get("status") == "invalid":
             continue
-        key = (
+        commutator_key = (
             record["method"],
             record["seed"],
             record["rank"],
             record.get("k"),
         )
-        commutator_groups.setdefault(key, []).append(record)
+        commutator_groups.setdefault(commutator_key, []).append(record)
     for group in commutator_groups.values():
         if len(group) != 2:
             continue
@@ -1599,7 +1600,7 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
 def _numeric_values(value: Any) -> list[float]:
     if isinstance(value, bool):
         return []
-    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+    if isinstance(value, int | float) and math.isfinite(float(value)):
         return [float(value)]
     if isinstance(value, dict):
         values: list[float] = []
@@ -2117,9 +2118,9 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
                     ]
                     mean_matrix = np.mean(np.stack(matrices), axis=0)
                     for checkpoint, values in enumerate(mean_matrix):
-                        cells = " | ".join(f"{value:.6g}" for value in values)
+                        matrix_cells = " | ".join(f"{value:.6g}" for value in values)
                         lines.append(
-                            f"| {method.upper()} after checkpoint {checkpoint} | {cells} |"
+                            f"| {method.upper()} after checkpoint {checkpoint} | {matrix_cells} |"
                         )
 
     lines.extend(["", "## General Summary", ""])
@@ -2128,19 +2129,19 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
             "No complete matched A1/A2/A3 cohort is available; no comparative conclusion is valid."
         )
     else:
-        for title, label, direction, means in summary_candidates:
+        for summary_title, label, direction, means in summary_candidates:
             measured = {
                 method: value for method, value in means.items() if value is not None
             }
             if not measured:
                 continue
             best = (
-                min(measured, key=measured.get)
+                min(measured, key=lambda method: measured[method])
                 if direction == "lower"
-                else max(measured, key=measured.get)
+                else max(measured, key=lambda method: measured[method])
             )
             lines.append(
-                f"- {title}: {best.upper()} has the best measured {label.lower()} "
+                f"- {summary_title}: {best.upper()} has the best measured {label.lower()} "
                 f"({measured[best]:.6g}) among matched seeds."
             )
         measured_internal = sum(

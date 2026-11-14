@@ -25,7 +25,9 @@ def aggregate_lm_rows(
         return {"status": "insufficient_data", "tokens": 0}
 
     tokens = 0
-    totals = {name: [] for name in ("loss_sum", "base_loss_sum", "kl_sum", "correct")}
+    totals: dict[str, list[float]] = {
+        name: [] for name in ("loss_sum", "base_loss_sum", "kl_sum", "correct")
+    }
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise ValueError(f"LM row {index} must be a mapping")
