@@ -404,7 +404,7 @@ def build_routed_extraction_prompt(
 
     general_instructions = general.text[: input_section_match.start()]
 
-    input_section = general.text[input_section_match.end() :]
+    input_section = general.text[input_section_match.start() :]
 
     combined = (
         discourse_guidance
