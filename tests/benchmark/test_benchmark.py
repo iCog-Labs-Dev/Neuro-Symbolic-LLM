@@ -205,7 +205,8 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
         "Effective rank",
         "Invariant redundancy",
         "Task-gradient conflict",
-        "Update commutator",
+        "Parameter-order commutator proxy",
+        "Output-order commutator",
         "Validation loss",
         "Perplexity",
         "Held-out test loss",
@@ -225,7 +226,6 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
     for removed in (
         "Task accuracy",
         "Task primary score",
-        "Task macro-F1",
         "Task-score forgetting",
     ):
         assert f"| {removed} |" not in report
@@ -242,7 +242,21 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
         "Effective rank",
         "Invariant redundancy",
         "Task-gradient conflict",
-        "Update commutator",
+        "Parameter-order commutator proxy",
+        "Output-order commutator",
+        "Representation fracture",
+        "Factor overlap",
+        "Mixed curvature coupling",
+        "Off-support leakage",
+        "Cross-support curvature coupling",
+        "Causal fingerprint separability",
+        "Causal fingerprint stability",
+        "Category role prediction accuracy",
+        "Support explanation accuracy",
+        "Category naturality error",
+        "Category closure error",
+        "Ablation prediction MAE",
+        "Ablation rank correlation",
     ]
     assert "## Scope" in report
     assert "Symbolic metrics are intentionally excluded" in report
@@ -302,6 +316,8 @@ def test_report_groups_by_configuration_and_shows_na_for_unmeasured_metrics(
             },
         ],
     }
+    for row in evaluation["records"]:
+        row["runtime_data_sha256"] = "shared-data"
     _write_json(tmp_path / "evaluation.json", evaluation)
     report_path = report_manifest(tmp_path, report_rank=16)
     report = report_path.read_text(encoding="utf-8")
@@ -310,7 +326,7 @@ def test_report_groups_by_configuration_and_shows_na_for_unmeasured_metrics(
     assert (
         "| Metric | A1 | A2 | A3 | A2-A1 paired delta | A3-A1 paired delta |" in report
     )
-    assert "| Effective rank | N/A | N/A | N/A | N/A | N/A | higher | 0 |" in report
+    assert "| Effective rank | N/A | N/A | N/A | N/A | N/A | context | 0 |" in report
     assert "| Validation loss | 2 (n=1) | 1.9 (n=1) | 1.8 (n=1)" in report
 
 
@@ -521,7 +537,9 @@ def test_runtime_source_override_ignores_yaml_default(
         selected.extend(
             item["name"] for item in datasets if item.get("type") == "separate"
         )
-        return (), {}, {}
+        from types import SimpleNamespace
+
+        return (SimpleNamespace(name="eurlex"),), {}, {}
 
     def fail_stories(*args, **kwargs):
         pytest.fail("stories loader should not be selected")

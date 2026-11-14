@@ -61,6 +61,16 @@ def test_kl_to_base_is_zero_for_identical_logits() -> None:
     assert float(kl_to_base(logits, logits)) == pytest.approx(0.0, abs=1e-7)
 
 
+def test_kl_uses_only_valid_next_token_positions() -> None:
+    base = jnp.zeros((1, 4, 2))
+    adapted = jnp.asarray([[[2.0, 0.0], [9.0, 0.0], [0.0, 0.0], [12.0, 0.0]]])
+    labels = jnp.asarray([[0, 1, -100, 0]])
+    expected_first = np.log(np.cosh(1.0))
+    assert float(kl_to_base(base, adapted, labels)) == pytest.approx(
+        expected_first / 2, rel=1e-5
+    )
+
+
 def test_token_ece_is_finite_when_bins_are_empty() -> None:
     logits = jnp.zeros((2, 5, 10), dtype=jnp.float32)
     logits = logits.at[:, :, 0].set(50.0)

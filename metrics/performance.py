@@ -29,11 +29,26 @@ def cross_entropy_loss(logits: jax.Array, labels: jax.Array) -> jax.Array:
     return -jnp.sum(gathered_log_probs * mask) / jnp.maximum(1.0, jnp.sum(mask))
 
 
-def kl_to_base(base_logits: jax.Array, adapted_logits: jax.Array) -> jax.Array:
-    """Mean token-level KL divergence from base to adapted distributions."""
+def kl_to_base(
+    base_logits: jax.Array,
+    adapted_logits: jax.Array,
+    labels: jax.Array | None = None,
+) -> jax.Array:
+    """KL(base || adapted); with labels, use valid causal next-token targets."""
+    if base_logits.shape != adapted_logits.shape or base_logits.ndim != 3:
+        raise ValueError("expected equal logits with shape [B,T,V]")
+    if labels is not None:
+        if labels.shape != base_logits.shape[:2]:
+            raise ValueError("expected labels [B,T] matching logits")
+        mask = labels[:, 1:] != -100
+        base_logits = base_logits[:, :-1, :]
+        adapted_logits = adapted_logits[:, :-1, :]
     log_p = jax.nn.log_softmax(base_logits.astype(jnp.float32), axis=-1)
     log_q = jax.nn.log_softmax(adapted_logits.astype(jnp.float32), axis=-1)
-    return jnp.mean(jnp.sum(jnp.exp(log_p) * (log_p - log_q), axis=-1))
+    divergence = jnp.sum(jnp.exp(log_p) * (log_p - log_q), axis=-1)
+    if labels is None:
+        return jnp.mean(divergence)
+    return jnp.sum(jnp.where(mask, divergence, 0.0)) / jnp.maximum(mask.sum(), 1)
 
 
 def perplexity(loss: jax.Array | float) -> jax.Array:

@@ -164,8 +164,8 @@ def test_lm_text_loading_forwards_pinned_revision(
 ) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    def load_dataset(name: str, **kwargs: Any) -> _Dataset:
-        calls.append((name, kwargs))
+    def load_dataset(path: str, **kwargs: Any) -> _Dataset:
+        calls.append((path, kwargs))
         return _Dataset()
 
     monkeypatch.setattr(data_loader, "load_dataset", load_dataset)

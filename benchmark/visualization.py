@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import shutil
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -35,24 +34,30 @@ METHOD_LABELS = {"a1": "A1", "a2": "A2", "a3": "A3"}
 METHOD_COLORS = {"a1": "#3B82F6", "a2": "#F59E0B", "a3": "#10B981"}
 FIGURE_DPI = 150
 SYMBOLIC_SCOPE_REASON = "requires a trained A4 symbolic head and measurement artifacts"
-UNAVAILABLE_INTERNAL_METRIC_SPECS = (
-    ("Representation fracture", "representation_fracture_unavailable", "context"),
-    ("Factor overlap", "factor_overlap_unavailable", "lower"),
-    ("Mixed curvature coupling proxy", "mixed_curvature_unavailable", "lower"),
-    ("Off-support leakage", "off_support_leakage_unavailable", "lower"),
-    (
-        "Causal fingerprint separability",
-        "causal_fingerprint_unavailable",
-        "higher",
-    ),
-    ("Naturality proxy", "naturality_unavailable", "context"),
-    ("Ablation fidelity proxy", "ablation_fidelity_unavailable", "higher"),
-)
-UNAVAILABLE_EXTERNAL_METRIC_SPECS = (
-    ("Task primary score", "task_primary_unavailable", "higher"),
-    ("Task macro-F1", "task_macro_f1_unavailable", "higher"),
-    ("Accuracy forgetting", "accuracy_forgetting_unavailable", "lower"),
-)
+UNAVAILABLE_INTERNAL_METRIC_SPECS = ()
+UNAVAILABLE_EXTERNAL_METRIC_SPECS = ()
+AUDIT_METRICS = {
+    "representation_fracture",
+    "functional_commutator",
+    "factor_overlap",
+    "mixed_curvature",
+    "off_support_leakage",
+    "cross_support_coupling",
+    "fingerprint_separability",
+    "fingerprint_stability",
+    "category_role_accuracy",
+    "support_explanation_accuracy",
+    "naturality_error",
+    "closure_error",
+    "ablation_mae",
+    "ablation_spearman",
+    "task_accuracy",
+    "task_macro_f1",
+    "task_micro_f1",
+    "task_ece",
+    "accuracy_forgetting",
+    "instruction_following",
+}
 VISUALIZATION_OPERATIONAL_METRIC_SPECS = OPERATIONAL_METRIC_SPECS + (
     ("Mean training step time (seconds)", "mean_step_time", "lower"),
 )
@@ -179,8 +184,9 @@ def _load_plotting():
 
         return plt, pd
     except (ImportError, RuntimeError) as error:
-        print(f"warning: visualization figures disabled: {error}")
-        return None
+        raise RuntimeError(
+            "Install the visualization extra to generate report images: pip install -e '.[visualization]'"
+        ) from error
 
 
 def _save_figure(figure: Any, path: Path) -> None:
@@ -213,7 +219,7 @@ def _image_markdown(path: Path, report_dir: Path, alt: str, plt_available: bool)
 
 
 def _condition_key(
-    record: Mapping[str, Any]
+    record: Mapping[str, Any],
 ) -> tuple[str, int, tuple[str, ...], tuple[str, ...]]:
     return (
         str(record.get("protocol", "sequential")),
@@ -283,7 +289,11 @@ def _select_headline_cohort(
             for row in method_records[method]
             if int(row["seed"]) == seed
         }
-        if len(fingerprints) == 1:
+        if (
+            len(fingerprints) == 1
+            and None not in fingerprints
+            and "" not in fingerprints
+        ):
             matched.append(seed)
     return HeadlineCohort(
         protocol=protocol,
@@ -313,6 +323,26 @@ def _metric_samples(
         by_seed[method] = samples
     seed_sets = [set(by_seed[method]) for method in METHODS]
     common = set.intersection(*seed_sets) if all(seed_sets) else set()
+    if metric in AUDIT_METRICS:
+        common = {
+            seed
+            for seed in common
+            if len(
+                {
+                    row.get("research_audits", {}).get("protocol_sha256")
+                    for method in METHODS
+                    for row in cohort.records[method]
+                    if int(row["seed"]) == seed
+                }
+            )
+            == 1
+            and all(
+                row.get("research_audits", {}).get("protocol_sha256")
+                for method in METHODS
+                for row in cohort.records[method]
+                if int(row["seed"]) == seed
+            )
+        }
     return {
         method: [(seed, by_seed[method][seed]) for seed in sorted(common)]
         for method in METHODS
@@ -320,6 +350,8 @@ def _metric_samples(
 
 
 def _na_reason(method: str, metric: str, cohort: HeadlineCohort | None) -> str:
+    if metric in AUDIT_METRICS:
+        return "requires valid, checkpoint-bound audit evidence with a matching protocol across methods"
     if metric in UNAVAILABLE_REASONS:
         return UNAVAILABLE_REASONS[metric]
     if cohort is None:
@@ -779,7 +811,10 @@ def _common_stage_figures(
             if not values:
                 continue
             label = (
+                f"seed={artifact.record.get('seed')} "
                 f"{artifact.record.get('protocol', 'sequential')} "
+                f"order={','.join(artifact.record.get('task_order', []))} "
+                f"heldout={','.join(artifact.record.get('heldout_tasks', []))} "
                 f"K={artifact.record.get('k')}"
             )
             series[label].append(
@@ -817,7 +852,7 @@ def _common_stage_figures(
             "",
             "### Task-score matrices",
             "",
-            "_N/A: the current benchmark does not use labeled task targets._",
+            "Task-score matrices require explicit checkpoint-by-task labeled audit evidence.",
         ]
     )
     return lines
@@ -837,7 +872,7 @@ def _training_series(
             for key in keys:
                 value = _finite(event.get(key))
                 if value is not None:
-                    label = f"seed {artifact.record.get('seed')} {key}"
+                    label = f"{artifact.record.get('run_id')} {key}"
                     series[label].append((step, value))
     return series
 
@@ -877,6 +912,85 @@ def _stage_metric_table(method: str, artifacts: Sequence[RunArtifacts]) -> list[
     return lines
 
 
+def _individual_metric_table(
+    title: str, specs: Sequence[tuple[str, str, str]], artifacts: Sequence[RunArtifacts]
+) -> list[str]:
+    lines = [
+        f"## {title}",
+        "",
+        "| Metric | Run | Value | Interpretation |",
+        "|---|---|---:|---|",
+    ]
+    for label, metric, direction in specs:
+        found = False
+        for artifact in artifacts:
+            values = metric_values_for_record(
+                artifact.record, metric, int(artifact.record.get("rank", 16))
+            )
+            if values:
+                found = True
+                lines.append(
+                    f"| {label} | {artifact.record.get('run_id')} | {fmean(values):.6g} | {_direction_text(direction)} |"
+                )
+        if not found:
+            lines.append(f"| {label} | N/A | N/A | evidence not available |")
+    return lines
+
+
+def _individual_metric_figure(
+    plt: Any,
+    path: Path,
+    title: str,
+    specs: Sequence[tuple[str, str, str]],
+    artifacts: Sequence[RunArtifacts],
+) -> None:
+    available = []
+    for label, metric, _ in specs:
+        points = [
+            (str(a.record.get("run_id")), fmean(values))
+            for a in artifacts
+            if (
+                values := metric_values_for_record(
+                    a.record, metric, int(a.record.get("rank", 16))
+                )
+            )
+        ]
+        if points:
+            available.append((label, points))
+    if not available:
+        _placeholder(
+            plt, path, title, "No measured metrics; see the table for required evidence"
+        )
+        return
+    columns = min(3, len(available))
+    rows = math.ceil(len(available) / columns)
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(5 * columns, 3.4 * rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    for axis, (label, points) in zip(axes.flat, available, strict=False):
+        axis.scatter(
+            range(len(points)), [value for _, value in points], color="#2563eb"
+        )
+        axis.set_xticks(
+            range(len(points)),
+            [name for name, _ in points],
+            rotation=45,
+            ha="right",
+            fontsize=7,
+        )
+        axis.set_title(label)
+        axis.grid(axis="y", linestyle="--", alpha=0.3)
+    for axis in list(axes.flat)[len(available) :]:
+        axis.axis("off")
+    figure.suptitle(title)
+    _save_figure(figure, path)
+    plt.close(figure)
+
+
 def _write_stage_report(
     method: str,
     records: Sequence[dict[str, Any]],
@@ -902,6 +1016,45 @@ def _write_stage_report(
     if method == "a3":
         lines.append(f"- Selected A3 K: {cohort.selected_k if cohort else 'N/A'}")
     lines.extend(["", *_stage_metric_table(method, artifacts)])
+    lines.extend(
+        [
+            "",
+            *_individual_metric_table(
+                "Internal Metrics", INTERNAL_METRIC_SPECS, artifacts
+            ),
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            *_individual_metric_table(
+                "External Metrics", EXTERNAL_METRIC_SPECS, artifacts
+            ),
+        ]
+    )
+    for category, specs in (
+        ("Internal", INTERNAL_METRIC_SPECS),
+        ("External", EXTERNAL_METRIC_SPECS),
+    ):
+        path = figures_dir / f"{category.lower()}_metrics.png"
+        if plt is not None:
+            _individual_metric_figure(
+                plt,
+                path,
+                f"{METHOD_LABELS[method]} {category.lower()} metrics by run",
+                specs,
+                artifacts,
+            )
+        lines.extend(
+            [
+                "",
+                f"## {category} Metric Plots",
+                "",
+                _image_markdown(
+                    path, method_dir, f"{method} {category} metrics", plt is not None
+                ),
+            ]
+        )
 
     lines.extend(["", "## Data Availability", ""])
     if inventory:
@@ -1029,20 +1182,45 @@ def _write_stage_report(
                 f"{record.get('paired_delta_vs_a1', 'N/A')} |"
             )
     else:
+        # K/rank heatmaps must not average different training protocols or task orders.
+        sweep_artifacts = [
+            a
+            for a in artifacts
+            if cohort is not None
+            and _condition_key(a.record)[0] == cohort.protocol
+            and _condition_key(a.record)[2:] == (cohort.order, cohort.heldout)
+            and int(a.record.get("seed", -1)) in cohort.matched_seeds
+            and any(
+                other.get("seed") == a.record.get("seed")
+                and other.get("runtime_data_sha256")
+                == a.record.get("runtime_data_sha256")
+                for other in cohort.records["a1"]
+            )
+        ]
         for metric, title in (
-            ("final_mean_loss", "A3 final validation loss over K and rank"),
-            ("mean_forgetting", "A3 forgetting over K and rank"),
+            (
+                "final_mean_loss",
+                "A3 final validation loss over K and rank (available matched seeds)",
+            ),
+            (
+                "mean_forgetting",
+                "A3 forgetting over K and rank (available matched seeds)",
+            ),
             ("compressibility_c4", "A3 residual compressibility C(4) over K and rank"),
         ):
-            ranks = sorted({int(a.record["rank"]) for a in artifacts})
+            ranks = sorted({int(a.record["rank"]) for a in sweep_artifacts})
             ks = sorted(
-                {int(a.record["k"]) for a in artifacts if a.record.get("k") is not None}
+                {
+                    int(a.record["k"])
+                    for a in sweep_artifacts
+                    if a.record.get("k") is not None
+                }
             )
             grid = np.full((len(ks), len(ranks)), np.nan)
             for row_index, k in enumerate(ks):
                 for column_index, rank in enumerate(ranks):
                     values = []
-                    for artifact in artifacts:
+                    for artifact in sweep_artifacts:
                         if (
                             artifact.record.get("k") != k
                             or artifact.record.get("rank") != rank
@@ -1079,7 +1257,7 @@ def _write_stage_report(
                 ]
             )
         step_series: dict[str, list[tuple[float, float]]] = defaultdict(list)
-        for artifact in artifacts:
+        for artifact in sweep_artifacts:
             value = _finite(artifact.record.get("mean_step_time"))
             k = _finite(artifact.record.get("k"))
             if value is not None and k is not None:
@@ -1162,7 +1340,7 @@ def _write_stage_report(
                 method_dir,
             ),
             "",
-            "Task-score, macro-F1, and accuracy-forgetting metrics are N/A because the current benchmark does not produce label-based task metrics.",
+            "Label-based metrics require separately supplied task predictions and scores; token accuracy measures a different task.",
         ]
     )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1242,12 +1420,6 @@ def _write_general_report(
     lines.extend(
         [
             "",
-            "## A4 Symbolic Scope",
-            "",
-            f"- Symbolic metrics: N/A ({SYMBOLIC_SCOPE_REASON}).",
-            f"- Blocked A4 child plans in manifest: {len(manifest.get('a4_runs', []))}.",
-            "- Pure metric contracts under `metrics/a4` are not measured results.",
-            "",
             "## General Summary",
             "",
         ]
@@ -1268,16 +1440,22 @@ def _write_general_report(
             }
             if not means:
                 continue
-            best = (
-                max(means, key=means.get)
-                if direction == "higher"
-                else min(means, key=means.get)
+            best_value = (
+                max(means.values()) if direction == "higher" else min(means.values())
+            )
+            best = ", ".join(
+                METHOD_LABELS[method]
+                for method, value in means.items()
+                if math.isclose(value, best_value)
             )
             lines.append(
-                f"- {label}: {METHOD_LABELS[best]} is best on the matched cohort ({means[best]:.6g}; {_direction_text(direction)})."
+                f"- {label}: {best} has the best observed mean on the matched cohort ({best_value:.6g}; {_direction_text(direction)})."
             )
         lines.append(
             "- Operational metrics are reported separately and are not folded into a composite score."
+        )
+        lines.append(
+            "- Observed rankings are descriptive and do not establish statistical significance or the full research hypothesis."
         )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report_path, cohort
@@ -1313,8 +1491,6 @@ def generate_reports_and_visualizations(
     manifest_sha = sha256(manifest_path.read_bytes()).hexdigest()
 
     stage_root = destination / STAGE_FOLDER_PATTERN.format(stage="A")
-    if stage_root.exists():
-        shutil.rmtree(stage_root)
     stage_root.mkdir(parents=True, exist_ok=True)
     plotting = _load_plotting()
     plt, pd = plotting if plotting is not None else (None, None)
@@ -1322,7 +1498,7 @@ def generate_reports_and_visualizations(
         manifest,
         evaluation,
         destination,
-        stage_root,
+        stage_root / "comparison",
         report_rank,
         plt,
         pd,

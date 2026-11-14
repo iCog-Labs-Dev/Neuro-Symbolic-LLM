@@ -113,13 +113,33 @@ EXTERNAL_METRIC_SPECS = (
     ("Sequential versus joint gap", "sequential_joint_gap", "lower"),
     ("Anchor KL drift", "anchor_kl", "lower"),
     ("Long-range coherence accuracy", "long_range", "higher"),
+    ("Task accuracy or exact match", "task_accuracy", "higher"),
+    ("Task macro-F1", "task_macro_f1", "higher"),
+    ("Task micro-F1", "task_micro_f1", "higher"),
+    ("Task calibration ECE", "task_ece", "lower"),
+    ("Accuracy forgetting", "accuracy_forgetting", "lower"),
+    ("Instruction-following score", "instruction_following", "higher"),
 )
 INTERNAL_METRIC_SPECS = (
     ("Residual compressibility", "residual_compressibility", "higher"),
-    ("Effective rank", "effective_rank", "higher"),
+    ("Effective rank", "effective_rank", "context"),
     ("Invariant redundancy", "invariant_redundancy", "lower"),
     ("Task-gradient conflict", "task_gradient_conflict", "lower"),
-    ("Update commutator", "update_commutator", "lower"),
+    ("Parameter-order commutator proxy", "update_commutator", "lower"),
+    ("Output-order commutator", "functional_commutator", "lower"),
+    ("Representation fracture", "representation_fracture", "context"),
+    ("Factor overlap", "factor_overlap", "context"),
+    ("Mixed curvature coupling", "mixed_curvature", "context"),
+    ("Off-support leakage", "off_support_leakage", "lower"),
+    ("Cross-support curvature coupling", "cross_support_coupling", "context"),
+    ("Causal fingerprint separability", "fingerprint_separability", "context"),
+    ("Causal fingerprint stability", "fingerprint_stability", "higher"),
+    ("Category role prediction accuracy", "category_role_accuracy", "higher"),
+    ("Support explanation accuracy", "support_explanation_accuracy", "higher"),
+    ("Category naturality error", "naturality_error", "lower"),
+    ("Category closure error", "closure_error", "lower"),
+    ("Ablation prediction MAE", "ablation_mae", "lower"),
+    ("Ablation rank correlation", "ablation_spearman", "higher"),
 )
 OPERATIONAL_METRIC_SPECS = (
     ("Trainable parameters", "trainable_params", "lower"),
@@ -199,7 +219,7 @@ def _load_deployed_metrics(
     )
     from metrics.representation import (
         effective_rank,
-        gradient_conflict,
+        gradient_conflict_summary,
         invariant_redundancy,
     )
     from residual import ResidualAdapter, ResidualConfig
@@ -385,7 +405,7 @@ def _load_deployed_metrics(
                     "tokens": token_count,
                     "loss_sum": adapted_loss * token_count,
                     "base_loss_sum": base_loss * token_count,
-                    "kl_sum": float(kl_to_base(base, adapted)) * token_count,
+                    "kl_sum": float(kl_to_base(base, adapted, ids)) * token_count,
                     "correct": float(token_accuracy(adapted, ids)) * token_count,
                 }
             )
@@ -415,13 +435,15 @@ def _load_deployed_metrics(
                 jnp.stack([loss_for(p, ids) for ids in task_batches])
             )
         )(params)
-    conflict_pairs = {}
     names = list(gradients)
-    for i, left in enumerate(names):
-        for right in names[i + 1 :]:
-            conflict_pairs[f"{left}:{right}"] = float(
-                gradient_conflict(gradients[left], gradients[right])
-            )
+    conflict_pairs = {}
+    if names:
+        summary = gradient_conflict_summary(gradients)
+        conflict_matrix = np.asarray(summary["conflict"])
+        for i, left in enumerate(names):
+            for j in range(i + 1, len(names)):
+                if np.isfinite(conflict_matrix[i, j]):
+                    conflict_pairs[f"{left}:{names[j]}"] = float(conflict_matrix[i, j])
 
     representation: dict[str, Any] = {
         "effective_rank": {},
@@ -469,7 +491,7 @@ def _load_deployed_metrics(
                     "tokens": token_count,
                     "loss_sum": adapted_loss * token_count,
                     "base_loss_sum": base_loss * token_count,
-                    "kl_sum": float(kl_to_base(base_logits, adapted_logits))
+                    "kl_sum": float(kl_to_base(base_logits, adapted_logits, ids))
                     * token_count,
                     "correct": float(token_accuracy(adapted_logits, ids)) * token_count,
                 }
@@ -1179,30 +1201,10 @@ def _result_record(raw: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
     base_losses = raw.get("base_loss", [])
     final_mean_loss = sum(final_losses) / len(final_losses) if final_losses else None
     base_mean_loss = sum(base_losses) / len(base_losses) if base_losses else None
-    if run.get("protocol") == "joint":
-        acquisition_losses = list(final_losses)
-        acquisition_improvement = {
-            str(name): float(base) - float(loss)
-            for name, base, loss in zip(
-                domains, base_losses, final_losses, strict=False
-            )
-        }
-    else:
-        acquisition_losses = [
-            losses[index][index]
-            for index in range(min(len(domains), len(losses)))
-            if index < len(losses[index])
-        ]
-        acquisition_improvement = (
-            {
-                str(domains[index]): float(base_losses[index])
-                - float(losses[index][index])
-                for index in range(min(len(domains), len(base_losses), len(losses)))
-                if index < len(losses[index])
-            }
-            if domains
-            else None
-        )
+    final_improvement = {
+        str(name): float(base) - float(loss)
+        for name, base, loss in zip(domains, base_losses, final_losses, strict=False)
+    } or None
     return {
         "run_id": run["run_id"],
         "method": run["method"],
@@ -1215,10 +1217,12 @@ def _result_record(raw: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         "condition_sha256": run.get("condition_sha256"),
         "domains": domains,
         "final_mean_loss": final_mean_loss,
-        "domain_loss_improvement": acquisition_improvement,
+        "domain_loss_improvement": final_improvement,
         "loss_improvement": (
-            base_mean_loss - (sum(acquisition_losses) / len(acquisition_losses))
-            if base_mean_loss is not None and acquisition_losses
+            base_mean_loss - final_mean_loss
+            if base_mean_loss is not None
+            and final_mean_loss is not None
+            and len(base_losses) == len(final_losses)
             else None
         ),
         "final_mean_ppl": (
@@ -1287,6 +1291,46 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                 continue
         raw_result = _read_json(result_path)
         record = _result_record(raw_result, run)
+        audit_path = output_dir / "measurement_inputs" / f"{run['run_id']}.json"
+        if audit_path.is_file():
+            try:
+                from metrics.research_audits import evaluate_audits
+
+                audit_input = _read_json(audit_path)
+                checkpoints = sorted(
+                    (Path(run["output_dir"]) / run["run_name"] / "params").glob(
+                        "task_*.npz"
+                    )
+                )
+                if (
+                    audit_input.get("run_id") != run["run_id"]
+                    or not checkpoints
+                    or audit_input.get("checkpoint_sha256")
+                    != sha256_file(checkpoints[-1])
+                ):
+                    raise ValueError(
+                        "audit run ID or final checkpoint hash does not match"
+                    )
+                protocol_hash = audit_input.get("protocol_sha256")
+                if (
+                    not isinstance(protocol_hash, str)
+                    or len(protocol_hash) != 64
+                    or any(c not in "0123456789abcdef" for c in protocol_hash)
+                ):
+                    raise ValueError(
+                        "audit protocol_sha256 must identify the shared probe and measurement protocol"
+                    )
+                record["research_audits"] = {
+                    "status": "measured",
+                    "input_sha256": sha256_file(audit_path),
+                    "protocol_sha256": protocol_hash,
+                    "metrics": evaluate_audits(audit_input),
+                }
+            except (KeyError, TypeError, ValueError, OSError) as exc:
+                record["research_audits"] = {
+                    "status": "invalid",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
         meta_path = result_path.parent / "meta.json"
         if meta_path.is_file():
             meta = _read_json(meta_path)
@@ -1330,6 +1374,7 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
             record.get("protocol"),
             tuple(record.get("task_order", ())),
             tuple(record.get("heldout_tasks", ())),
+            record.get("runtime_data_sha256"),
         )
         loss = record.get("loss_improvement")
         if loss is not None:
@@ -1348,6 +1393,7 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
             record.get("protocol"),
             tuple(record.get("task_order", ())),
             tuple(record.get("heldout_tasks", ())),
+            record.get("runtime_data_sha256"),
         )
         detail = _compressibility_detail(by_group.get(group_key, {}))
         record["compressibility_status"] = detail["status"]
@@ -1379,6 +1425,7 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
             record.get("protocol"),
             tuple(record.get("task_order", ())),
             tuple(record.get("heldout_tasks", ())),
+            record.get("runtime_data_sha256"),
         ): record["final_mean_loss"]
         for record in records
         if record.get("method") == "a1" and record.get("status") != "invalid"
@@ -1393,11 +1440,14 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                 record.get("protocol"),
                 tuple(record.get("task_order", ())),
                 tuple(record.get("heldout_tasks", ())),
+                record.get("runtime_data_sha256"),
             )
         )
         record["paired_delta_vs_a1"] = (
             record["final_mean_loss"] - baseline
-            if baseline is not None and record["method"] != "a1"
+            if baseline is not None
+            and record["method"] != "a1"
+            and record.get("runtime_data_sha256")
             else None
         )
 
@@ -1425,6 +1475,8 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
         joint_record = joint_reference.get(key)
         budgets_match = bool(
             joint_record
+            and record.get("steps") is not None
+            and record.get("tokens") is not None
             and record.get("steps") == joint_record.get("steps")
             and record.get("tokens") == joint_record.get("tokens")
         )
@@ -1457,6 +1509,18 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
         commutator_groups.setdefault(key, []).append(record)
     for group in commutator_groups.values():
         if len(group) != 2:
+            continue
+        first_order = tuple(group[0].get("task_order", ()))
+        second_order = tuple(group[1].get("task_order", ()))
+        if (
+            not first_order
+            or first_order != second_order[::-1]
+            or any(
+                group[0].get(field) is None
+                or group[0].get(field) != group[1].get(field)
+                for field in ("steps", "tokens")
+            )
+        ):
             continue
         from stages.results import load_params as load_saved_params
 
@@ -1516,7 +1580,7 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
         for record in group:
             record["parameter_update_commutator"] = parameter_value
             record["operator_update_commutator"] = operator_value
-            record["update_commutator"] = operator_value
+            record["update_commutator"] = parameter_value
     evaluation = {
         "schema": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1553,7 +1617,34 @@ def _numeric_values(value: Any) -> list[float]:
 def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list[float]:
     deployed = record.get("deployed_evaluation", {})
     representation = deployed.get("representation", {})
-    if metric == "residual_compressibility":
+    audit = record.get("research_audits", {}).get("metrics", {})
+    audit_fields = {
+        "representation_fracture": ("factor_organization", "mean_fracture"),
+        "factor_overlap": ("factor_organization", "mean_overlap"),
+        "mixed_curvature": ("mixed_curvature",),
+        "off_support_leakage": ("off_support_leakage",),
+        "cross_support_coupling": ("cross_support_coupling",),
+        "fingerprint_separability": ("fingerprint_separability",),
+        "fingerprint_stability": ("fingerprint_stability",),
+        "category_role_accuracy": ("category_roles_accuracy",),
+        "support_explanation_accuracy": ("support_explanations_accuracy",),
+        "naturality_error": ("naturality_error",),
+        "closure_error": ("closure_error",),
+        "functional_commutator": ("functional_commutator",),
+        "ablation_mae": ("ablation_fidelity", "mae"),
+        "ablation_spearman": ("ablation_fidelity", "spearman"),
+        "task_accuracy": ("classification", "accuracy"),
+        "task_macro_f1": ("classification", "macro_f1"),
+        "task_micro_f1": ("classification", "micro_f1"),
+        "task_ece": ("classification", "ece"),
+        "accuracy_forgetting": ("accuracy_forgetting", "final"),
+        "instruction_following": ("instruction_following",),
+    }
+    if metric in audit_fields:
+        value: Any = audit
+        for field in audit_fields[metric]:
+            value = value.get(field) if isinstance(value, dict) else None
+    elif metric == "residual_compressibility":
         curve = record.get("residual_compressibility") or {}
         value = curve.get(str(rank))
     elif metric == "validation_loss":
@@ -1593,7 +1684,7 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
         value = representation.get("task_gradient_conflict", {}).get("mean")
     elif metric == "update_commutator":
         value = record.get(
-            "operator_update_commutator", record.get("update_commutator")
+            "parameter_update_commutator", record.get("update_commutator")
         )
     elif metric == "heldout_transfer":
         values = []
@@ -1654,7 +1745,7 @@ def select_a3_k(
     heldout: tuple[str, ...],
 ) -> dict[str, Any]:
     """Apply the report's validation-loss A3 K-selection rule."""
-    candidates: dict[int, list[float]] = {}
+    candidates: dict[int, dict[tuple[int, str], float]] = {}
     for row in records:
         if (
             row.get("method") == "a3"
@@ -1664,16 +1755,37 @@ def select_a3_k(
             and tuple(row.get("heldout_tasks", ())) == heldout
             and row.get("k") is not None
             and row.get("final_mean_loss") is not None
+            and isinstance(row.get("runtime_data_sha256"), str)
+            and row.get("runtime_data_sha256")
         ):
-            candidates.setdefault(int(row["k"]), []).append(
-                float(row["final_mean_loss"])
-            )
-    means = {k: float(np.mean(values)) for k, values in candidates.items()}
+            key = (int(row["seed"]), row["runtime_data_sha256"])
+            group = candidates.setdefault(int(row["k"]), {})
+            if key in group:
+                raise ValueError(
+                    f"duplicate A3 K-selection run for K={row['k']}, seed={key[0]}"
+                )
+            value = float(row["final_mean_loss"])
+            if math.isfinite(value):
+                group[key] = value
+    common = (
+        set.intersection(*(set(values) for values in candidates.values()))
+        if candidates
+        else set()
+    )
+    means = (
+        {
+            k: float(np.mean([values[key] for key in sorted(common)]))
+            for k, values in candidates.items()
+        }
+        if common
+        else {}
+    )
     selected = min(means, key=lambda value: (means[value], value)) if means else None
     return {
         "selected_k": selected,
         "mean_validation_loss_by_k": means,
-        "rule": "lowest mean validation loss; smaller K breaks ties",
+        "matched_seeds": sorted(seed for seed, _ in common),
+        "rule": "lowest mean validation loss on seeds with matching data across all K values; smaller K breaks ties",
     }
 
 
@@ -1849,7 +1961,13 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
             fair_seeds = {
                 seed
                 for seed in candidate_seeds
-                if len(
+                if all(
+                    row.get("runtime_data_sha256")
+                    for method in ("a1", "a2", "a3")
+                    for row in method_rows[method]
+                    if int(row["seed"]) == seed
+                )
+                and len(
                     {
                         row.get("runtime_data_sha256")
                         for method in ("a1", "a2", "a3")
@@ -1891,6 +2009,49 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
                         else set()
                     )
                     metric_seeds &= fair_seeds
+                    if metric in {
+                        "representation_fracture",
+                        "functional_commutator",
+                        "factor_overlap",
+                        "mixed_curvature",
+                        "off_support_leakage",
+                        "cross_support_coupling",
+                        "fingerprint_separability",
+                        "fingerprint_stability",
+                        "category_role_accuracy",
+                        "support_explanation_accuracy",
+                        "naturality_error",
+                        "closure_error",
+                        "ablation_mae",
+                        "ablation_spearman",
+                        "task_accuracy",
+                        "task_macro_f1",
+                        "task_micro_f1",
+                        "task_ece",
+                        "accuracy_forgetting",
+                        "instruction_following",
+                    }:
+                        metric_seeds = {
+                            seed
+                            for seed in metric_seeds
+                            if all(
+                                row.get("research_audits", {}).get("protocol_sha256")
+                                for method in ("a1", "a2", "a3")
+                                for row in method_rows[method]
+                                if int(row["seed"]) == seed
+                            )
+                            and len(
+                                {
+                                    row.get("research_audits", {}).get(
+                                        "protocol_sha256"
+                                    )
+                                    for method in ("a1", "a2", "a3")
+                                    for row in method_rows[method]
+                                    if int(row["seed"]) == seed
+                                }
+                            )
+                            == 1
+                        }
                     cells = []
                     means = {}
                     for method in ("a1", "a2", "a3"):
