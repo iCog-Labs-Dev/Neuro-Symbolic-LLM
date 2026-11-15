@@ -20,6 +20,7 @@ class MinerRunPaths:
 
     documents: Path
     rejected_documents: Path
+    skipped_rules: Path
     bundle: Path
     emitted_atoms: Path
     metadata: Path
@@ -39,6 +40,7 @@ class MinerRunPaths:
         return cls(
             documents=root / "documents.jsonl",
             rejected_documents=root / "documents.rejected.jsonl",
+            skipped_rules=root / "documents.skipped.jsonl",
             bundle=root / "ontology.bundle.json",
             emitted_atoms=root / "facts.metta",
             metadata=root / "facts.metadata.metta",
@@ -63,6 +65,7 @@ class MinerRunSummary:
 
     accepted_documents: int
     rejected_documents: int
+    skipped_rules: int
     admitted_documents: int
     quarantined_documents: int
     admitted_facts: int
@@ -97,6 +100,7 @@ def run_hybrid_miner(
     min_support: int = 2,
     swipl: str = "swipl",
     timeout_seconds: int = 120,
+    skip_unsupported_rules: bool = False,
 ) -> MinerRunSummary:
     """Run parser export, PeTTa admission, mining and candidate construction."""
 
@@ -167,15 +171,11 @@ def run_hybrid_miner(
             paths.rejected_documents,
             bundle=bundle,
             bundle_path=paths.bundle,
+            skipped_path=paths.skipped_rules if skip_unsupported_rules else None,
         )
 
-        created.extend(
-            [
-                paths.documents,
-                paths.rejected_documents,
-                paths.bundle,
-            ]
-        )
+        # The rejected and skipped files explain a failed run, so cleanup keeps them.
+        created.extend([paths.documents, paths.bundle])
 
         if export.accepted == 0:
             raise ValueError(
@@ -273,6 +273,7 @@ def run_hybrid_miner(
         return MinerRunSummary(
             accepted_documents=export.accepted,
             rejected_documents=export.rejected,
+            skipped_rules=export.skipped_rules,
             admitted_documents=admitted.admission.accepted_documents,
             quarantined_documents=admitted.admission.rejected_documents,
             admitted_facts=admitted.admission.facts,
@@ -337,6 +338,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--swipl",
         default="swipl",
     )
+    parser.add_argument(
+        "--skip-unsupported-rules",
+        action="store_true",
+        help="leave out universal rules the miner cannot hold instead of "
+        "rejecting their documents; they are listed in documents.skipped.jsonl",
+    )
 
     options = parser.parse_args(argv)
 
@@ -355,6 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_support=options.min_support,
             timeout_seconds=options.timeout_seconds,
             swipl=options.swipl,
+            skip_unsupported_rules=options.skip_unsupported_rules,
         )
 
     except (OSError, ValueError, RuntimeError) as error:
@@ -365,6 +373,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"Parser documents: {result.accepted_documents} accepted, "
         f"{result.rejected_documents} rejected"
     )
+    if result.skipped_rules:
+        print(f"Skipped rules: {result.skipped_rules} -> {result.paths.skipped_rules}")
     print(
         f"PeTTa admission: {result.admitted_documents} accepted, "
         f"{result.quarantined_documents} quarantined"

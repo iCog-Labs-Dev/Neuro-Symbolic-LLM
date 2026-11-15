@@ -83,7 +83,7 @@ def add_document_export_arguments(arguments: argparse.ArgumentParser) -> None:
         "--progress-every",
         type=int,
         default=5,
-        help="checkpoint/report interval (default: 100 records)",
+        help="checkpoint/report interval (default: 5 records)",
     )
     arguments.add_argument(
         "--corpus-id", help="namespace for sentence or manifest inputs"
