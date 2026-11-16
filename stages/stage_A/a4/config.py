@@ -1,4 +1,3 @@
-
 """Stage A4 configuration."""
 
 from __future__ import annotations
@@ -70,9 +69,7 @@ def load_config(path: Path) -> A4Config:
     sections = {"residual_config", "training", "objective", "retrieval"}
 
     if not isinstance(raw, dict) or set(raw) != sections:
-        raise ValueError(
-            f"A4 configuration requires sections {sorted(sections)}"
-        )
+        raise ValueError(f"A4 configuration requires sections {sorted(sections)}")
 
     for name, allowed in (
         ("objective", {"key_weight", "value_weight"}),
@@ -87,9 +84,7 @@ def load_config(path: Path) -> A4Config:
     if not isinstance(raw["residual_config"], str):
         raise ValueError("residual_config must be a path")
 
-    residual_path = (
-        path.resolve().parent / raw["residual_config"]
-    ).resolve()
+    residual_path = (path.resolve().parent / raw["residual_config"]).resolve()
 
     if not residual_path.is_file():
         raise ValueError(f"Residual configuration not found: {residual_path}")
@@ -104,9 +99,7 @@ def load_config(path: Path) -> A4Config:
             f"Shared training configuration not found: {shared_path}"
         )
 
-    shared = yaml.safe_load(
-        shared_path.read_text(encoding="utf-8")
-    ) or {}
+    shared = yaml.safe_load(shared_path.read_text(encoding="utf-8")) or {}
 
     if not isinstance(shared, dict):
         raise ValueError("Shared training configuration must be a mapping")
@@ -121,9 +114,7 @@ def load_config(path: Path) -> A4Config:
         ("evaluation", evaluation),
     ):
         if not isinstance(section, dict):
-            raise ValueError(
-                f"Shared {name} configuration must be a mapping"
-            )
+            raise ValueError(f"Shared {name} configuration must be a mapping")
 
     training_config = {
         "model": model.get("name", "gpt2"),

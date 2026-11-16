@@ -23,8 +23,8 @@ from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from frozenllm.substrate.torchax_backend import is_torchax_enabled  # noqa: E402
 from residual.symbolic_head.jax_head import SymbolicHead  # noqa: E402
 from stages.results import RunWriter, load_params  # noqa: E402
-from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
-from stages.stage_A.a3_tail import residual_modify  # noqa: E402
+from stages.stage_A.a3 import A3HybridConfig, A3Model  # noqa: E402
+from stages.stage_A.a3.a3_tail import residual_modify  # noqa: E402
 from stages.stage_A.a4.checkpoint import restore_a3_weights  # noqa: E402
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config  # noqa: E402
 from stages.stage_A.a4.data import A4Data  # noqa: E402
@@ -43,6 +43,20 @@ from stages.stage_A.a4.training import (  # noqa: E402
 from stages.stage_base import TrainingConfig  # noqa: E402
 from symbolic_memory.jax_bridge import RetrievedTemplates  # noqa: E402
 from tests.frozenllm.conftest import _torch_model  # noqa: E402
+
+
+def make_a3_config(**overrides):
+    """Create a valid configuration for the refactored A3 implementation."""
+    values = {
+        "infer_steps": 1,
+        "eta_z": 0.05,
+        "sigma2": 1.0,
+        "lambda_kl": 0.0,
+        "predictor_init_std": 0.001,
+        "projection_init_std": 0.1,
+    }
+    values.update(overrides)
+    return A3HybridConfig(**values)
 
 
 def small_substrate():
@@ -69,7 +83,7 @@ def env():
         layers=(6, 7),
         rank=4,
         seq_len=5,
-        config=A3Config(infer_steps=1, eta_z=0.05),
+        config=make_a3_config(),
     )
     params = continuous.init_params(jax.random.PRNGKey(0))
     ids = jnp.asarray([[1, 4, 9, 3, 2]], dtype=jnp.int32)
@@ -465,7 +479,11 @@ def test_alignment_rejects_invalid_weight_before_forward(env, weight):
 def run():
     substrate = small_substrate()
     continuous = A3Model(
-        substrate, layers=(7,), rank=4, seq_len=5, config=A3Config(infer_steps=1)
+        substrate,
+        layers=(7,),
+        rank=4,
+        seq_len=5,
+        config=make_a3_config(),
     )
     frozen = continuous.init_params(jax.random.PRNGKey(0))
     keys = jnp.eye(2, 256, dtype=jnp.float32)
@@ -484,19 +502,29 @@ def run():
     config = A4Config(
         Path("a3.yaml"),
         TrainingConfig(
-            model="unit-fixture", seq_len=5, batch_size=1, epochs=1, eval_batches=1
+            model="unit-fixture",
+            seq_len=5,
+            batch_size=1,
+            epochs=1,
+            eval_batches=1,
         ),
         minimum_templates=1,
     )
     records = tuple(
         SimpleNamespace(
-            key_vector=np.asarray(keys[i]), val_vector=np.asarray(values[i])
+            key_vector=np.asarray(keys[i]),
+            val_vector=np.asarray(values[i]),
         )
         for i in range(2)
     )
     bank = SimpleNamespace(records=records, input_snapshot_sha256="unit-bank")
     return SimpleNamespace(
-        model=model, frozen=frozen, config=config, bank=bank, keys=keys, values=values
+        model=model,
+        frozen=frozen,
+        config=config,
+        bank=bank,
+        keys=keys,
+        values=values,
     )
 
 
@@ -717,7 +745,8 @@ def test_communication_samples_real_updates_without_replay(
         run.model.symbolic,
         "retrieve",
         SimpleNamespace(
-            transfer_timing=timing.transfer_timing, transfer_stats=timing.transfer_stats
+            transfer_timing=timing.transfer_timing,
+            transfer_stats=timing.transfer_stats,
         ),
     )
     original = module.make_train_step
