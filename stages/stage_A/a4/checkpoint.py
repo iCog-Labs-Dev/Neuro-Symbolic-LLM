@@ -11,6 +11,7 @@ import numpy as np
 
 from stages.stage_A.a3 import A3Model
 
+
 def restore_a3_weights(
     model: A3Model,
     weights: Mapping[str, Mapping[str, Any]],
