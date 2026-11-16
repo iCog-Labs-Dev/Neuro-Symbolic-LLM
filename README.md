@@ -39,6 +39,7 @@ Introduces iterative latent-state inference and energy minimization using Fabric
 ### A4 — Symbolic Head
 
 Connects neural representations with structured symbolic knowledge through template retrieval and symbolic attention, backed by MORK.
+[See more](stages/stage_A/a4/README.md)
 
 ### Semantic Parser
 
@@ -131,7 +132,9 @@ python experiments/run_stage_a3.py --K 1 2 4 8
 
 **A4 — Symbolic Head**
 
-A4 builds on the offline symbolic preparation pipeline and integrates retrieved templates into the neural architecture. Its standalone experiment runner and end-to-end training workflow are under development.
+```bash
+python experiments/run_stage_a4.py
+```
 
 ## Configuration and Results
 

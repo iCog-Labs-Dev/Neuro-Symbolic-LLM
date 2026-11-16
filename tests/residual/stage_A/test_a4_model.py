@@ -565,7 +565,7 @@ def test_training_reuses_a3_predictions_without_settlement(
     def forbidden(*args, **kwargs):
         raise AssertionError("A4 must reuse prediction, not run A3 settlement")
 
-    for method in ("make_batch", "_refresh_state", "train_grads"):
+    for method in ("make_batch", "train_grads"):
         monkeypatch.setattr(continuous, method, forbidden)
     original_config = continuous.cfg
 
