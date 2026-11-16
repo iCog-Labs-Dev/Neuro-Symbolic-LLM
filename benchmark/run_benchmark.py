@@ -22,7 +22,7 @@ import sys
 import time
 import webbrowser
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -326,132 +326,6 @@ def aggregate_lm_rows(
     }
 
 
-def evaluate_long_range(
-    config: Mapping[str, Any],
-    score_choice: Callable[[str, str], float],
-) -> dict[str, Any]:
-    """Evaluate inline multiple-choice prompts with an external scoring callback."""
-    if not isinstance(config, Mapping):
-        raise ValueError("long-range configuration must be a mapping")
-    if config.get("schema") != "long-range/v1":
-        raise ValueError("long-range probes must use schema 'long-range/v1'")
-    if not callable(score_choice):
-        raise ValueError("score_choice must be callable")
-
-    items = config.get("items", [])
-    if not isinstance(items, list):
-        raise ValueError("long-range items must be a list")
-    if not items:
-        return {"status": "not_configured", "reason": "no long-range probes"}
-
-    required = {
-        "id",
-        "family",
-        "distance",
-        "context",
-        "question",
-        "choices",
-        "answer",
-    }
-    rows: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for index, item in enumerate(items):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"long-range item {index} must be a mapping")
-        missing = required - set(item)
-        if missing:
-            raise ValueError(f"long-range item is missing {sorted(missing)}")
-
-        text_fields = ("id", "family", "distance", "context", "question")
-        for field in text_fields:
-            if not isinstance(item[field], str) or not item[field]:
-                raise ValueError(
-                    f"long-range item {index} {field} must be nonempty text"
-                )
-        item_id = item["id"]
-        if item_id in seen_ids:
-            raise ValueError(f"long-range item id {item_id!r} is duplicated")
-        seen_ids.add(item_id)
-
-        choices = item["choices"]
-        if (
-            not isinstance(choices, list)
-            or len(choices) < 2
-            or any(not isinstance(choice, str) or not choice for choice in choices)
-        ):
-            raise ValueError(
-                f"long-range item {item_id!r} requires at least two text choices"
-            )
-
-        answer = item["answer"]
-        if isinstance(answer, bool) or not isinstance(answer, Integral):
-            raise ValueError(f"long-range item {item_id!r} answer must be an index")
-        answer = int(answer)
-        if not 0 <= answer < len(choices):
-            raise ValueError(f"long-range item {item_id!r} answer is out of range")
-
-        filler = item.get("filler", "")
-        if not isinstance(filler, str):
-            raise ValueError(f"long-range item {item_id!r} filler must be text")
-        repeat = item.get("filler_repeat", 0)
-        if isinstance(repeat, bool) or not isinstance(repeat, Integral) or repeat < 0:
-            raise ValueError(
-                f"long-range item {item_id!r} filler_repeat must be a nonnegative integer"
-            )
-
-        prompt = item["context"] + (filler * int(repeat)) + item["question"]
-        scores = [
-            _finite_float(
-                score_choice(prompt, choice),
-                field=f"long-range item {item_id!r} score {choice!r}",
-            )
-            for choice in choices
-        ]
-        predicted = max(range(len(scores)), key=scores.__getitem__)
-        distractors = [score for choice, score in enumerate(scores) if choice != answer]
-        rows.append(
-            {
-                "id": item_id,
-                "family": item["family"],
-                "distance": item["distance"],
-                "answer": answer,
-                "predicted": predicted,
-                "correct": predicted == answer,
-                "margin": scores[answer] - max(distractors),
-                "scores": scores,
-            }
-        )
-
-    by_family: dict[str, dict[str, float]] = {}
-    for family in sorted({row["family"] for row in rows}):
-        selected = [row for row in rows if row["family"] == family]
-        by_family[family] = {
-            "accuracy": math.fsum(row["correct"] for row in selected) / len(selected),
-            "mean_margin": math.fsum(row["margin"] for row in selected) / len(selected),
-        }
-
-    by_distance: dict[str, float] = {}
-    for distance in sorted({row["distance"] for row in rows}):
-        selected = [row for row in rows if row["distance"] == distance]
-        by_distance[distance] = math.fsum(row["correct"] for row in selected) / len(
-            selected
-        )
-
-    near_far_gap = None
-    if "near" in by_distance and "far" in by_distance:
-        near_far_gap = by_distance["near"] - by_distance["far"]
-
-    return {
-        "status": "measured",
-        "accuracy": math.fsum(row["correct"] for row in rows) / len(rows),
-        "mean_margin": math.fsum(row["margin"] for row in rows) / len(rows),
-        "by_family": by_family,
-        "by_distance": by_distance,
-        "near_far_gap": near_far_gap,
-        "items": rows,
-    }
-
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -492,7 +366,6 @@ MEASURED_METRICS = (
     "heldout_transfer",
     "sequential_joint_gap",
     "anchor_kl",
-    "long_range_coherence",
     "inference_latency",
     "peak_memory",
 )
@@ -510,13 +383,6 @@ EXTERNAL_METRIC_SPECS = (
     ("Held-out transfer", "heldout_transfer", "higher"),
     ("Sequential versus joint gap", "sequential_joint_gap", "lower"),
     ("Anchor KL drift", "anchor_kl", "lower"),
-    ("Long-range coherence accuracy", "long_range", "higher"),
-    ("Task accuracy or exact match", "task_accuracy", "higher"),
-    ("Task macro-F1", "task_macro_f1", "higher"),
-    ("Task micro-F1", "task_micro_f1", "higher"),
-    ("Task calibration ECE", "task_ece", "lower"),
-    ("Accuracy forgetting", "accuracy_forgetting", "lower"),
-    ("Instruction-following score", "instruction_following", "higher"),
 )
 INTERNAL_METRIC_SPECS = (
     ("Residual compressibility", "residual_compressibility", "higher"),
@@ -524,20 +390,6 @@ INTERNAL_METRIC_SPECS = (
     ("Invariant redundancy", "invariant_redundancy", "lower"),
     ("Task-gradient conflict", "task_gradient_conflict", "lower"),
     ("Parameter-order commutator proxy", "update_commutator", "lower"),
-    ("Output-order commutator", "functional_commutator", "lower"),
-    ("Representation fracture", "representation_fracture", "context"),
-    ("Factor overlap", "factor_overlap", "context"),
-    ("Mixed curvature coupling", "mixed_curvature", "context"),
-    ("Off-support leakage", "off_support_leakage", "lower"),
-    ("Cross-support curvature coupling", "cross_support_coupling", "context"),
-    ("Causal fingerprint separability", "fingerprint_separability", "context"),
-    ("Causal fingerprint stability", "fingerprint_stability", "higher"),
-    ("Category role prediction accuracy", "category_role_accuracy", "higher"),
-    ("Support explanation accuracy", "support_explanation_accuracy", "higher"),
-    ("Category naturality error", "naturality_error", "lower"),
-    ("Category closure error", "closure_error", "lower"),
-    ("Ablation prediction MAE", "ablation_mae", "lower"),
-    ("Ablation rank correlation", "ablation_spearman", "higher"),
 )
 OPERATIONAL_METRIC_SPECS = (
     ("Trainable parameters", "trainable_params", "lower"),
@@ -967,40 +819,6 @@ def _load_deployed_metrics(
                 "reason": f"{type(exc).__name__}: {exc}",
             }
 
-    long_range_config = evaluation_config.get("long_range")
-    if isinstance(long_range_config, dict):
-
-        def score_choice(prompt: str, choice: str) -> float:
-            prompt_ids = substrate.tokenizer.encode(prompt, add_special_tokens=True)
-            candidate = substrate.tokenizer.encode(choice, add_special_tokens=False)
-            if not candidate:
-                return float("-inf")
-            full_ids = prompt_ids + candidate
-            max_positions = substrate.architecture.max_position_embeddings
-            if max_positions is not None and len(full_ids) > max_positions:
-                raise ValueError("long-range probe exceeds model context length")
-            ids = jnp.asarray([full_ids], dtype=jnp.int32)
-            _, adapted_logits, _ = deployed_with_params(params, ids)
-            log_probs = jax.nn.log_softmax(adapted_logits[0], axis=-1)
-            start = len(prompt_ids) - 1
-            values = [
-                log_probs[start + offset, token]
-                for offset, token in enumerate(candidate)
-            ]
-            return float(jnp.mean(jnp.stack(values)))
-
-        try:
-            long_range = evaluate_long_range(long_range_config, score_choice)
-        except (RuntimeError, TypeError, ValueError) as exc:
-            long_range = {
-                "status": "failed",
-                "reason": f"{type(exc).__name__}: {exc}",
-            }
-    else:
-        long_range = {
-            "status": "not_configured",
-            "reason": "long-range probes are not configured",
-        }
     peak_bytes = None
     for device in jax.devices():
         stats = device.memory_stats()
@@ -1021,7 +839,6 @@ def _load_deployed_metrics(
         "anchor_kl": anchor_kl,
         "heldout_transfer": heldout_transfer
         or {"status": "not_configured", "reason": "held-out datasets not configured"},
-        "long_range_coherence": long_range,
     }
 
 
@@ -1638,46 +1455,6 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                 continue
         raw_result = _read_json(result_path)
         record = _result_record(raw_result, run)
-        audit_path = output_dir / "measurement_inputs" / f"{run['run_id']}.json"
-        if audit_path.is_file():
-            try:
-                from metrics.research_audits import evaluate_audits
-
-                audit_input = _read_json(audit_path)
-                checkpoints = sorted(
-                    (Path(run["output_dir"]) / run["run_name"] / "params").glob(
-                        "task_*.npz"
-                    )
-                )
-                if (
-                    audit_input.get("run_id") != run["run_id"]
-                    or not checkpoints
-                    or audit_input.get("checkpoint_sha256")
-                    != sha256_file(checkpoints[-1])
-                ):
-                    raise ValueError(
-                        "audit run ID or final checkpoint hash does not match"
-                    )
-                protocol_hash = audit_input.get("protocol_sha256")
-                if (
-                    not isinstance(protocol_hash, str)
-                    or len(protocol_hash) != 64
-                    or any(c not in "0123456789abcdef" for c in protocol_hash)
-                ):
-                    raise ValueError(
-                        "audit protocol_sha256 must identify the shared probe and measurement protocol"
-                    )
-                record["research_audits"] = {
-                    "status": "measured",
-                    "input_sha256": sha256_file(audit_path),
-                    "protocol_sha256": protocol_hash,
-                    "metrics": evaluate_audits(audit_input),
-                }
-            except (KeyError, TypeError, ValueError, OSError) as exc:
-                record["research_audits"] = {
-                    "status": "invalid",
-                    "reason": f"{type(exc).__name__}: {exc}",
-                }
         meta_path = result_path.parent / "meta.json"
         if meta_path.is_file():
             meta = _read_json(meta_path)
@@ -1964,34 +1741,8 @@ def _numeric_values(value: Any) -> list[float]:
 def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list[float]:
     deployed = record.get("deployed_evaluation", {})
     representation = deployed.get("representation", {})
-    audit = record.get("research_audits", {}).get("metrics", {})
-    audit_fields = {
-        "representation_fracture": ("factor_organization", "mean_fracture"),
-        "factor_overlap": ("factor_organization", "mean_overlap"),
-        "mixed_curvature": ("mixed_curvature",),
-        "off_support_leakage": ("off_support_leakage",),
-        "cross_support_coupling": ("cross_support_coupling",),
-        "fingerprint_separability": ("fingerprint_separability",),
-        "fingerprint_stability": ("fingerprint_stability",),
-        "category_role_accuracy": ("category_roles_accuracy",),
-        "support_explanation_accuracy": ("support_explanations_accuracy",),
-        "naturality_error": ("naturality_error",),
-        "closure_error": ("closure_error",),
-        "functional_commutator": ("functional_commutator",),
-        "ablation_mae": ("ablation_fidelity", "mae"),
-        "ablation_spearman": ("ablation_fidelity", "spearman"),
-        "task_accuracy": ("classification", "accuracy"),
-        "task_macro_f1": ("classification", "macro_f1"),
-        "task_micro_f1": ("classification", "micro_f1"),
-        "task_ece": ("classification", "ece"),
-        "accuracy_forgetting": ("accuracy_forgetting", "final"),
-        "instruction_following": ("instruction_following",),
-    }
-    if metric in audit_fields:
-        value: Any = audit
-        for field in audit_fields[metric]:
-            value = value.get(field) if isinstance(value, dict) else None
-    elif metric == "residual_compressibility":
+    value: Any
+    if metric == "residual_compressibility":
         curve = record.get("residual_compressibility") or {}
         value = curve.get(str(rank))
     elif metric == "validation_loss":
@@ -2049,11 +1800,6 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
             anchor.get("final", {}).get("kl")
             if anchor.get("status") == "measured"
             else None
-        )
-    elif metric == "long_range":
-        coherence = deployed.get("long_range_coherence", {})
-        value = (
-            coherence.get("accuracy") if coherence.get("status") == "measured" else None
         )
     elif metric == "trainable_params":
         value = record.get("trainable_params")
@@ -2356,49 +2102,6 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
                         else set()
                     )
                     metric_seeds &= fair_seeds
-                    if metric in {
-                        "representation_fracture",
-                        "functional_commutator",
-                        "factor_overlap",
-                        "mixed_curvature",
-                        "off_support_leakage",
-                        "cross_support_coupling",
-                        "fingerprint_separability",
-                        "fingerprint_stability",
-                        "category_role_accuracy",
-                        "support_explanation_accuracy",
-                        "naturality_error",
-                        "closure_error",
-                        "ablation_mae",
-                        "ablation_spearman",
-                        "task_accuracy",
-                        "task_macro_f1",
-                        "task_micro_f1",
-                        "task_ece",
-                        "accuracy_forgetting",
-                        "instruction_following",
-                    }:
-                        metric_seeds = {
-                            seed
-                            for seed in metric_seeds
-                            if all(
-                                row.get("research_audits", {}).get("protocol_sha256")
-                                for method in ("a1", "a2", "a3")
-                                for row in method_rows[method]
-                                if int(row["seed"]) == seed
-                            )
-                            and len(
-                                {
-                                    row.get("research_audits", {}).get(
-                                        "protocol_sha256"
-                                    )
-                                    for method in ("a1", "a2", "a3")
-                                    for row in method_rows[method]
-                                    if int(row["seed"]) == seed
-                                }
-                            )
-                            == 1
-                        }
                     cells = []
                     means = {}
                     for method in ("a1", "a2", "a3"):
@@ -2532,43 +2235,9 @@ METHODS = ("a1", "a2", "a3")
 METHOD_LABELS = {"a1": "A1", "a2": "A2", "a3": "A3"}
 METHOD_COLORS = {"a1": "#3B82F6", "a2": "#F59E0B", "a3": "#10B981"}
 FIGURE_DPI = 150
-AUDIT_METRICS = {
-    "representation_fracture",
-    "functional_commutator",
-    "factor_overlap",
-    "mixed_curvature",
-    "off_support_leakage",
-    "cross_support_coupling",
-    "fingerprint_separability",
-    "fingerprint_stability",
-    "category_role_accuracy",
-    "support_explanation_accuracy",
-    "naturality_error",
-    "closure_error",
-    "ablation_mae",
-    "ablation_spearman",
-    "task_accuracy",
-    "task_macro_f1",
-    "task_micro_f1",
-    "task_ece",
-    "accuracy_forgetting",
-    "instruction_following",
-}
 VISUALIZATION_OPERATIONAL_METRIC_SPECS = OPERATIONAL_METRIC_SPECS + (
     ("Mean training step time (seconds)", "mean_step_time", "lower"),
 )
-UNAVAILABLE_REASONS = {
-    "representation_fracture_unavailable": "semantic factors are not configured for A1-A3",
-    "factor_overlap_unavailable": "semantic factors are not configured for A1-A3",
-    "mixed_curvature_unavailable": "no validated per-example curvature protocol is enabled",
-    "off_support_leakage_unavailable": "A1-A3 do not define intended component supports",
-    "causal_fingerprint_unavailable": "independent component-role labels are unavailable",
-    "naturality_unavailable": "category labels and declared transformations are unavailable",
-    "ablation_fidelity_unavailable": "the sampled intervention audit protocol is not enabled",
-    "task_primary_unavailable": "the current benchmark does not use labeled task targets",
-    "task_macro_f1_unavailable": "the current benchmark does not use labeled task targets",
-    "accuracy_forgetting_unavailable": "task-score matrices are unavailable without labeled targets",
-}
 
 
 @dataclass(frozen=True)
@@ -2819,26 +2488,6 @@ def _metric_samples(
         by_seed[method] = samples
     seed_sets = [set(by_seed[method]) for method in METHODS]
     common = set.intersection(*seed_sets) if all(seed_sets) else set()
-    if metric in AUDIT_METRICS:
-        common = {
-            seed
-            for seed in common
-            if len(
-                {
-                    row.get("research_audits", {}).get("protocol_sha256")
-                    for method in METHODS
-                    for row in cohort.records[method]
-                    if int(row["seed"]) == seed
-                }
-            )
-            == 1
-            and all(
-                row.get("research_audits", {}).get("protocol_sha256")
-                for method in METHODS
-                for row in cohort.records[method]
-                if int(row["seed"]) == seed
-            )
-        }
     return {
         method: [(seed, by_seed[method][seed]) for seed in sorted(common)]
         for method in METHODS
@@ -2846,19 +2495,6 @@ def _metric_samples(
 
 
 def _na_reason(method: str, metric: str, cohort: HeadlineCohort | None) -> str:
-    if metric in {"representation_fracture", "factor_overlap"} and cohort:
-        for row in cohort.records.get(method, ()):
-            factor = (
-                row.get("research_audits", {})
-                .get("metrics", {})
-                .get("factor_organization", {})
-            )
-            if factor.get("status") == "unavailable":
-                return str(factor.get("reason", "shared factor metrics unavailable"))
-    if metric in AUDIT_METRICS:
-        return "requires valid, checkpoint-bound audit evidence with a matching protocol across methods"
-    if metric in UNAVAILABLE_REASONS:
-        return UNAVAILABLE_REASONS[metric]
     if cohort is None:
         return (
             "no A1/A2/A3 condition has matching protocol, rank, order, and held-out set"
@@ -3300,7 +2936,6 @@ def _common_stage_figures(
             "Sequential versus joint gap",
             "sequential_joint_gap.png",
         ),
-        ("long_range", "Long-range accuracy", "long_range.png"),
         ("mean_step_time", "Mean training step time", "mean_step_time.png"),
         ("tokens_per_second", "Training throughput", "throughput.png"),
         ("trainable_params", "Trainable parameter count", "trainable_params.png"),
@@ -3850,7 +3485,7 @@ def _write_stage_report(
                 method_dir,
             ),
             "",
-            "Label-based metrics require separately supplied task predictions and scores; token accuracy measures a different task.",
+            "Scope: A1/A2/A3 language-model and continuous-residual measurements; symbolic and category/probe audits are excluded.",
         ]
     )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

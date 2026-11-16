@@ -28,7 +28,6 @@ from benchmark.run_benchmark import (
     _write_json,
     aggregate_lm_rows,
     effective_condition,
-    evaluate_long_range,
     evaluate_manifest,
     expand_specs,
     finalize_attempt,
@@ -241,7 +240,6 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
         "Invariant redundancy",
         "Task-gradient conflict",
         "Parameter-order commutator proxy",
-        "Output-order commutator",
         "Validation loss",
         "Perplexity",
         "Held-out test loss",
@@ -255,7 +253,6 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
         "Held-out transfer",
         "Sequential versus joint gap",
         "Anchor KL drift",
-        "Long-range coherence accuracy",
     ):
         assert f"| {metric} |" in report
     for removed in (
@@ -278,20 +275,6 @@ def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
         "Invariant redundancy",
         "Task-gradient conflict",
         "Parameter-order commutator proxy",
-        "Output-order commutator",
-        "Representation fracture",
-        "Factor overlap",
-        "Mixed curvature coupling",
-        "Off-support leakage",
-        "Cross-support curvature coupling",
-        "Causal fingerprint separability",
-        "Causal fingerprint stability",
-        "Category role prediction accuracy",
-        "Support explanation accuracy",
-        "Category naturality error",
-        "Category closure error",
-        "Ablation prediction MAE",
-        "Ablation rank correlation",
     ]
     assert "## Scope" in report
     assert "Symbolic-head metrics are outside its scope" in report
@@ -407,7 +390,6 @@ def test_measured_metrics_match_supported_scope() -> None:
         "heldout_transfer",
         "sequential_joint_gap",
         "anchor_kl",
-        "long_range_coherence",
         "inference_latency",
         "peak_memory",
     }
@@ -620,73 +602,11 @@ def test_lm_aggregation_rejects_invalid_token_counts(tokens: Any) -> None:
         )
 
 
-def _long_range_item(**overrides: Any) -> dict[str, Any]:
-    item = {
-        "id": "near",
-        "family": "relation",
-        "distance": "near",
-        "context": "context",
-        "question": " question",
-        "choices": [" correct", " wrong"],
-        "answer": 0,
-    }
-    item.update(overrides)
-    return item
-
-
-def test_long_range_reports_groups_and_expands_inline_filler() -> None:
-    prompts: list[str] = []
-    config = {
-        "schema": "long-range/v1",
-        "items": [
-            _long_range_item(),
-            _long_range_item(
-                id="far",
-                distance="far",
-                filler=" filler",
-                filler_repeat=2,
-            ),
-        ],
-    }
-
-    def score(prompt: str, choice: str) -> float:
-        prompts.append(prompt)
-        if "filler" in prompt:
-            return 1.0 if choice == " wrong" else 0.0
-        return 1.0 if choice == " correct" else 0.0
-
-    result = evaluate_long_range(config, score)
-
-    assert result["accuracy"] == 0.5
-    assert result["by_family"]["relation"]["accuracy"] == 0.5
-    assert result["by_distance"] == {"far": 0.0, "near": 1.0}
-    assert result["near_far_gap"] == 1.0
-    assert prompts[-1] == "context filler filler question"
-    assert result["items"][1]["predicted"] == 1
-
-
-def test_long_range_rejects_invalid_answers_and_scores() -> None:
-    with pytest.raises(ValueError, match="out of range"):
-        evaluate_long_range(
-            {"schema": "long-range/v1", "items": [_long_range_item(answer=2)]},
-            lambda _prompt, _choice: 0.0,
-        )
-
-    with pytest.raises(ValueError, match="finite number"):
-        evaluate_long_range(
-            {"schema": "long-range/v1", "items": [_long_range_item()]},
-            lambda _prompt, _choice: float("nan"),
-        )
-
-
 def test_shipped_runtime_config_keeps_external_lm_protocols(data_loader) -> None:
     config = data_loader.load_runtime_config(ROOT / "configs/runtime_datasets.yaml")
 
-    assert set(config["evaluation"]) == {"anchor", "long_range"}
     assert config["evaluation"]["anchor"]["name"] == "general_language_anchor"
     assert len(config["evaluation"]["anchor"]["texts"]) == 5
-    assert config["evaluation"]["long_range"]["schema"] == "long-range/v1"
-    assert isinstance(config["evaluation"]["long_range"]["items"], list)
     assert all(
         isinstance(dataset.get("revision"), str) and len(dataset["revision"]) == 40
         for dataset in config["datasets"]
@@ -1028,7 +948,7 @@ def test_k_selection_uses_shared_seed_and_fingerprint():
     assert result["matched_seeds"] == [0]
 
 
-def test_audit_inputs_are_checkpoint_bound(tmp_path: Path, monkeypatch):
+def test_symbolic_audit_inputs_are_ignored(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "benchmark.run_benchmark._load_deployed_metrics", lambda *args: {}
     )
@@ -1067,17 +987,11 @@ def test_audit_inputs_are_checkpoint_bound(tmp_path: Path, monkeypatch):
         "factor_importance": [[1, 0]],
     }
     (audit_dir / "a1-0.json").write_text(json.dumps(evidence), encoding="utf-8")
-    audit = evaluate_manifest(tmp_path)["records"][0]["research_audits"]
-    assert audit["metrics"]["factor_organization"]["mean_fracture"] == 0.5
-    evidence["checkpoint_sha256"] = "wrong"
-    (audit_dir / "a1-0.json").write_text(json.dumps(evidence), encoding="utf-8")
-    assert (
-        evaluate_manifest(tmp_path)["records"][0]["research_audits"]["status"]
-        == "invalid"
-    )
+    record = evaluate_manifest(tmp_path)["records"][0]
+    assert "research_audits" not in record
 
 
-def test_cross_method_audits_require_same_protocol():
+def test_legacy_probe_metrics_are_not_reported():
     rows = []
     for method in ("a1", "a2", "a3"):
         rows.append(
@@ -1145,6 +1059,63 @@ def test_report_writes_png_and_two_tables_in_four_folders(tmp_path: Path):
     assert "stage_A/comparison/figures/" in dashboard
     assert "stage_A/A1/figures/" in dashboard
     assert '<section id="comparison">' in dashboard
+    excluded = (
+        "Representation fracture",
+        "Factor overlap",
+        "Mixed curvature coupling",
+        "Off-support leakage",
+        "Cross-support curvature coupling",
+        "Causal fingerprint",
+        "Category role",
+        "Support explanation",
+        "Category naturality",
+        "Category closure",
+        "Ablation prediction",
+        "Ablation rank",
+        "Output-order commutator",
+        "Long-range",
+        "Task macro-F1",
+        "Task micro-F1",
+        "Instruction-following",
+    )
+    for report_path in [
+        Path(result["general_report"]),
+        *map(Path, result["stage_reports"].values()),
+    ]:
+        report = report_path.read_text(encoding="utf-8")
+        assert all(label not in report for label in excluded)
+    assert all(label not in dashboard for label in excluded)
+
+
+def test_combined_configuration_covers_required_run_axes(tmp_path):
+    manifest = make_manifest(
+        tmp_path,
+        seeds=[0],
+        methods=["a1", "a2", "a3"],
+        k_values=[4],
+        rank_values=[4, 16],
+        protocols=["sequential", "joint", "commutator"],
+        epochs=1,
+    )
+    assert len(manifest["runs"]) == 24
+    for method in ("a1", "a2", "a3"):
+        for rank in (4, 16):
+            runs = [
+                run
+                for run in manifest["runs"]
+                if run["method"] == method and run["rank"] == rank
+            ]
+            assert {run["protocol"] for run in runs} == {
+                "sequential",
+                "joint",
+                "commutator",
+            }
+            orders = [
+                tuple(run["task_order"])
+                for run in runs
+                if run["protocol"] == "commutator"
+            ]
+            assert len(orders) == 2 and orders[0] == orders[1][::-1]
 
 
 def test_default_command_runs_training_evaluation_and_visualization(
@@ -1171,14 +1142,16 @@ def test_default_command_runs_training_evaluation_and_visualization(
     monkeypatch.setattr(
         runner,
         "report_manifest",
-        lambda path, **kwargs: calls.append(("report", kwargs["report_rank"]))
-        or path / "REPORT.md",
+        lambda path, **kwargs: (
+            calls.append(("report", kwargs["report_rank"])) or path / "REPORT.md"
+        ),
     )
     monkeypatch.setattr(
         runner,
         "generate_reports_and_visualizations",
-        lambda path, **kwargs: calls.append("figures")
-        or {"dashboard": str(tmp_path / "index.html")},
+        lambda path, **kwargs: (
+            calls.append("figures") or {"dashboard": str(tmp_path / "index.html")}
+        ),
     )
     assert runner.main(["--output-dir", str(tmp_path)]) == 0
     assert calls == [
@@ -1236,21 +1209,3 @@ def test_report_command_does_not_train_or_evaluate(tmp_path, monkeypatch):
         runner.main(["report", "--output-dir", str(tmp_path), "--no-visualization"])
         == 0
     )
-
-
-def test_notebook_cells_compile_and_install_on_kernel():
-    notebook = json.loads(
-        (ROOT / "run_benchmark_jupyterhub.ipynb").read_text(encoding="utf-8")
-    )
-    code = []
-    for index, cell in enumerate(notebook["cells"]):
-        if cell["cell_type"] == "code":
-            source = "".join(cell["source"])
-            compile(source, f"notebook-cell-{index}", "exec")
-            assert cell["execution_count"] is None and cell["outputs"] == []
-            code.append(source)
-    combined = "\n".join(code)
-    assert 'sys.executable, "-m", "pip", "install"' in combined
-    assert 'GIT_REF = "benchmark-final"' in combined
-    assert '"train"' in combined and '"eval"' in combined and '"report"' in combined
-    assert "show_report" in combined and "zipfile.ZipFile" in combined

@@ -154,8 +154,8 @@ python benchmark/run_benchmark.py report --output-dir runs/benchmark
 ```
 
 See [benchmark metrics](docs/benchmark_metrics.md) for metric definitions,
-evidence requirements and profiles. The [JupyterHub notebook](run_benchmark_jupyterhub.ipynb)
-also runs training and displays the reports on a GPU server.
+evidence requirements and profiles. JupyterHub notebooks are supplied separately
+and are not tracked in this repository.
 
 ## Configuration and Results
 
