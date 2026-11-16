@@ -1,4 +1,12 @@
+
 seed: 42
+
+selection:
+  default: spgc_fiction
+  # Can be:
+  # spgc_fiction  -> one dataset
+  # narrative     -> all datasets in this domain
+  # all           -> all configured datasets
 
 min_chars: 20
 max_chars: 600
@@ -78,12 +86,28 @@ sources:
     streaming: false
     sentence_split: false
 
+
+  - name: gutenberg_fiction
+    domain: narrative
+    kind: hf_field
+    dataset: jukofyork/gutenberg-fiction-paragraphs
+    split: train
+    field: text
+    count: 150
+    streaming: true
+    min_chars: 75
+    max_chars: 600
+    max_scan: 10000
+
   - name: spgc_fiction
     domain: narrative
-    kind: local_text_dir
-    path: data/raw/spgc/english_fiction
-    glob: "**/*.txt"
+    kind: spgc
+    repository: https://github.com/pgcorpus/gutenberg.git
+    revision: master
+    language: en
+    subject: Fiction
     count: 150
     min_chars: 20
     max_chars: 600
-    streaming: false
+    max_books: 1000
+    cache_dir: data/raw/spgc

@@ -1,4 +1,4 @@
-"""Integration tests for catalog-guided document parsing (contract 2.0.0).
+"""Integration tests for catalog-guided document parsing (contract 1.0.0).
 
 A fixed model answer goes through the real pipeline: prompt, normalization,
 extraction validation, recorded repairs, and validation against the full

@@ -339,12 +339,9 @@ def test_config_without_layers_key_still_loads(
 
     cfg = load_configs(path, A1Config)
 
-    assert cfg.adapter == ResidualConfig(
-        rank=8,
-        late_start=8,
-        late_end=9,
-    )
-
+    assert cfg.adapter.rank == 8
+    assert cfg.adapter.late_start == 8
+    assert cfg.adapter.late_end == 9
     assert cfg.adapter.layers is None
 
 

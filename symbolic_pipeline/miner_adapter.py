@@ -7,8 +7,27 @@ records. Each SemanticParseResult becomes one SemanticDocument:
   one fact for each participant role;
 - the consequents of a specific rule become hypothetical facts that are
   conditional on a Clause entity covering its antecedents;
+- a universal rule becomes a miner SemanticRule with signed literals over its
+  variables. An Evaluation part becomes one provisional relation over its
+  participants, in role order: the event form cannot be used, because the
+  miner forbids consequent variables that are missing from the antecedents;
 - each entity kind becomes a provisional kind fact;
-- content the miner contract cannot express raises MinerAdapterError.
+- a negative assertion becomes a negative miner fact, and an obligation or
+  permission becomes a modal miner fact, so neither looks like a done fact.
+  Both pass through unchanged, on the relation fact for an Evaluation. The
+  miner names the head in the parser's scope order, so "must not leave"
+  (Obligation (Not ...)) and "may not leave" (Not (Permission ...)) are both
+  prohibitions;
+- ``Negated(e)`` on a declared event or proposition stays a fact, and the
+  facts that say e exists (its kind fact and ``Event(e)``) become negative,
+  so "the repair did not happen" never supports a pattern over repairs that
+  happened. A ``Negated`` fact that is itself negative is a double negation
+  with no clear reading and is refused;
+- content the miner contract cannot express raises MinerAdapterError: modality
+  inside a universal rule, and an Evaluation without participants inside a
+  universal rule. A caller that passes ``skipped_rules`` keeps the rest of the
+  document instead: such a rule is left out and its reason is added to the
+  list, so one "Every visitor must sign" does not lose the whole document.
 """
 
 from __future__ import annotations
@@ -19,10 +38,13 @@ from typing import Final
 from hybrid_miner.contracts.semantic_document import (
     EntityRecord,
     ParserProvenance,
+    RuleLiteral,
+    RuleVariable,
     SemanticDocument,
     SourceSpan,
 )
 from hybrid_miner.contracts.semantic_document import SemanticAssertion as MinerAssertion
+from hybrid_miner.contracts.semantic_document import SemanticRule as MinerRule
 from pydantic import ValidationError
 
 from parser.semantic.schema import (
@@ -34,6 +56,10 @@ from parser.semantic.schema import (
 
 _ROLE_PREDICATES: Final = {"agent": "Agent", "patient": "Patient", "time": "Time"}
 _PROVISIONAL: Final = "ProvisionalRelation"
+_NEGATED: Final = "Negated"
+# Unary catalog facts that only say their argument exists. Proposition is an
+# entity type only (the parser refuses it as a predicate), so Event is the one.
+_EXISTENCE: Final = frozenset({"Event"})
 _STATUS: Final = "extracted-hypothesis"
 
 
@@ -41,24 +67,47 @@ class MinerAdapterError(ValueError):
     """The parse result cannot be written in hybrid-miner's document contract."""
 
 
-def to_semantic_document(result: SemanticParseResult) -> SemanticDocument:
+class UnsupportedRuleError(MinerAdapterError):
+    """A universal rule is valid, but the miner rule contract cannot hold it."""
+
+
+def to_semantic_document(
+    result: SemanticParseResult, *, skipped_rules: list[str] | None = None
+) -> SemanticDocument:
     """Convert one validated parse into hybrid-miner's SemanticDocument.
 
     Raises MinerAdapterError when the result uses something the miner
-    contract cannot express.
+    contract cannot express. With ``skipped_rules``, a universal rule the
+    miner rule contract cannot hold is left out instead, and its reason is
+    appended to that list; the document is still refused when nothing else
+    is left in it.
     """
 
     try:
         builder = _SemanticDocumentBuilder(result)
         builder.add_entities()
+        builder.find_negated_targets()
 
         for assertion in result.extraction.assertions:
             builder.add_assertion(assertion)
 
         for rule in result.extraction.rules:
-            if rule.scope == "universal":
-                raise MinerAdapterError("Universal rules are not supported yet")
-            builder.add_specific_rule(rule)
+            if rule.scope != "universal":
+                builder.add_specific_rule(rule)
+                continue
+            try:
+                builder.add_universal_rule(rule)
+            except UnsupportedRuleError as error:
+                if skipped_rules is None:
+                    raise
+                builder.skipped.append(rule)
+                skipped_rules.append(str(error))
+
+        if builder.skipped and not (builder.assertions or builder.rules):
+            raise MinerAdapterError(
+                "Nothing is left after skipping its universal rules: "
+                + "; ".join(skipped_rules or ())
+            )
 
         builder.add_kind_facts()
         return builder.build()
@@ -77,9 +126,12 @@ class _SemanticDocumentBuilder:
     result: SemanticParseResult
     entities: list[EntityRecord] = field(default_factory=list)
     assertions: list[MinerAssertion] = field(default_factory=list)
+    rules: list[MinerRule] = field(default_factory=list)
     entity_types: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     conditional_clauses: dict[tuple, str] = field(default_factory=dict)
+    skipped: list[SemanticRule] = field(default_factory=list)
+    negated: set[str] = field(default_factory=set)
 
     def _span(self, quote: SourceQuote) -> SourceSpan:
         """Convert a quote into a character span of the source text."""
@@ -120,6 +172,19 @@ class _SemanticDocumentBuilder:
 
             self.entity_types[entity.id] = entity.entity_type
 
+    def find_negated_targets(self) -> None:
+        """Remember every entity a standalone ``Negated`` fact says did not hold."""
+
+        for assertion in self.result.extraction.assertions:
+            if assertion.predicate != _NEGATED:
+                continue
+            if assertion.polarity == "negative":
+                raise MinerAdapterError(
+                    "Negated with negative polarity is a double negation; "
+                    "state the negation once"
+                )
+            self.negated.update(argument.entity_id for argument in assertion.arguments)
+
     def add_fact(
         self,
         predicate: str,
@@ -128,6 +193,8 @@ class _SemanticDocumentBuilder:
         *,
         relation: str | None = None,
         conditional_on: str | None = None,
+        polarity: str = "positive",
+        modality: str = "none",
     ) -> None:
         """Add one miner fact that inherits the evidence of a parser assertion."""
 
@@ -139,6 +206,8 @@ class _SemanticDocumentBuilder:
                 status=_STATUS,
                 factuality=source.factuality,
                 conditional_on=conditional_on,
+                polarity=polarity,
+                modality=modality,
                 confidence=source.confidence,
                 source_spans=tuple(self._span(quote) for quote in source.evidence),
                 alternatives=tuple(dict.fromkeys(source.alternatives)),
@@ -155,16 +224,18 @@ class _SemanticDocumentBuilder:
             self.add_evaluation(assertion, conditional_on=conditional_on)
             return
 
-        if assertion.polarity == "negative":
-            raise MinerAdapterError(
-                f"Negated {assertion.predicate} has no encoding in the miner contract"
-            )
+        arguments = [argument.entity_id for argument in assertion.arguments]
+        polarity = assertion.polarity
+        if assertion.predicate in _EXISTENCE and self.negated.issuperset(arguments):
+            polarity = "negative"
 
         self.add_fact(
             assertion.predicate,
-            [argument.entity_id for argument in assertion.arguments],
+            arguments,
             assertion,
             conditional_on=conditional_on,
+            polarity=polarity,
+            modality=assertion.modality,
         )
 
     def add_evaluation(
@@ -179,6 +250,8 @@ class _SemanticDocumentBuilder:
             assertion,
             relation=assertion.relation,
             conditional_on=conditional_on,
+            polarity=assertion.polarity,
+            modality=assertion.modality,
         )
 
         for argument in assertion.arguments:
@@ -198,18 +271,6 @@ class _SemanticDocumentBuilder:
                     relation=f"role_{argument.role}",
                     conditional_on=conditional_on,
                 )
-
-        if assertion.polarity == "negative":
-            self.add_fact("Negated", [event], assertion, conditional_on=conditional_on)
-
-        if assertion.modality != "none":
-            self.add_fact(
-                _PROVISIONAL,
-                [event],
-                assertion,
-                relation=assertion.modality,
-                conditional_on=conditional_on,
-            )
 
     def add_specific_rule(self, rule: SemanticRule) -> None:
         """Add a conditional Clause and associate its consequents with it.
@@ -267,12 +328,106 @@ class _SemanticDocumentBuilder:
         for part in rule.consequents:
             self.add_assertion(part, conditional_on=clause)
 
+    def add_universal_rule(self, rule: SemanticRule) -> None:
+        """Add one universal rule as a miner SemanticRule.
+
+        Rule variables keep their IDs and types. Each antecedent and
+        consequent becomes one RuleLiteral that keeps its polarity.
+        """
+
+        variable_types = {
+            variable.id: variable.entity_type for variable in rule.variables
+        }
+        # Build both sides first: a refused rule must not use up a rule ID.
+        antecedents = tuple(
+            self._rule_literal(part, variable_types) for part in rule.antecedents
+        )
+        consequents = tuple(
+            self._rule_literal(part, variable_types) for part in rule.consequents
+        )
+        self.rules.append(
+            MinerRule(
+                id=self._next_rule_id(),
+                status=_STATUS,
+                variables=tuple(
+                    RuleVariable(id=variable.id, type=variable.entity_type)
+                    for variable in rule.variables
+                ),
+                antecedents=antecedents,
+                consequents=consequents,
+                source_spans=tuple(self._span(quote) for quote in rule.evidence),
+            )
+        )
+
+    def _next_rule_id(self) -> str:
+        """Return the next document-local rule ID."""
+
+        number = self.counters.get("rule", 0)
+        self.counters["rule"] = number + 1
+        return f"rule-{number}"
+
+    def _rule_literal(
+        self, part: SemanticAssertion, variable_types: dict[str, str]
+    ) -> RuleLiteral:
+        """Convert one universal-rule part into a RuleLiteral.
+
+        A catalog predicate keeps its name and argument order. An Evaluation
+        becomes ``ProvisionalRelation`` named by its relation, with its
+        participants in role order. Negation is the literal's polarity; the
+        miner contract has no modality, so a modal part is rejected.
+        """
+
+        if part.modality != "none":
+            raise UnsupportedRuleError(
+                f"{part.modality} in a universal rule has no encoding "
+                "in the miner contract"
+            )
+
+        identifiers = [argument.entity_id for argument in part.arguments]
+        argument_types = []
+        for identifier in identifiers:
+            entity_type = variable_types.get(identifier) or self.entity_types.get(
+                identifier
+            )
+            if entity_type is None:
+                raise MinerAdapterError(
+                    f"Rule argument {identifier!r} is not a declared entity or variable"
+                )
+            argument_types.append(entity_type)
+
+        if part.predicate == "Evaluation":
+            if not identifiers:
+                raise UnsupportedRuleError(
+                    f"Evaluation {part.relation!r} without participants "
+                    "cannot be a universal rule literal"
+                )
+            predicate, relation = _PROVISIONAL, part.relation
+        else:
+            predicate, relation = part.predicate, None
+
+        return RuleLiteral(
+            predicate=predicate,
+            arguments=tuple(identifiers),
+            argument_types=tuple(argument_types),
+            status=_STATUS,
+            polarity=part.polarity,
+            confidence=part.confidence,
+            source_spans=tuple(self._span(quote) for quote in part.evidence),
+            alternatives=tuple(dict.fromkeys(part.alternatives)),
+            provisional_relation_id=relation,
+        )
+
     def add_kind_facts(self) -> None:
         """Add one kind fact per entity that has a kind and is used by a fact."""
 
         extraction = self.result.extraction
-        parts = [part for rule in extraction.rules for part in rule.antecedents]
-        parts += [part for rule in extraction.rules for part in rule.consequents]
+        rules = [
+            rule
+            for rule in extraction.rules
+            if not any(rule is skipped for skipped in self.skipped)
+        ]
+        parts = [part for rule in rules for part in rule.antecedents]
+        parts += [part for rule in rules for part in rule.consequents]
 
         confidences: dict[str, list[float]] = {}
         for assertion in [*extraction.assertions, *parts]:
@@ -296,6 +451,7 @@ class _SemanticDocumentBuilder:
                     argument_types=(entity.entity_type,),
                     status=_STATUS,
                     factuality=None,
+                    polarity="negative" if entity.id in self.negated else "positive",
                     confidence=min(confidences[entity.id]),
                     source_spans=(self._span(entity.mention),),
                     provisional_relation_id=f"kind_{entity.kind}",
@@ -321,4 +477,5 @@ class _SemanticDocumentBuilder:
             ),
             entities=tuple(self.entities),
             assertions=tuple(self.assertions),
+            rules=tuple(self.rules),
         )

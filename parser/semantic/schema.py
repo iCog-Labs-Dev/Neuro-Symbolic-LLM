@@ -18,7 +18,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SEMANTIC_CONTRACT_VERSION: Final = "2.0.0"
+SEMANTIC_CONTRACT_VERSION: Final = "1.0.0"
 
 _SNAKE_CASE = r"^[a-z][a-z0-9_]*$"
 _VARIABLE = r"^\$[a-z][a-z0-9_]*$"
@@ -391,6 +391,7 @@ class SemanticRepair(SemanticSchemaModel):
         "pronoun_in_rule",
         "unresolved_pronoun",
         "rule_duplicate",
+        "quote_case",
     ]
     detail: str = Field(pattern=_NOT_BLANK)
 
@@ -419,7 +420,7 @@ class SemanticParseResult(SemanticSchemaModel):
     Validation guarantees that every quote resolves inside the source text.
     """
 
-    contract_version: Literal["2.0.0"] = SEMANTIC_CONTRACT_VERSION
+    contract_version: Literal["1.0.0"] = SEMANTIC_CONTRACT_VERSION
     document: SourceDocument
     provenance: SemanticParseProvenance
     extraction: SemanticExtraction

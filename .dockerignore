@@ -12,6 +12,7 @@ data
 models
 checkpoints
 logs
+runs
 .env
 .env.local
 .DS_Store

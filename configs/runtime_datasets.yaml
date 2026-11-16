@@ -105,7 +105,7 @@ datasets:
     validation_split: validation
     test_split: test
     text_field: text
-    stories_per_task: 25
+    stories_per_task: 500
     shuffle_train: true
 
   - name: unfair_tos

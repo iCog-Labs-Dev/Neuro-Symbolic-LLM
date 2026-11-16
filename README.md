@@ -1,35 +1,167 @@
 # Neuro-Symbolic LLM
 
-The Stage A benchmark compares A1, A2 and A3 residual training on a frozen LLM.
+This project explores a neuro-symbolic architecture that combines **pretrained language models, predictive coding (PC), and symbolic reasoning**. Rather than training an entire language model using predictive coding from scratch, the approach builds on an existing pretrained LLM whose parameters remain frozen, introducing trainable residual components that operate on its intermediate hidden-state representations.
 
-## Run on JupyterHub
+The architecture uses hidden-state interception to connect the frozen language model with a trainable adaptation layer. This layer explores different approaches to residual learning, progressing from ordinary low-rank adapters and PC-inspired objectives to true predictive-coding inference and symbolic integration. The symbolic component connects neural representations to structured knowledge through a semantic parsing and pattern-mining pipeline, with retrieved templates stored in MORK (Hyperon) and made available during runtime.
 
-Upload [run_benchmark_jupyterhub.ipynb](run_benchmark_jupyterhub.ipynb), select a
-Python 3.11 or 3.12 kernel on an NVIDIA GPU server, and run the cells in order.
-The notebook clones `benchmark-final` or a selected PR, installs dependencies
-on JupyterHub, trains, evaluates, displays internal/external metric tables and
-all plots, and creates a downloadable results ZIP.
+The overall objective is to investigate whether predictive-coding-based adaptation and explicit symbolic knowledge integration can improve representation organization, continual learning, and the connection between neural computation and symbolic reasoning, while retaining the capabilities of the pretrained language model.
 
-## One benchmark file, one test file
+## Architecture
 
-With dependencies installed in your execution environment:
+![Neuro-Symbolic LLM Architecture](docs/neuro_symbolic_architecture.png)
 
-```sh
-python benchmark/run_benchmark.py --profile headline
-python -m pytest tests/benchmark/test_benchmark.py -q
+## Components
+
+### Frozen LLM — Base Model
+
+Provides frozen GPT-2/Pythia execution, hidden-state caching, and interception hooks for injecting trainable residual modifications.
+
+[See more](frozenllm/README.md)
+
+### A1 — Ordinary Residual Adapter
+
+Implements a low-rank hidden-state residual baseline trained using ordinary backpropagation, without modifying the pretrained model parameters.
+
+[See more](stages/stage_A/a1/README.md)
+
+### A2 — PC-Inspired Residual Objectives
+
+Introduces predictive-coding-inspired auxiliary objectives, including hidden-state prediction, contrastive future prediction, and stability losses.
+
+[See more](stages/stage_A/a2/README_A2.md)
+
+### A3 — Predictive-Coding Residual
+
+Introduces iterative latent-state inference and energy minimization using FabricPC to learn residual corrections.
+
+[See more](stages/stage_A/a3/README_A3.md)
+
+### A4 — Symbolic Head
+
+Connects neural representations with structured symbolic knowledge through template retrieval and symbolic attention, backed by MORK.
+[See more](stages/stage_A/a4/README.md)
+
+### Semantic Parser
+
+Provides teacher–student semantic extraction, validation, MeTTa representation, and integration with the hybrid miner for symbolic knowledge preparation.
+
+[See more](parser/README.md)
+
+## Installation
+
+### Requirements
+
+- Python 3.11 or newer (Python 3.12 recommended).
+- NVIDIA GPU and compatible CUDA/JAX environment for GPU experiments.
+
+### Environment Setup
+
+Using Conda:
+
+```bash
+conda create -n neuro-symbolic-llm python=3.12 -y
+conda activate neuro-symbolic-llm
 ```
 
-[benchmark/run_benchmark.py](benchmark/run_benchmark.py) performs planning,
-training, evaluation and visualization in one command. The browser report is
-generated at `report_and_visualization/index.html`; the notebook displays
-the tables and images inline. To regenerate visuals without retraining, use:
+Alternatively, using a Python virtual environment:
 
-```sh
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+### Install Project Dependencies
+
+Install the project and its declared dependencies:
+
+```bash
+python -m pip install --upgrade pip
+pip install -e .
+```
+
+## Local Models — Ollama
+
+The semantic parser supports local LLMs through Ollama.
+
+For Ollama installation, server startup, model downloads, and backend configuration, see the [Semantic Parser documentation](parser/README.md).
+
+## Running Experiments
+
+Run commands from the repository root after activating the environment.
+
+### 1. Offline Preparation — A4 Symbolic Pipeline
+
+Run the end-to-end offline preparation workflow:
+
+```bash
+bash scripts/run_offline_pipeline.sh
+```
+
+For pipeline configuration, model setup, and detailed execution instructions, see the [Semantic Parser documentation](parser/README.md).
+
+### 2. Stage A Experiments
+
+Each neural adaptation stage can be executed independently.
+
+**A1 — Ordinary Residual Adapter**
+
+```bash
+python experiments/run_stage_a1.py \
+    --config configs/stage_A/a1_lora_baseline.yaml
+```
+
+**A2 — PC-Inspired Objectives**
+
+```bash
+python experiments/run_stage_a2.py \
+    --config configs/stage_A/a2_pc_inspired.yaml
+```
+
+**A3 — Predictive-Coding Residual**
+
+```bash
+python experiments/run_stage_a3.py \
+    --config configs/stage_A/a3_hybrid_pc.yaml
+```
+
+To compare different inference-step counts:
+
+```bash
+python experiments/run_stage_a3.py --K 1 2 4 8
+```
+
+**A4 — Symbolic Head**
+
+```bash
+python experiments/run_stage_a4.py
+```
+
+### 3. A1/A2/A3 Benchmark Metrics and Visualizations
+
+Train and evaluate all three methods, then generate internal and external
+metric tables, comparison plots, individual method plots and a final summary:
+
+```bash
+python benchmark/run_benchmark.py --profile headline
+```
+
+The headline profile uses real LexGLUE subsets and three seeds. Open
+`report_and_visualization/index.html` to see the comparison and all individual
+reports. To regenerate reports from saved measurements without retraining:
+
+```bash
 python benchmark/run_benchmark.py report --output-dir runs/benchmark
 ```
 
-See [benchmark metrics and evidence requirements](docs/benchmark_metrics.md)
-for profiles, measurement definitions, missing metrics and audit inputs.
-The default headline profile trains on real LexGLUE subsets with three seeds
-and the configured training epochs. Model training runs in the selected environment and requires
-model/dataset downloads and sufficient compute.
+See [benchmark metrics](docs/benchmark_metrics.md) for metric definitions,
+evidence requirements and profiles. The [JupyterHub notebook](run_benchmark_jupyterhub.ipynb)
+also runs training and displays the reports on a GPU server.
+
+## Configuration and Results
+
+- `configs/stage_A/` — Stage-specific experiment configurations.
+- `configs/parser_config/` — Semantic parser and model backend configurations.
+- `experiments/` — Experiment entry points for A1–A4.
+- `runs/` — Training outputs, checkpoints, metrics, and experiment summaries.
+
+Refer to each component's documentation for detailed configuration options, training procedures, evaluation, and implementation details.

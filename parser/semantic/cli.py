@@ -82,7 +82,7 @@ def add_document_export_arguments(arguments: argparse.ArgumentParser) -> None:
     arguments.add_argument(
         "--progress-every",
         type=int,
-        default=100,
+        default=5,
         help="checkpoint/report interval (default: 100 records)",
     )
     arguments.add_argument(
@@ -608,7 +608,7 @@ def _run_e2e(arguments: argparse.Namespace) -> int:
                     require_structured_output=False,
                     corpus_id=None,
                     resume=arguments.resume,
-                    progress_every=100,
+                    progress_every=5,
                 )
             )
             if status == 1:

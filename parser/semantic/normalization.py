@@ -5,6 +5,10 @@ before it is validated as a SemanticExtraction. It changes letter case,
 spacing, and punctuation of names, never their meaning: quotations stay
 exact, catalog names only lose surrounding whitespace, and synonyms are
 merged only through explicit aliases.
+
+restore_quote_case is separate: a quote that differs from the source only
+by letter case ("students" for "Students") gets the source's own spelling
+back, and every such change is returned so the parser can record it.
 """
 
 from __future__ import annotations
@@ -20,6 +24,61 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 class SemanticNormalizationError(ValueError):
     """Raised when semantic values cannot be normalized safely."""
+
+
+def restore_quote_case(
+    payload: dict[str, Any], source_text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Give quotes that differ from the source only by letter case its spelling.
+
+    Exact quotes are left alone. Returns the repaired copy and one note per
+    changed quote; other mismatches are left for validation to reject.
+    """
+    lowered = source_text.lower()
+    if len(lowered) != len(source_text):  # case mapping moved the offsets
+        return payload, []
+    repaired = deepcopy(payload)
+    changes: list[str] = []
+
+    def starts(haystack: str, needle: str) -> list[int]:
+        found, start = [], haystack.find(needle)
+        while start != -1:
+            found.append(start)
+            start = haystack.find(needle, start + 1)
+        return found
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        text, occurrence = value.get("text"), value.get("occurrence", 0)
+        if (
+            isinstance(text, str)
+            and text
+            and set(value) <= {"text", "occurrence"}
+            and isinstance(occurrence, int)
+            and not isinstance(occurrence, bool)
+            and occurrence >= 0
+        ):
+            if occurrence < len(starts(source_text, text)):
+                return
+            candidates = starts(lowered, text.lower())
+            if len(text.lower()) != len(text) or occurrence >= len(candidates):
+                return
+            start = candidates[occurrence]
+            exact = source_text[start : start + len(text)]
+            value["text"] = exact
+            value["occurrence"] = starts(source_text, exact).index(start)
+            changes.append(f"quote {text!r} restored to source spelling {exact!r}")
+            return
+        for item in value.values():
+            visit(item)
+
+    visit(repaired)
+    return repaired, changes
 
 
 def normalize_extraction_payload(

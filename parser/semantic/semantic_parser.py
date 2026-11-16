@@ -39,6 +39,7 @@ from parser.semantic.metta_renderer import (
 from parser.semantic.normalization import (
     SemanticNormalizationError,
     normalize_extraction_payload,
+    restore_quote_case,
 )
 from parser.semantic.output_cleanup import clean_model_output
 from parser.semantic.schema import (
@@ -622,7 +623,9 @@ class _BaseSemanticParser:
             repairs.extend(applied)
         if not repairs:
             return result
-        provenance = result.provenance.model_copy(update={"repairs": repairs})
+        provenance = result.provenance.model_copy(
+            update={"repairs": [*result.provenance.repairs, *repairs]}
+        )
         return result.model_copy(update={"provenance": provenance})
 
     @staticmethod
@@ -884,6 +887,9 @@ class _BaseSemanticParser:
                     candidate,
                     aliases=aliases,
                 )
+                normalized, quote_changes = restore_quote_case(
+                    normalized, document.source_text
+                )
 
                 extraction = SemanticExtraction.model_validate(normalized)
 
@@ -896,6 +902,10 @@ class _BaseSemanticParser:
                         parser_version=PARSER_VERSION,
                         prompt_version="|".join(prompt_versions),
                         ontology_versions=list(catalog.versions),
+                        repairs=[
+                            SemanticRepair(kind="quote_case", detail=change)
+                            for change in quote_changes
+                        ],
                     ),
                     extraction=extraction,
                 )
@@ -1129,12 +1139,14 @@ class DistilledSemanticParser(_BaseSemanticParser):
             raise SemanticParseError("Student extraction must be a JSON object")
 
         try:
-            extraction = SemanticExtraction.model_validate(
+            normalized, quote_changes = restore_quote_case(
                 normalize_extraction_payload(
                     payload,
                     aliases=aliases,
-                )
+                ),
+                document.source_text,
             )
+            extraction = SemanticExtraction.model_validate(normalized)
 
             result = SemanticParseResult(
                 document=document,
@@ -1145,6 +1157,10 @@ class DistilledSemanticParser(_BaseSemanticParser):
                     parser_version=PARSER_VERSION,
                     prompt_version=prompt.version,
                     ontology_versions=list(catalog.versions),
+                    repairs=[
+                        SemanticRepair(kind="quote_case", detail=change)
+                        for change in quote_changes
+                    ],
                 ),
                 extraction=extraction,
             )

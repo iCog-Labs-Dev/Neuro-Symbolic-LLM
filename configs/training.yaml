@@ -15,7 +15,7 @@ model:
   seed: 42
 
 training:
-  epochs: 3
+  epochs: 5
   reset_optimizer: true
   output_dir: runs
   jit: true
