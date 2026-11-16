@@ -95,7 +95,6 @@ where = ["."]
 exclude = ["data*", "tests*", "docs*", "build*", "*.egg-info"]
 include = [
     "fabricpc_ext*",
-    "nac*",
     "tier2_mork*",
     "parser*",
     "embedder*",
@@ -152,7 +151,6 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = [
     "fabricpc_ext",
-    "nac",
     "tier2_mork",
     "parser",
     "frozenllm",

@@ -292,6 +292,21 @@ def semantic_key(record: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def source_fingerprint_key(key: tuple[str, str]) -> str:
+    """Serialize a source identity safely for JSON manifest keys."""
+    return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
+
+
+def source_fingerprints(
+    indexed_records: dict[tuple[str, str], str],
+) -> dict[str, str]:
+    """Fingerprint source content independently of document identity."""
+    return {
+        source_fingerprint_key(key): hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        for key, raw in indexed_records.items()
+    }
+
+
 # ---------------------------------------------------------------------
 # CLI execution
 # ---------------------------------------------------------------------
@@ -504,13 +519,27 @@ def prepare_dataset(
 
             old_keys = set(old_index)
             new_keys = set(new_index)
+            changed_keys = {
+                key
+                for key in old_keys.intersection(new_keys)
+                if old_index[key] != new_index[key]
+            }
 
-            incremental = old_keys.issubset(new_keys) and len(new_keys) > len(old_keys)
+            incremental = (
+                old_keys.issubset(new_keys)
+                and len(new_keys) > len(old_keys)
+                and not changed_keys
+            )
 
             if incremental:
                 print(f"Existing records: {len(old_keys)}")
                 print(f"New records: {len(new_keys - old_keys)}")
-                print("Existing source records are preserved.")
+                print("Existing source records are unchanged.")
+            elif changed_keys:
+                print(
+                    f"Changed existing source records: {len(changed_keys)}; "
+                    "teacher extraction will be rebuilt."
+                )
 
         if prepared_path.exists():
             archive_paths(
@@ -639,16 +668,18 @@ def teacher_fingerprint(args: argparse.Namespace) -> str:
 def write_teacher_manifest(
     path: Path,
     run_dir: Path,
-    source_keys: set[tuple[str, str]],
+    source_index: dict[tuple[str, str], str],
     parser_fingerprint: str,
 ) -> None:
+    """Record teacher artifacts and the exact source content they represent."""
     paths = teacher_paths(run_dir)
 
     write_manifest(
         path,
         {
             "parser_fingerprint": parser_fingerprint,
-            "source_keys": sorted([list(key) for key in source_keys]),
+            "source_keys": sorted([list(key) for key in source_index]),
+            "source_fingerprints": source_fingerprints(source_index),
             "artifacts": {name: file_sha256(file) for name, file in paths.items()},
             "counts": {name: count_jsonl(file) for name, file in paths.items()},
             "updated_at": timestamp(),
@@ -813,6 +844,7 @@ def prepare_teacher(
         raise ValueError("No source records available for teacher extraction.")
 
     expected_fingerprint = teacher_fingerprint(args)
+    current_source_fingerprints = source_fingerprints(current_index)
     previous = load_manifest(manifest_path)
 
     if run_dir.exists() and not args.force:
@@ -822,12 +854,27 @@ def prepare_teacher(
         )
 
         if valid:
+            previous_source_fingerprints = (
+                previous.get("source_fingerprints") if previous is not None else None
+            )
+            source_content_compatible = isinstance(
+                previous_source_fingerprints, dict
+            ) and all(
+                previous_source_fingerprints.get(source_fingerprint_key(key))
+                == current_source_fingerprints.get(source_fingerprint_key(key))
+                for key in old_keys
+            )
             manifest_compatible = (
                 previous is not None
                 and previous.get("parser_fingerprint") == expected_fingerprint
+                and source_content_compatible
             )
 
-            if old_keys == current_keys and (manifest_compatible or previous is None):
+            if (
+                old_keys == current_keys
+                and manifest_compatible
+                and previous_source_fingerprints == current_source_fingerprints
+            ):
                 print(
                     f"Reusing completed teacher extraction: "
                     f"{len(old_keys)} source records",
@@ -837,7 +884,7 @@ def prepare_teacher(
                 write_teacher_manifest(
                     manifest_path,
                     run_dir,
-                    current_keys,
+                    current_index,
                     expected_fingerprint,
                 )
 
@@ -946,7 +993,7 @@ def prepare_teacher(
                 write_teacher_manifest(
                     manifest_path,
                     run_dir,
-                    current_keys,
+                    current_index,
                     expected_fingerprint,
                 )
 
@@ -1306,6 +1353,7 @@ def run_student_inference(
     )
 
     current_keys = set(source_index)
+    current_source_fingerprints = source_fingerprints(source_index)
     model_hash = checkpoint_fingerprint(model_dir)
 
     previous = load_manifest(manifest_path)
@@ -1315,15 +1363,25 @@ def run_student_inference(
     )
 
     previous_keys = set()
+    previous_source_fingerprints = None
 
     if previous is not None:
         previous_keys = {tuple(key) for key in previous.get("source_keys", [])}
+        previous_source_fingerprints = previous.get("source_fingerprints")
+
+    previous_sources_unchanged = isinstance(previous_source_fingerprints, dict) and all(
+        previous_source_fingerprints.get(source_fingerprint_key(key))
+        == current_source_fingerprints.get(source_fingerprint_key(key))
+        for key in previous_keys
+    )
 
     if (
         outputs_valid
         and previous is not None
         and previous.get("model_fingerprint") == model_hash
         and previous_keys == current_keys
+        and previous_source_fingerprints == current_source_fingerprints
+        and previous.get("prepared_sha256") == file_sha256(prepared_path)
         and previous.get("parsed_sha256") == file_sha256(parsed_path)
         and previous.get("rejected_sha256") == file_sha256(rejected_path)
     ):
@@ -1339,6 +1397,7 @@ def run_student_inference(
         and previous is not None
         and previous.get("model_fingerprint") == model_hash
         and previous_keys.issubset(current_keys)
+        and previous_sources_unchanged
     )
 
     if incremental:
@@ -1414,6 +1473,7 @@ def run_student_inference(
         manifest_path,
         {
             "source_keys": sorted([list(key) for key in current_keys]),
+            "source_fingerprints": current_source_fingerprints,
             "prepared_sha256": file_sha256(prepared_path),
             "model_fingerprint": model_hash,
             "parsed_sha256": file_sha256(parsed_path),
@@ -1687,6 +1747,15 @@ def run_source(
         output_dir,
         input_path,
         resume,
+    )
+
+    # Record the exact source content represented by the completed extraction.
+    _, current_index = load_source_records(prepared_path, source_name)
+    write_teacher_manifest(
+        output_dir / "teacher_manifest.json",
+        run_dir,
+        current_index,
+        teacher_fingerprint(args),
     )
 
     # STEP 6: Full-dataset student inference.
