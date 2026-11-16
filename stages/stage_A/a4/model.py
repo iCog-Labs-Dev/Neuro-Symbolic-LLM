@@ -9,8 +9,8 @@ import jax
 
 from frozenllm.substrate import ForwardResult
 from residual.symbolic_head.jax_head import HeadParams, SymbolicHead
-from stages.stage_A.A3_model import A3Model
-from stages.stage_A.a3_tail import residual_modify
+from stages.stage_A.a3 import A3Model
+from stages.stage_A.a3.a3_tail import residual_modify
 
 
 class A4Model:
@@ -33,10 +33,8 @@ class A4Model:
         *,
         symbolic_enabled: bool = True,
     ) -> ForwardResult:
-        """Apply the residual and symbolic head at caller-supplied latents.
+        """Apply the residual and symbolic head at caller-supplied latents."""
 
-        symbolic_enabled is static under JIT; False bypasses retrieval.
-        """
         result, _ = self.forward_with_states_at_latents(
             continuous_params,
             symbolic_params,

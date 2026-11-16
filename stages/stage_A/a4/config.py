@@ -1,3 +1,4 @@
+
 """Stage A4 configuration."""
 
 from __future__ import annotations
@@ -9,10 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-TRAINING_STATE_SOURCE = "frozen-a3-prediction-v1"
-
 if TYPE_CHECKING:
     from stages.stage_base import TrainingConfig
+
+TRAINING_STATE_SOURCE = "frozen-a3-prediction-v1"
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class A4Config:
     def __post_init__(self) -> None:
         for name in ("key_weight", "value_weight"):
             value = getattr(self, name)
+
             if (
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
@@ -34,8 +36,10 @@ class A4Config:
                 or value < 0
             ):
                 raise ValueError(f"{name} must be finite and nonnegative")
+
         for name in ("top_m", "minimum_templates"):
             value = getattr(self, name)
+
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
 
@@ -59,43 +63,94 @@ class A4Config:
 
 
 def load_config(path: Path) -> A4Config:
-    """Load A4 settings and resolve the inherited residual configuration."""
+    """Load A4 settings and inherit shared training configuration."""
+
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
     sections = {"residual_config", "training", "objective", "retrieval"}
+
     if not isinstance(raw, dict) or set(raw) != sections:
-        raise ValueError(f"A4 configuration requires sections {sorted(sections)}")
-    for name, fields in (
+        raise ValueError(
+            f"A4 configuration requires sections {sorted(sections)}"
+        )
+
+    for name, allowed in (
         ("objective", {"key_weight", "value_weight"}),
         ("retrieval", {"top_m", "minimum_templates"}),
+        ("training", {"learning_rate"}),
     ):
-        if not isinstance(raw[name], dict) or set(raw[name]) - fields:
-            raise ValueError(f"Invalid A4 {name} fields")
-    if not isinstance(raw["training"], dict) or not isinstance(
-        raw["residual_config"], str
-    ):
-        raise ValueError("A4 training must be a mapping and residual_config a path")
-    training_fields = {
-        "model",
-        "seq_len",
-        "batch_size",
-        "epochs",
-        "learning_rate",
-        "eval_batches",
-        "log_every",
-        "seed",
-        "output_dir",
-        "jit",
-    }
-    if set(raw["training"]) - training_fields:
-        raise ValueError("Invalid A4 training fields")
-    residual_path = (path.resolve().parent / raw["residual_config"]).resolve()
+        section = raw[name]
+
+        if not isinstance(section, dict) or set(section) - allowed:
+            raise ValueError(f"Invalid A4 {name} configuration")
+
+    if not isinstance(raw["residual_config"], str):
+        raise ValueError("residual_config must be a path")
+
+    residual_path = (
+        path.resolve().parent / raw["residual_config"]
+    ).resolve()
+
     if not residual_path.is_file():
         raise ValueError(f"Residual configuration not found: {residual_path}")
+
     from stages.stage_base import TrainingConfig
+
+    repo_root = Path(__file__).resolve().parents[3]
+    shared_path = repo_root / "configs" / "training.yaml"
+
+    if not shared_path.is_file():
+        raise FileNotFoundError(
+            f"Shared training configuration not found: {shared_path}"
+        )
+
+    shared = yaml.safe_load(
+        shared_path.read_text(encoding="utf-8")
+    ) or {}
+
+    if not isinstance(shared, dict):
+        raise ValueError("Shared training configuration must be a mapping")
+
+    model = shared.get("model", {})
+    training = shared.get("training", {})
+    evaluation = shared.get("evaluation", {})
+
+    for name, section in (
+        ("model", model),
+        ("training", training),
+        ("evaluation", evaluation),
+    ):
+        if not isinstance(section, dict):
+            raise ValueError(
+                f"Shared {name} configuration must be a mapping"
+            )
+
+    training_config = {
+        "model": model.get("name", "gpt2"),
+        "seq_len": model.get("seq_len", 128),
+        "batch_size": model.get("batch_size", 8),
+        "seed": model.get("seed", 0),
+        **training,
+        "eval_batches": evaluation.get("validation_batches", 8),
+        "test_batches": evaluation.get("test_batches", 8),
+    }
+
+    # A4-specific learning rate overrides the shared default.
+    training_config["learning_rate"] = raw["training"].get(
+        "learning_rate",
+        training.get("learning_rate", 1.0e-4),
+    )
 
     return A4Config(
         residual_config=residual_path,
-        training=TrainingConfig.from_dict(raw["training"]),
+        training=TrainingConfig.from_dict(training_config),
         **raw["objective"],
         **raw["retrieval"],
     )
+
+
+__all__ = [
+    "A4Config",
+    "TRAINING_STATE_SOURCE",
+    "load_config",
+]

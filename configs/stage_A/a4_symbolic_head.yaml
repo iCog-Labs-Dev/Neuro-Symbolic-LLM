@@ -1,4 +1,5 @@
-residual_config: a3_true_pc.yaml
+
+residual_config: a3_hybrid_pc.yaml
 
 objective:
   key_weight: 1.0
