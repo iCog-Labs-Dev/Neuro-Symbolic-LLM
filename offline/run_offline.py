@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -316,21 +317,69 @@ def run_cli(
     command: list[str],
     *,
     accepted_returncodes: tuple[int, ...] = (0,),
+    progress_total: int | None = None,
 ) -> int:
-    """Run a project CLI and stream its output directly."""
+    """Run a project CLI and optionally display teacher extraction progress."""
 
     print("\n$ " + " ".join(command), flush=True)
 
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=False,
+    progress_pattern = re.compile(
+        r"Processed (\d+) records \| accepted=(\d+) rejected=(\d+)"
     )
 
-    if result.returncode not in accepted_returncodes:
-        raise RuntimeError(f"Command failed with exit code {result.returncode}.")
+    process = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
 
-    return result.returncode
+    assert process.stdout is not None
+    last_progress = None
+
+    for line in process.stdout:
+        match = progress_pattern.search(line)
+
+        if match is not None and progress_total is not None:
+            processed = int(match.group(1))
+            accepted = int(match.group(2))
+            rejected = int(match.group(3))
+            last_progress = (processed, accepted, rejected)
+
+            percentage = (
+                min(processed / progress_total * 100.0, 100.0)
+                if progress_total > 0
+                else 100.0
+            )
+
+            print(
+                f"\rTeacher extraction: {processed}/{progress_total} "
+                f"({percentage:.1f}%) | "
+                f"Accepted: {accepted} | Rejected: {rejected}",
+                end="\n" if processed >= progress_total else "",
+                flush=True,
+            )
+        else:
+            print(line, end="", flush=True)
+
+    returncode = process.wait()
+
+    if progress_total is not None and last_progress is not None:
+        processed, accepted, rejected = last_progress
+        if processed < progress_total and returncode in accepted_returncodes:
+            percentage = processed / progress_total * 100.0 if progress_total else 100.0
+            print(
+                f"\nTeacher extraction last reported: {processed}/{progress_total} "
+                f"({percentage:.1f}%) | Accepted: {accepted} | Rejected: {rejected}",
+                flush=True,
+            )
+
+    if returncode not in accepted_returncodes:
+        raise RuntimeError(f"Command failed with exit code {returncode}.")
+
+    return returncode
 
 
 def semantic_command(args: argparse.Namespace) -> list[str]:
@@ -441,7 +490,13 @@ def prepare_dataset(
     config_id = dataset_config_fingerprint(config, source)
     previous = load_manifest(manifest_path)
 
-    config_matches = previous is None or previous.get("config_fingerprint") == config_id
+    # Without a manifest, the existing dataset cannot be proven compatible.
+    config_matches = (
+        previous is not None
+        and previous.get("config_fingerprint") == config_id
+        and previous.get("source_sha256") == file_sha256(prepared_path)
+        and previous.get("records") == existing_count
+    )
 
     if (
         not args.force
@@ -648,20 +703,39 @@ def validate_teacher_artifacts(
         return False, set()
 
 
+def fingerprint_files(paths: list[Path]) -> dict[str, str]:
+    """Hash existing files using repository-relative names."""
+    return {
+        str(path.relative_to(REPO_ROOT)): file_sha256(path)
+        for path in sorted(set(paths))
+        if path.is_file()
+    }
+
+
+def files_under(directory: Path, suffixes: tuple[str, ...]) -> list[Path]:
+    """Return source/config files under a directory in stable order."""
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in suffixes
+    )
+
+
 def teacher_fingerprint(args: argparse.Namespace) -> str:
+    """Invalidate teacher results when parser code/configuration changes."""
     paths = [
         resolve_path(args.model_config),
-        REPO_ROOT / "parser/semantic/catalog_prompt.py",
+        resolve_path(args.ontology_bundle),
+        *files_under(REPO_ROOT / "parser/semantic", (".py", ".yaml", ".yml")),
+        *files_under(REPO_ROOT / "parser/ontology", (".py", ".yaml", ".yml")),
         REPO_ROOT / "configs/parser_config/general_prompt.yaml",
         REPO_ROOT / "configs/parser_config/discourse_prompt.yaml",
         REPO_ROOT / "configs/parser_config/parser_prompt.yaml",
-        *sorted((REPO_ROOT / "parser/ontology").rglob("*.yaml")),
     ]
-
-    values = {str(path.relative_to(REPO_ROOT)): file_sha256(path) for path in paths}
-
+    values = fingerprint_files(paths)
     values["profile"] = args.profile
-
     return fingerprint(values)
 
 
@@ -1126,6 +1200,14 @@ def student_training_fingerprint(
                 REPO_ROOT / "parser/student/student_prompt.py"
             ),
             "ontology_sha256": file_sha256(resolve_path(args.ontology_bundle)),
+            "student_code": fingerprint_files(
+                files_under(REPO_ROOT / "parser/student", (".py",))
+                + [
+                    REPO_ROOT / "parser/semantic/semantic_parser.py",
+                    REPO_ROOT / "parser/semantic/schema.py",
+                    REPO_ROOT / "parser/semantic/catalog_document_export.py",
+                ]
+            ),
         }
     )
 
@@ -1230,7 +1312,8 @@ def run_semantic_e2e(
             input_path=input_path,
             resume=resume,
             skip_training=compatible_student,
-        )
+        ),
+        progress_total=(count_jsonl(input_path) if input_path is not None else None),
     )
 
     if not validate_teacher_artifacts(
@@ -1261,6 +1344,58 @@ def run_semantic_e2e(
 # ---------------------------------------------------------------------
 # Stage 6: Full-dataset student inference
 # ---------------------------------------------------------------------
+
+
+def validate_inference_coverage(
+    parsed_path: Path,
+    rejected_path: Path,
+    expected_keys: set[tuple[str, str]],
+) -> tuple[int, int]:
+    """Require each source record to be accepted or rejected exactly once."""
+    if not valid_semantic_jsonl(parsed_path, allow_empty=True):
+        raise RuntimeError(f"Invalid student semantic output: {parsed_path}")
+    if not valid_jsonl(rejected_path, allow_empty=True):
+        raise RuntimeError(f"Invalid student rejection output: {rejected_path}")
+
+    observed: set[tuple[str, str]] = set()
+    accepted = 0
+    rejected = 0
+
+    for record in read_jsonl(parsed_path):
+        result = SemanticParseResult.model_validate(record)
+        key = (result.document.corpus_id, result.document.document_id)
+        if key in observed:
+            raise RuntimeError(f"Duplicate student inference result: {key}")
+        observed.add(key)
+        accepted += 1
+
+    for record in read_jsonl(rejected_path):
+        corpus_id = record.get("corpus_id")
+        document_id = record.get("document_id")
+        if not isinstance(corpus_id, str) or not isinstance(document_id, str):
+            raise RuntimeError("Student rejection missing corpus_id/document_id.")
+        key = (corpus_id, document_id)
+        if key in observed:
+            raise RuntimeError(
+                f"Record appears in accepted and rejected outputs: {key}"
+            )
+        observed.add(key)
+        rejected += 1
+
+    missing = expected_keys - observed
+    unexpected = observed - expected_keys
+    if missing or unexpected:
+        details = {
+            "missing_count": len(missing),
+            "unexpected_count": len(unexpected),
+            "missing_examples": sorted(missing)[:5],
+            "unexpected_examples": sorted(unexpected)[:5],
+        }
+        raise RuntimeError(
+            "Student inference coverage failed: "
+            + json.dumps(details, ensure_ascii=False)
+        )
+    return accepted, rejected
 
 
 def infer_records(
@@ -1355,7 +1490,6 @@ def run_student_inference(
     current_keys = set(source_index)
     current_source_fingerprints = source_fingerprints(source_index)
     model_hash = checkpoint_fingerprint(model_dir)
-
     previous = load_manifest(manifest_path)
 
     outputs_valid = valid_semantic_jsonl(parsed_path, allow_empty=True) and valid_jsonl(
@@ -1385,9 +1519,12 @@ def run_student_inference(
         and previous.get("parsed_sha256") == file_sha256(parsed_path)
         and previous.get("rejected_sha256") == file_sha256(rejected_path)
     ):
+        accepted, rejected = validate_inference_coverage(
+            parsed_path, rejected_path, current_keys
+        )
         print(
             f"Reusing completed student inference: "
-            f"{count_jsonl(parsed_path)} results",
+            f"{accepted} accepted | {rejected} rejected",
             flush=True,
         )
         return parsed_path
@@ -1422,6 +1559,23 @@ def run_student_inference(
         old_rejected = []
 
     if not new_keys:
+        accepted, rejected = validate_inference_coverage(
+            parsed_path, rejected_path, current_keys
+        )
+        write_manifest(
+            manifest_path,
+            {
+                "source_keys": sorted([list(key) for key in current_keys]),
+                "source_fingerprints": current_source_fingerprints,
+                "prepared_sha256": file_sha256(prepared_path),
+                "model_fingerprint": model_hash,
+                "parsed_sha256": file_sha256(parsed_path),
+                "rejected_sha256": file_sha256(rejected_path),
+                "accepted": accepted,
+                "rejected": rejected,
+                "updated_at": timestamp(),
+            },
+        )
         return parsed_path
 
     from parser.semantic.semantic_parser import DistilledSemanticParser
@@ -1466,8 +1620,9 @@ def run_student_inference(
             old_rejected + read_jsonl(new_rejected_path),
         )
 
-    if not valid_semantic_jsonl(parsed_path, allow_empty=True):
-        raise RuntimeError("Student inference produced invalid semantic documents.")
+    accepted, rejected = validate_inference_coverage(
+        parsed_path, rejected_path, current_keys
+    )
 
     write_manifest(
         manifest_path,
@@ -1478,8 +1633,8 @@ def run_student_inference(
             "model_fingerprint": model_hash,
             "parsed_sha256": file_sha256(parsed_path),
             "rejected_sha256": file_sha256(rejected_path),
-            "accepted": count_jsonl(parsed_path),
-            "rejected": count_jsonl(rejected_path),
+            "accepted": accepted,
+            "rejected": rejected,
             "updated_at": timestamp(),
         },
     )
@@ -1652,6 +1807,65 @@ def run_adapter(
 # ---------------------------------------------------------------------
 
 
+def directory_size(path: Path) -> int:
+    """Return total size in bytes for a file or directory tree."""
+    if path.is_file():
+        return path.stat().st_size
+    if not path.is_dir():
+        return 0
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+
+def format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def storage_artifacts(
+    prepared_path: Path,
+    output_dir: Path,
+    run_dir: Path,
+    parsed_path: Path,
+) -> dict[str, dict[str, Any]]:
+    paths = {
+        "prepared_dataset": prepared_path,
+        "teacher_documents": run_dir / "documents.jsonl",
+        "teacher_rejected": run_dir / "rejected.jsonl",
+        "student_pairs": run_dir / "pairs.jsonl",
+        "train_split": run_dir / "splits" / "train.jsonl",
+        "validation_split": run_dir / "splits" / "validation.jsonl",
+        "test_split": run_dir / "splits" / "test.jsonl",
+        "student_checkpoint": run_dir / "student",
+        "student_inference": parsed_path,
+        "student_rejections": output_dir / "parser_rejected.jsonl",
+        "miner_documents": output_dir / "miner_documents.jsonl",
+        "adapter_rejections": output_dir / "adapter_rejected.jsonl",
+        "recovery_archive": output_dir / "recovery",
+    }
+    return {
+        name: {
+            "path": str(path),
+            "exists": path.exists(),
+            "size_bytes": directory_size(path),
+        }
+        for name, path in paths.items()
+    }
+
+
+def print_storage_report(artifacts: dict[str, dict[str, Any]]) -> None:
+    print("\nPersistent offline artifacts:")
+    for name, details in artifacts.items():
+        status = "present" if details["exists"] else "not present"
+        print(
+            f"  {name}: {status} | {format_bytes(details['size_bytes'])} "
+            f"| {details['path']}"
+        )
+
+
 def write_summary(
     output_dir: Path,
     source_name: str,
@@ -1661,10 +1875,12 @@ def write_summary(
     adapter_accepted: int,
     adapter_rejected: int,
 ) -> dict[str, Any]:
+    artifacts = storage_artifacts(prepared_path, output_dir, run_dir, parsed_path)
     summary = {
         "source": source_name,
         "pipeline": "offline_teacher_student_to_miner_adapter",
         "updated_at": timestamp(),
+        "storage": artifacts,
         "paths": {
             "prepared_dataset": str(prepared_path),
             "teacher_documents": str(run_dir / "documents.jsonl"),
@@ -1762,8 +1978,14 @@ def run_source(
     if args.skip_parsing:
         parsed_path = output_dir / "parsed_documents.jsonl"
 
-        if not valid_semantic_jsonl(parsed_path):
+        if not valid_semantic_jsonl(parsed_path, allow_empty=True):
             raise FileNotFoundError(f"Completed inference not found: {parsed_path}")
+        _, source_index = load_source_records(prepared_path, source_name)
+        validate_inference_coverage(
+            parsed_path,
+            output_dir / "parser_rejected.jsonl",
+            set(source_index),
+        )
     else:
         parsed_path = run_student_inference(
             args,
@@ -1793,6 +2015,7 @@ def run_source(
 
     print(f"\nCompleted dataset: {source_name}")
     print(json.dumps(summary["counts"], indent=2))
+    print_storage_report(summary["storage"])
 
     return {
         "source": source_name,
@@ -1983,6 +2206,21 @@ def main() -> int:
         print(f"{name}: {value}")
 
     print(f"Summary: {summary_path}")
+    print("\nPersistent storage locations:")
+    print(f"  Prepared datasets: {resolve_path(args.data_dir)}")
+    print(f"  Symbolic outputs:  {output_root}")
+    for source in sources:
+        dataset_output = output_root / source["name"]
+        print(f"\n  Dataset: {source['name']}")
+        print(f"    Total output size: {format_bytes(directory_size(dataset_output))}")
+        print(f"    Details: {dataset_output / 'summary.json'}")
+    print(
+        f"\nTotal prepared-dataset size: "
+        f"{format_bytes(directory_size(resolve_path(args.data_dir)))}"
+    )
+    print(
+        f"Total symbolic-output size: " f"{format_bytes(directory_size(output_root))}"
+    )
 
     return 0
 
