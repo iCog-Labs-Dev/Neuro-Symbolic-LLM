@@ -1,20 +1,21 @@
-
 """End-to-end offline neuro-symbolic preparation pipeline.
 
+The offline runner orchestrates existing project components.
+
 Workflow:
-    1. Prepare the configured offline dataset.
-    2. Reuse existing records and acquire missing records.
-    3. Run reference semantic extraction through the semantic CLI.
-    4. Reuse, append, resume, or rebuild teacher artifacts.
-    5. Generate and validate student pairs and splits through the CLI.
-    6. Reuse a compatible student checkpoint or train through the CLI.
-    7. Evaluate the student through the semantic CLI.
+    1. Prepare configured offline datasets.
+    2. Reuse existing records or acquire missing records.
+    3. Run reference extraction through parser.semantic CLI.
+    4. Reuse, append, resume, or rebuild teacher extraction.
+    5. Generate and validate student pairs and splits through E2E.
+    6. Reuse a compatible student checkpoint or train through E2E.
+    7. Evaluate the student on the held-out test set through E2E.
     8. Run student inference over the complete prepared dataset.
     9. Adapt semantic documents to the hybrid-miner contract.
    10. Write pipeline summaries.
 
-This orchestrator coordinates existing components. It does not implement
-a separate reference parser, student trainer, or pair splitter.
+The semantic CLI owns extraction, pair generation, splitting,
+student training, and held-out evaluation.
 """
 
 from __future__ import annotations
@@ -31,11 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import ValidationError
 
 from offline.offline_dataloader import (
-    load_config as load_offline_config,
+    load_config,
     select_sources,
 )
 from parser.ontology.catalog import load_manifest_catalog
@@ -46,27 +46,28 @@ from symbolic_pipeline.miner_adapter import (
     to_semantic_document,
 )
 
-
 # ---------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-DEFAULT_OFFLINE_CONFIG = REPO_ROOT / "configs" / "offline_data.yaml"
-DEFAULT_MODEL_CONFIG = (
-    REPO_ROOT / "configs" / "parser_config" / "model_backend.yaml"
-)
-DEFAULT_TRAINING_CONFIG = (
-    REPO_ROOT / "configs" / "parser_config" / "student_config.yaml"
-)
-DEFAULT_DATA_DIR = REPO_ROOT / "data" / "offline_corpus"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "symbolic"
+DEFAULT_OFFLINE_CONFIG = REPO_ROOT / "configs/offline_data.yaml"
+DEFAULT_MODEL_CONFIG = REPO_ROOT / "configs/parser_config/model_backend.yaml"
+DEFAULT_TRAINING_CONFIG = REPO_ROOT / "configs/parser_config/student_config.yaml"
+DEFAULT_DATA_DIR = REPO_ROOT / "data/offline_corpus"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "data/symbolic"
 
 DEFAULT_ONTOLOGY_BUNDLE = (
-    REPO_ROOT / "parser" / "ontology" / "bundles"
-    / "semantic-extraction-v1.yaml"
+    REPO_ROOT / "parser/ontology/bundles/semantic-extraction-v1.yaml"
 )
+
+TEACHER_FILES = {
+    "documents": "documents.jsonl",
+    "rejected": "rejected.jsonl",
+    "metadata": "documents.metadata.jsonl",
+    "pairs": "pairs.jsonl",
+}
 
 
 # ---------------------------------------------------------------------
@@ -78,16 +79,11 @@ def resolve_path(path: Path | str) -> Path:
     """Resolve paths relative to the repository root."""
 
     path = Path(path)
-
     return path if path.is_absolute() else REPO_ROOT / path
 
 
 def timestamp() -> str:
-    """Return a unique UTC timestamp."""
-
-    return datetime.now(timezone.utc).strftime(
-        "%Y%m%dT%H%M%S%fZ"
-    )
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def log_step(number: int, title: str) -> None:
@@ -98,8 +94,6 @@ def log_step(number: int, title: str) -> None:
 
 
 def count_jsonl(path: Path) -> int:
-    """Count nonempty JSONL records."""
-
     if not path.is_file():
         return 0
 
@@ -108,8 +102,6 @@ def count_jsonl(path: Path) -> int:
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read JSONL records and reject malformed files."""
-
     records = []
 
     with path.open(encoding="utf-8") as file:
@@ -120,9 +112,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             value = json.loads(line)
 
             if not isinstance(value, dict):
-                raise ValueError(
-                    f"Expected JSON object at {path}:{number}"
-                )
+                raise ValueError(f"Expected JSON object at {path}:{number}")
 
             records.append(value)
 
@@ -133,21 +123,16 @@ def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     """Write JSONL atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-
     temporary = path.with_name(path.name + ".tmp")
 
     with temporary.open("w", encoding="utf-8") as file:
         for record in records:
-            file.write(
-                json.dumps(record, ensure_ascii=False) + "\n"
-            )
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     temporary.replace(path)
 
 
 def file_sha256(path: Path) -> str:
-    """Calculate the SHA-256 hash of a file."""
-
     digest = hashlib.sha256()
 
     with path.open("rb") as file:
@@ -157,9 +142,7 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def json_fingerprint(value: Any) -> str:
-    """Fingerprint a JSON-compatible object."""
-
+def fingerprint(value: Any) -> str:
     payload = json.dumps(
         value,
         sort_keys=True,
@@ -196,7 +179,6 @@ def valid_semantic_jsonl(
     try:
         for record in read_jsonl(path):
             SemanticParseResult.model_validate(record)
-
     except (ValueError, ValidationError):
         return False
 
@@ -208,20 +190,20 @@ def load_manifest(path: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        result = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
-    return result if isinstance(result, dict) else None
+    return value if isinstance(value, dict) else None
 
 
-def write_manifest(path: Path, data: dict[str, Any]) -> None:
+def write_manifest(path: Path, values: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     temporary = path.with_name(path.name + ".tmp")
 
     temporary.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
+        json.dumps(values, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -233,7 +215,7 @@ def archive_paths(
     label: str,
     recovery_root: Path,
 ) -> Path | None:
-    """Preserve previous artifacts before replacing them."""
+    """Preserve existing artifacts before replacing them."""
 
     existing = [path for path in paths if path.exists()]
 
@@ -267,8 +249,6 @@ def source_identity(
     raw_line: str,
     source_name: str,
 ) -> tuple[str, str]:
-    """Use the same document identity rules as semantic export."""
-
     document_id, corpus_id, _, _ = source_record(
         raw_line,
         jsonl=True,
@@ -282,9 +262,9 @@ def load_source_records(
     path: Path,
     source_name: str,
 ) -> tuple[list[str], dict[tuple[str, str], str]]:
-    """Load source records and index them by stable identity."""
+    """Load source records and index them by stable document identity."""
 
-    lines: list[str] = []
+    lines = []
     indexed: dict[tuple[str, str], str] = {}
 
     with path.open(encoding="utf-8") as file:
@@ -297,9 +277,7 @@ def load_source_records(
             key = source_identity(raw, source_name)
 
             if key in indexed:
-                raise ValueError(
-                    f"Duplicate source document at line {number}: {key}"
-                )
+                raise ValueError(f"Duplicate source record at line {number}: {key}")
 
             lines.append(raw)
             indexed[key] = raw
@@ -307,7 +285,7 @@ def load_source_records(
     return lines, indexed
 
 
-def record_key(record: dict[str, Any]) -> tuple[str, str]:
+def semantic_key(record: dict[str, Any]) -> tuple[str, str]:
     return (
         str(record.get("corpus_id", "")),
         str(record.get("document_id", "")),
@@ -324,12 +302,9 @@ def run_cli(
     *,
     accepted_returncodes: tuple[int, ...] = (0,),
 ) -> int:
-    """Run an existing project CLI and stream its output live."""
+    """Run a project CLI and stream its output directly."""
 
-    print(
-        "\n$ " + " ".join(command),
-        flush=True,
-    )
+    print("\n$ " + " ".join(command), flush=True)
 
     result = subprocess.run(
         command,
@@ -338,9 +313,7 @@ def run_cli(
     )
 
     if result.returncode not in accepted_returncodes:
-        raise RuntimeError(
-            f"Command failed with exit code {result.returncode}."
-        )
+        raise RuntimeError(f"Command failed with exit code {result.returncode}.")
 
     return result.returncode
 
@@ -361,6 +334,46 @@ def semantic_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def e2e_command(
+    args: argparse.Namespace,
+    run_dir: Path,
+    *,
+    input_path: Path | None = None,
+    resume: bool = False,
+    skip_training: bool = False,
+) -> list[str]:
+    """Build the existing semantic E2E CLI command."""
+
+    command = semantic_command(args)
+
+    command.extend(
+        [
+            "e2e",
+            "--output-dir",
+            str(run_dir),
+            "--training-config",
+            str(resolve_path(args.training_config)),
+            "--method",
+            args.method,
+            "--ontology-bundle",
+            str(resolve_path(args.ontology_bundle)),
+            "--min-acceptance",
+            str(args.min_acceptance),
+        ]
+    )
+
+    if input_path is not None:
+        command.extend(["--input", str(input_path)])
+
+    if resume:
+        command.append("--resume")
+
+    if skip_training:
+        command.append("--skip-training")
+
+    return command
+
+
 # ---------------------------------------------------------------------
 # Stage 1: Dataset preparation
 # ---------------------------------------------------------------------
@@ -370,21 +383,15 @@ def dataset_config_fingerprint(
     config: dict[str, Any],
     source: dict[str, Any],
 ) -> str:
-    """Identify source settings independently of requested record count."""
-
     source_settings = dict(source)
     source_settings.pop("count", None)
 
-    global_settings = {
-        "seed": config.get("seed", 42),
-        "min_chars": config.get("min_chars", 20),
-        "max_chars": config.get("max_chars", 600),
-    }
-
-    return json_fingerprint(
+    return fingerprint(
         {
             "source": source_settings,
-            "global": global_settings,
+            "seed": config.get("seed", 42),
+            "min_chars": config.get("min_chars", 20),
+            "max_chars": config.get("max_chars", 600),
         }
     )
 
@@ -396,15 +403,13 @@ def prepare_dataset(
     prepared_path: Path,
     output_dir: Path,
 ) -> None:
-    """Prepare a dataset while preserving and reusing existing records."""
+    """Reuse the dataset or prepare the configured number of records."""
 
     name = source["name"]
     requested = int(source["count"])
 
     manifest_path = output_dir / "dataset_manifest.json"
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    prepared_path.parent.mkdir(parents=True, exist_ok=True)
+    recovery_root = output_dir / "recovery"
 
     log_step(1, "OFFLINE DATASET PREPARATION")
 
@@ -413,20 +418,15 @@ def prepare_dataset(
     print(f"Configured records: {requested}")
 
     if requested < 1:
-        raise ValueError(
-            f"{name}: configured record count must be positive."
-        )
+        raise ValueError(f"{name}: count must be positive.")
 
     existing_valid = valid_jsonl(prepared_path)
     existing_count = count_jsonl(prepared_path)
 
-    expected_config = dataset_config_fingerprint(config, source)
-    previous_manifest = load_manifest(manifest_path)
+    config_id = dataset_config_fingerprint(config, source)
+    previous = load_manifest(manifest_path)
 
-    config_matches = (
-        previous_manifest is None
-        or previous_manifest.get("config_fingerprint") == expected_config
-    )
+    config_matches = previous is None or previous.get("config_fingerprint") == config_id
 
     if (
         not args.force
@@ -439,13 +439,13 @@ def prepare_dataset(
             flush=True,
         )
 
-        if previous_manifest is None:
+        if previous is None:
             write_manifest(
                 manifest_path,
                 {
-                    "config_fingerprint": expected_config,
-                    "records": existing_count,
+                    "config_fingerprint": config_id,
                     "source_sha256": file_sha256(prepared_path),
+                    "records": existing_count,
                     "legacy_adoption": True,
                 },
             )
@@ -454,14 +454,15 @@ def prepare_dataset(
 
     if args.skip_preparation:
         raise FileNotFoundError(
-            f"Prepared dataset does not match configuration: {prepared_path}"
+            f"Prepared dataset is missing or incompatible: {prepared_path}"
         )
 
-    # Generate the requested complete candidate dataset in a staging area.
+    prepared_path.parent.mkdir(parents=True, exist_ok=True)
+
     staging = Path(
         tempfile.mkdtemp(
             prefix=f".{name}-dataset-",
-            dir=output_dir,
+            dir=prepared_path.parent,
         )
     )
 
@@ -486,62 +487,36 @@ def prepare_dataset(
         candidate = staging / "separate" / f"{name}.jsonl"
 
         if not valid_jsonl(candidate):
-            raise RuntimeError(
-                f"Dataset loader did not produce valid data: {candidate}"
-            )
+            raise RuntimeError("Dataset loader produced invalid output.")
 
         candidate_count = count_jsonl(candidate)
 
         if candidate_count != requested:
             raise RuntimeError(
-                f"Requested {requested} records but prepared "
-                f"{candidate_count}. Teacher extraction will not start."
+                f"Expected {requested} records, received {candidate_count}."
             )
 
-        old_keys: set[tuple[str, str]] = set()
-        new_keys: set[tuple[str, str]] = set()
+        incremental = False
 
-        if existing_valid:
+        if existing_valid and config_matches:
             _, old_index = load_source_records(prepared_path, name)
             _, new_index = load_source_records(candidate, name)
 
             old_keys = set(old_index)
             new_keys = set(new_index)
 
-        incremental = (
-            existing_valid
-            and existing_count < requested
-            and old_keys.issubset(new_keys)
-            and config_matches
-        )
+            incremental = old_keys.issubset(new_keys) and len(new_keys) > len(old_keys)
 
-        if incremental:
-            print(
-                f"Existing records: {existing_count}",
-                flush=True,
-            )
-            print(
-                f"New records: {requested - existing_count}",
-                flush=True,
-            )
-            print(
-                "Existing dataset is a compatible subset. "
-                "Appending newly acquired records.",
-                flush=True,
-            )
-
-        elif existing_valid:
-            print(
-                "Dataset configuration or contents changed. "
-                "Replacing prepared dataset while preserving the previous version.",
-                flush=True,
-            )
+            if incremental:
+                print(f"Existing records: {len(old_keys)}")
+                print(f"New records: {len(new_keys - old_keys)}")
+                print("Existing source records are preserved.")
 
         if prepared_path.exists():
             archive_paths(
                 [prepared_path],
                 f"{name}-dataset",
-                output_dir / "recovery",
+                recovery_root,
             )
 
         shutil.move(str(candidate), str(prepared_path))
@@ -549,17 +524,15 @@ def prepare_dataset(
         write_manifest(
             manifest_path,
             {
-                "config_fingerprint": expected_config,
-                "records": candidate_count,
+                "config_fingerprint": config_id,
                 "source_sha256": file_sha256(prepared_path),
+                "records": candidate_count,
                 "incremental": incremental,
+                "updated_at": timestamp(),
             },
         )
 
-        print(
-            f"Prepared: {candidate_count} records",
-            flush=True,
-        )
+        print(f"Prepared: {candidate_count} records", flush=True)
 
     finally:
         if staging.exists():
@@ -572,19 +545,14 @@ def prepare_dataset(
 
 
 def teacher_paths(run_dir: Path) -> dict[str, Path]:
-    return {
-        "documents": run_dir / "documents.jsonl",
-        "rejected": run_dir / "rejected.jsonl",
-        "metadata": run_dir / "documents.metadata.jsonl",
-        "pairs": run_dir / "pairs.jsonl",
-    }
+    return {name: run_dir / filename for name, filename in TEACHER_FILES.items()}
 
 
 def validate_teacher_artifacts(
     run_dir: Path,
     source_name: str,
 ) -> tuple[bool, set[tuple[str, str]]]:
-    """Validate teacher outputs and recover their processed source identities."""
+    """Validate completed teacher documents, rejected records, pairs and metadata."""
 
     paths = teacher_paths(run_dir)
 
@@ -604,16 +572,18 @@ def validate_teacher_artifacts(
         metadata = read_jsonl(paths["metadata"])
         pairs = read_jsonl(paths["pairs"])
 
-        if (
-            len(documents) != len(metadata)
-            or len(documents) != len(pairs)
-        ):
+        if len(documents) != len(metadata):
+            return False, set()
+
+        if len(documents) != len(pairs):
             return False, set()
 
         processed: set[tuple[str, str]] = set()
+        document_keys = set()
 
         for record in documents:
             result = SemanticParseResult.model_validate(record)
+
             key = (
                 result.document.corpus_id,
                 result.document.document_id,
@@ -623,6 +593,7 @@ def validate_teacher_artifacts(
                 return False, set()
 
             processed.add(key)
+            document_keys.add(key)
 
         for record in rejected:
             raw_line = record.get("raw_line")
@@ -637,18 +608,9 @@ def validate_teacher_artifacts(
 
             processed.add(key)
 
-        pair_keys = {
-            record_key(pair)
-            for pair in pairs
-        }
+        pair_keys = {semantic_key(pair) for pair in pairs}
 
-        if pair_keys != {
-            (
-                str(record["document"]["corpus_id"]),
-                str(record["document"]["document_id"]),
-            )
-            for record in documents
-        }:
+        if pair_keys != document_keys:
             return False, set()
 
         return True, processed
@@ -658,42 +620,60 @@ def validate_teacher_artifacts(
 
 
 def teacher_fingerprint(args: argparse.Namespace) -> str:
-    """Fingerprint reference parser settings and ontology/prompt sources."""
-
     paths = [
         resolve_path(args.model_config),
-        REPO_ROOT / "parser" / "semantic" / "catalog_prompt.py",
-        REPO_ROOT / "configs" / "parser_config" / "general_prompt.yaml",
-        REPO_ROOT / "configs" / "parser_config" / "discourse_prompt.yaml",
-        REPO_ROOT / "configs" / "parser_config" / "parser_prompt.yaml",
-        *sorted((REPO_ROOT / "parser" / "ontology").rglob("*.yaml")),
+        REPO_ROOT / "parser/semantic/catalog_prompt.py",
+        REPO_ROOT / "configs/parser_config/general_prompt.yaml",
+        REPO_ROOT / "configs/parser_config/discourse_prompt.yaml",
+        REPO_ROOT / "configs/parser_config/parser_prompt.yaml",
+        *sorted((REPO_ROOT / "parser/ontology").rglob("*.yaml")),
     ]
 
-    values = {
-        str(path.relative_to(REPO_ROOT)): file_sha256(path)
-        for path in paths
-    }
+    values = {str(path.relative_to(REPO_ROOT)): file_sha256(path) for path in paths}
 
     values["profile"] = args.profile
 
-    return json_fingerprint(values)
+    return fingerprint(values)
+
+
+def write_teacher_manifest(
+    path: Path,
+    run_dir: Path,
+    source_keys: set[tuple[str, str]],
+    parser_fingerprint: str,
+) -> None:
+    paths = teacher_paths(run_dir)
+
+    write_manifest(
+        path,
+        {
+            "parser_fingerprint": parser_fingerprint,
+            "source_keys": sorted([list(key) for key in source_keys]),
+            "artifacts": {name: file_sha256(file) for name, file in paths.items()},
+            "counts": {name: count_jsonl(file) for name, file in paths.items()},
+            "updated_at": timestamp(),
+        },
+    )
 
 
 # ---------------------------------------------------------------------
-# Teacher extraction through the semantic CLI
+# Incremental teacher export
 # ---------------------------------------------------------------------
 
 
-def export_command(
+def export_delta(
     args: argparse.Namespace,
+    source_name: str,
     input_path: Path,
-    export_dir: Path,
+    delta_dir: Path,
     *,
-    resume: bool,
-) -> list[str]:
-    export_dir.mkdir(parents=True, exist_ok=True)
+    resume: bool = False,
+) -> None:
+    """Use the reference export CLI for newly added source records."""
 
-    paths = teacher_paths(export_dir)
+    delta_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = teacher_paths(delta_dir)
 
     command = semantic_command(args)
 
@@ -710,137 +690,104 @@ def export_command(
             str(paths["metadata"]),
             "--student-pairs-output",
             str(paths["pairs"]),
-            "--progress-every",
-            str(args.progress_every),
             "--corpus-id",
-            args.selection_name,
-        ]
-    )
-
-    command.extend(
-        [
+            source_name,
             "--ontology-bundle",
             str(resolve_path(args.ontology_bundle)),
+            "--progress-every",
+            str(args.progress_every),
         ]
     )
 
     if resume:
         command.append("--resume")
 
-    return command
-
-
-def export_teacher(
-    args: argparse.Namespace,
-    input_path: Path,
-    export_dir: Path,
-    *,
-    resume: bool = False,
-) -> None:
-    """Execute reference extraction using the existing semantic CLI."""
-
-    command = export_command(
-        args,
-        input_path,
-        export_dir,
-        resume=resume,
-    )
-
-    # Return code 2 means completed export with rejected source records.
     run_cli(
         command,
         accepted_returncodes=(0, 2),
     )
 
     valid, _ = validate_teacher_artifacts(
-        export_dir,
-        args.selection_name,
+        delta_dir,
+        source_name,
     )
 
     if not valid:
-        raise RuntimeError(
-            f"Teacher export did not produce complete valid artifacts: {export_dir}"
-        )
+        raise RuntimeError("Incremental teacher export failed validation.")
+
+
+def merge_unique(
+    old: list[dict[str, Any]],
+    new: list[dict[str, Any]],
+    key_function,
+) -> list[dict[str, Any]]:
+    result = []
+    seen = set()
+
+    for record in old + new:
+        key = key_function(record)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(record)
+
+    return result
 
 
 def merge_teacher_artifacts(
     run_dir: Path,
     delta_dir: Path,
+    source_name: str,
 ) -> None:
-    """Merge validated incremental teacher results into existing artifacts."""
+    """Merge incremental extraction results without rerunning old records."""
 
-    old_paths = teacher_paths(run_dir)
-    new_paths = teacher_paths(delta_dir)
+    old = teacher_paths(run_dir)
+    new = teacher_paths(delta_dir)
 
-    old_documents = read_jsonl(old_paths["documents"])
-    new_documents = read_jsonl(new_paths["documents"])
-
-    old_rejected = read_jsonl(old_paths["rejected"])
-    new_rejected = read_jsonl(new_paths["rejected"])
-
-    old_metadata = read_jsonl(old_paths["metadata"])
-    new_metadata = read_jsonl(new_paths["metadata"])
-
-    old_pairs = read_jsonl(old_paths["pairs"])
-    new_pairs = read_jsonl(new_paths["pairs"])
-
-    def merge(
-        old: list[dict[str, Any]],
-        new: list[dict[str, Any]],
-        key_function,
-    ) -> list[dict[str, Any]]:
-        result = []
-        seen = set()
-
-        for record in old + new:
-            key = key_function(record)
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-            result.append(record)
-
-        return result
-
-    documents = merge(
-        old_documents,
-        new_documents,
+    documents = merge_unique(
+        read_jsonl(old["documents"]),
+        read_jsonl(new["documents"]),
         lambda record: (
             record["document"]["corpus_id"],
             record["document"]["document_id"],
         ),
     )
 
-    rejected = merge(
-        old_rejected,
-        new_rejected,
-        lambda record: json.loads(record["raw_line"])["text"],
+    pairs = merge_unique(
+        read_jsonl(old["pairs"]),
+        read_jsonl(new["pairs"]),
+        semantic_key,
     )
 
-    metadata = merge(
-        old_metadata,
-        new_metadata,
+    metadata = merge_unique(
+        read_jsonl(old["metadata"]),
+        read_jsonl(new["metadata"]),
         lambda record: (
             record.get("corpus_id"),
             record.get("document_id"),
         ),
     )
 
-    pairs = merge(
-        old_pairs,
-        new_pairs,
-        lambda record: (
-            record.get("corpus_id"),
-            record.get("document_id"),
-        ),
+    def rejected_key(record):
+        return source_identity(record["raw_line"], source_name)
+
+    rejected = merge_unique(
+        read_jsonl(old["rejected"]),
+        read_jsonl(new["rejected"]),
+        rejected_key,
     )
 
-    # All merged files are written atomically.
-    write_jsonl(old_paths["documents"], documents)
-    write_jsonl(old_paths["rejected"], rejected)
-    write_jsonl(old_paths["metadata"], metadata)
-    write_jsonl(old_paths["pairs"], pairs)
+    write_jsonl(old["documents"], documents)
+    write_jsonl(old["pairs"], pairs)
+    write_jsonl(old["metadata"], metadata)
+    write_jsonl(old["rejected"], rejected)
+
+
+# ---------------------------------------------------------------------
+# Stage 2: Teacher extraction decision
+# ---------------------------------------------------------------------
 
 
 def prepare_teacher(
@@ -848,12 +795,11 @@ def prepare_teacher(
     source_name: str,
     prepared_path: Path,
     output_dir: Path,
-) -> Path:
-    """Reuse, append, resume, or rebuild teacher extraction."""
+) -> tuple[Path | None, bool]:
+    """Decide whether E2E should extract, resume, or reuse teacher results."""
 
     run_dir = output_dir / "parser_e2e"
     recovery_root = output_dir / "recovery"
-
     manifest_path = output_dir / "teacher_manifest.json"
 
     _, current_index = load_source_records(
@@ -867,12 +813,7 @@ def prepare_teacher(
         raise ValueError("No source records available for teacher extraction.")
 
     expected_fingerprint = teacher_fingerprint(args)
-
-    previous_manifest = load_manifest(manifest_path)
-
-    # ---------------------------------------------------------
-    # Inspect existing completed artifacts.
-    # ---------------------------------------------------------
+    previous = load_manifest(manifest_path)
 
     if run_dir.exists() and not args.force:
         valid, old_keys = validate_teacher_artifacts(
@@ -880,20 +821,13 @@ def prepare_teacher(
             source_name,
         )
 
-        if valid and old_keys.issubset(current_keys):
+        if valid:
             manifest_compatible = (
-                previous_manifest is not None
-                and previous_manifest.get("teacher_fingerprint")
-                == expected_fingerprint
+                previous is not None
+                and previous.get("parser_fingerprint") == expected_fingerprint
             )
 
-            exact_match = old_keys == current_keys
-
-            # Adopt compatible legacy completed artifacts only when
-            # their source set exactly matches the current dataset.
-            if exact_match and (
-                manifest_compatible or previous_manifest is None
-            ):
+            if old_keys == current_keys and (manifest_compatible or previous is None):
                 print(
                     f"Reusing completed teacher extraction: "
                     f"{len(old_keys)} source records",
@@ -907,52 +841,44 @@ def prepare_teacher(
                     expected_fingerprint,
                 )
 
-                return run_dir
+                return None, not validate_splits(run_dir)
 
-            # Append only when the previous extraction has a manifest
-            # proving compatibility with the current parser configuration.
-            if (
-                not exact_match
-                and manifest_compatible
-            ):
+            if old_keys < current_keys and manifest_compatible:
                 new_keys = current_keys - old_keys
 
-                print(
-                    f"Existing teacher results: {len(old_keys)}",
-                    flush=True,
-                )
-                print(
-                    f"New records requiring extraction: {len(new_keys)}",
-                    flush=True,
-                )
+                print(f"Existing teacher records: {len(old_keys)}")
+                print(f"New records requiring extraction: {len(new_keys)}")
 
-                delta_records = [
-                    current_index[key]
-                    for key in current_index
-                    if key in new_keys
-                ]
+                delta_fingerprint = fingerprint(sorted(new_keys))
 
-                delta_fingerprint = json_fingerprint(
-                    sorted(new_keys)
-                )
-
-                delta_dir = (
-                    recovery_root
-                    / f"teacher-delta-{delta_fingerprint[:16]}"
-                )
-
-                delta_dir.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
+                delta_dir = recovery_root / f"teacher-delta-{delta_fingerprint[:16]}"
 
                 delta_input = delta_dir / "input.jsonl"
 
-                if not delta_input.exists():
-                    delta_input.write_text(
-                        "".join(record + "\n" for record in delta_records),
-                        encoding="utf-8",
+                delta_records = [
+                    current_index[key] for key in current_index if key in new_keys
+                ]
+
+                delta_dir.mkdir(parents=True, exist_ok=True)
+
+                expected_content = "".join(record + "\n" for record in delta_records)
+
+                # FIX: Ruff SIM102 - combine nested conditions.
+                if (
+                    delta_input.exists()
+                    and delta_input.read_text(encoding="utf-8") != expected_content
+                ):
+                    archive_paths(
+                        [delta_dir],
+                        "changed-teacher-delta",
+                        recovery_root,
                     )
+                    delta_dir.mkdir(parents=True, exist_ok=True)
+
+                delta_input.write_text(
+                    expected_content,
+                    encoding="utf-8",
+                )
 
                 delta_valid, _ = validate_teacher_artifacts(
                     delta_dir,
@@ -966,60 +892,50 @@ def prepare_teacher(
                         paths["documents"].name + ".checkpoint.json"
                     )
 
+                    resume_delta = False
+
                     if checkpoint.exists():
                         state = load_manifest(checkpoint)
+                        identity = state.get("identity", {}) if state else {}
 
-                        identity = (
-                            state.get("identity", {})
-                            if state
-                            else {}
-                        )
-
-                        if (
-                            identity.get("source_sha256")
-                            != file_sha256(delta_input)
-                        ):
+                        if identity.get("source_sha256") == file_sha256(delta_input):
+                            resume_delta = True
+                        else:
                             archive_paths(
                                 [delta_dir],
-                                "corrupted-teacher-delta",
+                                "incompatible-teacher-delta",
                                 recovery_root,
                             )
-
-                            delta_dir.mkdir(
-                                parents=True,
-                                exist_ok=True,
-                            )
+                            delta_dir.mkdir(parents=True, exist_ok=True)
 
                             delta_input = delta_dir / "input.jsonl"
+
                             delta_input.write_text(
-                                "".join(
-                                    record + "\n"
-                                    for record in delta_records
-                                ),
+                                expected_content,
                                 encoding="utf-8",
                             )
 
-                    export_teacher(
+                    export_delta(
                         args,
+                        source_name,
                         delta_input,
                         delta_dir,
-                        resume=checkpoint.exists(),
+                        resume=resume_delta,
                     )
 
                 merge_teacher_artifacts(
                     run_dir,
                     delta_dir,
+                    source_name,
                 )
 
-                valid, merged_keys = validate_teacher_artifacts(
+                merged_valid, merged_keys = validate_teacher_artifacts(
                     run_dir,
                     source_name,
                 )
 
-                if not valid or merged_keys != current_keys:
-                    raise RuntimeError(
-                        "Incremental teacher merge failed validation."
-                    )
+                if not merged_valid or merged_keys != current_keys:
+                    raise RuntimeError("Merged teacher artifacts failed validation.")
 
                 archive_paths(
                     [run_dir / "splits"],
@@ -1035,14 +951,13 @@ def prepare_teacher(
                 )
 
                 print(
-                    f"Teacher extraction complete: "
-                    f"{len(merged_keys)} source records",
+                    f"Incremental teacher extraction complete: "
+                    f"{len(merged_keys)} records",
                     flush=True,
                 )
 
-                return run_dir
+                return None, True
 
-        # Different source, changed configuration, or corrupted outputs.
         print(
             "Previous teacher extraction is incompatible or corrupted. "
             "Starting a clean extraction.",
@@ -1051,130 +966,32 @@ def prepare_teacher(
 
         archive_paths(
             [run_dir],
-            "incompatible-parser-run",
+            "incompatible-teacher-run",
             recovery_root,
         )
 
-    elif run_dir.exists() and args.force:
+        # Do not recreate run_dir here.
+        # The semantic E2E CLI creates it for a fresh run.
+        return prepared_path, False
+
+    if run_dir.exists() and args.force:
         archive_paths(
             [run_dir],
-            "forced-parser-run",
+            "forced-teacher-run",
             recovery_root,
         )
 
-    # ---------------------------------------------------------
-    # Resume a valid interrupted full extraction.
-    # ---------------------------------------------------------
+        return prepared_path, False
 
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    paths = teacher_paths(run_dir)
-
-    checkpoint = paths["documents"].with_name(
-        paths["documents"].name + ".checkpoint.json"
-    )
-
-    resume = False
-
-    if checkpoint.exists():
-        state = load_manifest(checkpoint)
-
-        identity = state.get("identity", {}) if state else {}
-
-        if (
-            identity.get("source_sha256")
-            == file_sha256(prepared_path)
-        ):
-            resume = True
-            print(
-                "Matching teacher checkpoint found. Resuming extraction.",
-                flush=True,
-            )
-        else:
-            archive_paths(
-                [run_dir],
-                "incompatible-teacher-checkpoint",
-                recovery_root,
-            )
-            run_dir.mkdir(parents=True, exist_ok=True)
-
-    # If only incomplete artifacts exist without a checkpoint,
-    # preserve them and start fresh.
-    elif any(path.exists() for path in paths.values()):
-        archive_paths(
-            [run_dir],
-            "corrupted-teacher-artifacts",
-            recovery_root,
-        )
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-    export_teacher(
-        args,
-        prepared_path,
-        run_dir,
-        resume=resume,
-    )
-
-    valid, processed = validate_teacher_artifacts(
-        run_dir,
-        source_name,
-    )
-
-    if not valid or processed != current_keys:
-        raise RuntimeError(
-            "Completed teacher extraction does not cover the current dataset."
-        )
-
-    write_teacher_manifest(
-        manifest_path,
-        run_dir,
-        current_keys,
-        expected_fingerprint,
-    )
-
-    return run_dir
-
-
-def write_teacher_manifest(
-    path: Path,
-    run_dir: Path,
-    source_keys: set[tuple[str, str]],
-    fingerprint: str,
-) -> None:
-    paths = teacher_paths(run_dir)
-
-    write_manifest(
-        path,
-        {
-            "teacher_fingerprint": fingerprint,
-            "source_keys": sorted(
-                [list(key) for key in source_keys]
-            ),
-            "counts": {
-                name: count_jsonl(file)
-                for name, file in paths.items()
-            },
-            "artifacts": {
-                name: file_sha256(file)
-                for name, file in paths.items()
-            },
-            "updated_at": timestamp(),
-        },
-    )
+    return prepared_path, False
 
 
 # ---------------------------------------------------------------------
-# Stage 3: Student-pair splitting through the semantic CLI
+# Student split validation
 # ---------------------------------------------------------------------
 
 
-def split_pairs(
-    args: argparse.Namespace,
-    run_dir: Path,
-) -> None:
-    """Reuse valid splits or regenerate them through the CLI."""
-
-    pairs_path = run_dir / "pairs.jsonl"
+def validate_splits(run_dir: Path) -> bool:
     split_dir = run_dir / "splits"
 
     paths = [
@@ -1183,115 +1000,22 @@ def split_pairs(
         split_dir / "test.jsonl",
     ]
 
-    pairs = read_jsonl(pairs_path)
-
-    expected_ids = {
-        record_key(pair)
-        for pair in pairs
-    }
-
-    valid_existing = all(valid_jsonl(path) for path in paths)
-
-    if valid_existing:
-        try:
-            existing = [
-                record
-                for path in paths
-                for record in read_jsonl(path)
-            ]
-
-            existing_ids = {
-                record_key(record)
-                for record in existing
-            }
-
-            if (
-                len(existing_ids) == len(existing)
-                and existing_ids == expected_ids
-            ):
-                print(
-                    "Reusing compatible train/validation/test splits.",
-                    flush=True,
-                )
-                return
-
-        except (OSError, ValueError, KeyError):
-            pass
-
-    if split_dir.exists():
-        archive_paths(
-            [split_dir],
-            "incompatible-splits",
-            run_dir.parent / "recovery",
-        )
-
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=".splits-",
-            dir=run_dir,
-        )
-    )
+    if not all(valid_jsonl(path) for path in paths):
+        return False
 
     try:
-        command = semantic_command(args)
+        pairs = read_jsonl(run_dir / "pairs.jsonl")
 
-        command.extend(
-            [
-                "split-pairs",
-                "--input",
-                str(pairs_path),
-                "--output-dir",
-                str(staging),
-                "--train-ratio",
-                "0.8",
-                "--val-ratio",
-                "0.1",
-                "--test-ratio",
-                "0.1",
-                "--seed",
-                "42",
-                "--ontology-bundle",
-                str(resolve_path(args.ontology_bundle)),
-            ]
-        )
+        expected = {semantic_key(pair) for pair in pairs}
 
-        run_cli(command)
+        combined = [record for path in paths for record in read_jsonl(path)]
 
-        generated = [
-            staging / "train.jsonl",
-            staging / "validation.jsonl",
-            staging / "test.jsonl",
-        ]
+        actual = {semantic_key(record) for record in combined}
 
-        if not all(valid_jsonl(path) for path in generated):
-            raise RuntimeError(
-                "Semantic CLI produced incomplete student splits."
-            )
+        return len(actual) == len(combined) and actual == expected
 
-        combined = [
-            record
-            for path in generated
-            for record in read_jsonl(path)
-        ]
-
-        combined_ids = {
-            record_key(record)
-            for record in combined
-        }
-
-        if (
-            len(combined_ids) != len(combined)
-            or combined_ids != expected_ids
-        ):
-            raise RuntimeError(
-                "Generated splits contain overlaps or missing records."
-            )
-
-        staging.rename(split_dir)
-
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 # ---------------------------------------------------------------------
@@ -1300,8 +1024,6 @@ def split_pairs(
 
 
 def valid_student_checkpoint(model_dir: Path) -> bool:
-    """Check basic completeness of a saved student checkpoint."""
-
     required = [
         model_dir / "config.json",
         model_dir / "training_metadata.json",
@@ -1311,22 +1033,20 @@ def valid_student_checkpoint(model_dir: Path) -> bool:
     if not all(path.is_file() and path.stat().st_size > 0 for path in required):
         return False
 
-    weights = [
-        model_dir / "model.safetensors",
-        model_dir / "pytorch_model.bin",
-        model_dir / "model.safetensors.index.json",
-        model_dir / "pytorch_model.bin.index.json",
-    ]
+    weight_names = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
 
     return any(
-        path.is_file() and path.stat().st_size > 0
-        for path in weights
+        (model_dir / name).is_file() and (model_dir / name).stat().st_size > 0
+        for name in weight_names
     )
 
 
 def checkpoint_fingerprint(model_dir: Path) -> str:
-    """Fingerprint checkpoint contents."""
-
     digest = hashlib.sha256()
 
     for path in sorted(model_dir.rglob("*")):
@@ -1336,9 +1056,7 @@ def checkpoint_fingerprint(model_dir: Path) -> str:
         if path.name.endswith((".tmp", ".partial")):
             continue
 
-        digest.update(
-            str(path.relative_to(model_dir)).encode("utf-8")
-        )
+        digest.update(str(path.relative_to(model_dir)).encode("utf-8"))
         digest.update(file_sha256(path).encode("utf-8"))
 
     return digest.hexdigest()
@@ -1348,152 +1066,149 @@ def student_training_fingerprint(
     args: argparse.Namespace,
     run_dir: Path,
 ) -> str:
-    """Identify the exact student training data and configuration."""
-
-    training_config = resolve_path(args.training_config)
-
     train_path = run_dir / "splits" / "train.jsonl"
     validation_path = run_dir / "splits" / "validation.jsonl"
 
-    return json_fingerprint(
+    return fingerprint(
         {
             "train_sha256": file_sha256(train_path),
             "validation_sha256": file_sha256(validation_path),
-            "training_config_sha256": file_sha256(training_config),
+            "training_config_sha256": file_sha256(resolve_path(args.training_config)),
             "method": args.method,
-            "training_prompt_sha256": file_sha256(
-                REPO_ROOT / "parser" / "student" / "student_prompt.py"
+            "prompt_sha256": file_sha256(
+                REPO_ROOT / "parser/student/student_prompt.py"
             ),
-            "ontology_sha256": file_sha256(
-                resolve_path(args.ontology_bundle)
-            ),
+            "ontology_sha256": file_sha256(resolve_path(args.ontology_bundle)),
         }
     )
 
 
-def train_student(
+def student_checkpoint_compatible(
     args: argparse.Namespace,
     run_dir: Path,
     output_dir: Path,
-) -> Path:
-    """Reuse a compatible checkpoint or train through the semantic CLI."""
-
+) -> bool:
     model_dir = run_dir / "student"
-    manifest_path = output_dir / "student_manifest.json"
 
-    fingerprint = student_training_fingerprint(
-        args,
-        run_dir,
-    )
+    manifest = load_manifest(output_dir / "student_manifest.json")
 
-    previous = load_manifest(manifest_path)
+    if not valid_student_checkpoint(model_dir) or manifest is None:
+        return False
 
-    compatible = (
-        valid_student_checkpoint(model_dir)
-        and previous is not None
-        and previous.get("training_fingerprint") == fingerprint
-        and previous.get("checkpoint_fingerprint")
-        == checkpoint_fingerprint(model_dir)
-    )
+    return manifest.get("training_fingerprint") == student_training_fingerprint(
+        args, run_dir
+    ) and manifest.get("checkpoint_fingerprint") == checkpoint_fingerprint(model_dir)
 
-    if compatible:
-        print(
-            "Compatible student checkpoint found. Skipping training.",
-            flush=True,
-        )
-        return model_dir
 
-    if args.skip_training:
-        raise FileNotFoundError(
-            "No student checkpoint matching the current training data "
-            "and configuration was found."
-        )
-
-    if model_dir.exists():
-        archive_paths(
-            [model_dir],
-            "incompatible-student-checkpoint",
-            output_dir / "recovery",
-        )
-
-    log_step(4, "STUDENT TRAINING")
-
-    command = [
-        sys.executable,
-        "-u",
-        "-m",
-        "parser.semantic",
-        "train-student",
-        "--train-file",
-        str(run_dir / "splits" / "train.jsonl"),
-        "--val-file",
-        str(run_dir / "splits" / "validation.jsonl"),
-        "--training-config",
-        str(resolve_path(args.training_config)),
-        "--output-dir",
-        str(model_dir),
-        "--method",
-        args.method,
-    ]
-
-    run_cli(command)
+def record_student_checkpoint(
+    args: argparse.Namespace,
+    run_dir: Path,
+    output_dir: Path,
+) -> None:
+    model_dir = run_dir / "student"
 
     if not valid_student_checkpoint(model_dir):
         raise RuntimeError(
-            "Student training did not produce a complete checkpoint."
+            "Semantic E2E did not produce a complete student checkpoint."
         )
 
     write_manifest(
-        manifest_path,
+        output_dir / "student_manifest.json",
         {
-            "training_fingerprint": fingerprint,
+            "training_fingerprint": student_training_fingerprint(
+                args,
+                run_dir,
+            ),
             "checkpoint_fingerprint": checkpoint_fingerprint(model_dir),
-            "train_records": count_jsonl(
-                run_dir / "splits" / "train.jsonl"
-            ),
-            "validation_records": count_jsonl(
-                run_dir / "splits" / "validation.jsonl"
-            ),
             "method": args.method,
             "updated_at": timestamp(),
         },
     )
 
-    return model_dir
-
 
 # ---------------------------------------------------------------------
-# Stage 5: Held-out evaluation through the semantic CLI
+# Stage 3-5: One semantic E2E invocation
 # ---------------------------------------------------------------------
 
 
-def evaluate_student(
+def run_semantic_e2e(
     args: argparse.Namespace,
     run_dir: Path,
-    model_dir: Path,
-) -> None:
-    """Use the semantic CLI for held-out student evaluation."""
+    output_dir: Path,
+    input_path: Path | None,
+    resume: bool,
+) -> Path:
+    """Invoke the semantic CLI exactly once for this dataset."""
 
-    log_step(5, "STUDENT HELD-OUT EVALUATION")
+    recovery_root = output_dir / "recovery"
 
-    command = semantic_command(args)
+    if run_dir.exists() and not validate_splits(run_dir):
+        split_dir = run_dir / "splits"
 
-    command.extend(
-        [
-            "e2e",
-            "--output-dir",
-            str(run_dir),
-            "--method",
-            args.method,
-            "--training-config",
-            str(resolve_path(args.training_config)),
-            "--ontology-bundle",
-            str(resolve_path(args.ontology_bundle)),
-            "--skip-training",
-        ]
+        if split_dir.exists():
+            archive_paths(
+                [split_dir],
+                "incomplete-student-splits",
+                recovery_root,
+            )
+
+    cached_splits = run_dir.exists() and validate_splits(run_dir)
+
+    compatible_student = cached_splits and student_checkpoint_compatible(
+        args,
+        run_dir,
+        output_dir,
     )
 
-    run_cli(command)
+    if args.skip_training and not compatible_student:
+        raise FileNotFoundError("No compatible student checkpoint is available.")
+
+    if compatible_student:
+        print(
+            "Compatible student checkpoint found. Skipping training.",
+            flush=True,
+        )
+
+    elif (run_dir / "student").exists():
+        archive_paths(
+            [run_dir / "student"],
+            "incompatible-student-checkpoint",
+            recovery_root,
+        )
+
+    run_cli(
+        e2e_command(
+            args,
+            run_dir,
+            input_path=input_path,
+            resume=resume,
+            skip_training=compatible_student,
+        )
+    )
+
+    if not validate_teacher_artifacts(
+        run_dir,
+        args.selection_name,
+    )[0]:
+        raise RuntimeError("Semantic E2E did not leave valid teacher artifacts.")
+
+    if not validate_splits(run_dir):
+        raise RuntimeError(
+            "Semantic E2E did not produce valid train/validation/test splits."
+        )
+
+    model_dir = run_dir / "student"
+
+    if not valid_student_checkpoint(model_dir):
+        raise RuntimeError("Semantic E2E did not produce a valid student checkpoint.")
+
+    record_student_checkpoint(
+        args,
+        run_dir,
+        output_dir,
+    )
+
+    return model_dir
 
 
 # ---------------------------------------------------------------------
@@ -1502,27 +1217,25 @@ def evaluate_student(
 
 
 def infer_records(
-    parser,
-    records: list[tuple[str, str]],
+    student,
     source_name: str,
+    records: list[tuple[str, tuple[str, str]]],
     parsed_path: Path,
     rejected_path: Path,
     progress_every: int,
 ) -> None:
-    """Run the trained student over source records.
-
-    The semantic CLI currently supports held-out evaluation but not
-    batch inference. This uses its existing DistilledSemanticParser API.
-    """
-
     accepted = 0
     rejected = 0
+    total = len(records)
 
     with (
         parsed_path.open("w", encoding="utf-8") as parsed,
         rejected_path.open("w", encoding="utf-8") as rejected_file,
     ):
-        for index, (raw_line, _) in enumerate(records, 1):
+        for index, (raw_line, key) in enumerate(records, 1):
+            document_id = key[1]
+            corpus_id = key[0]
+
             try:
                 document_id, corpus_id, text, _ = source_record(
                     raw_line,
@@ -1536,7 +1249,7 @@ def infer_records(
                     source_text=text,
                 )
 
-                result = parser.parse_document(document)
+                result = student.parse_document(document)
 
                 parsed.write(result.model_dump_json() + "\n")
                 accepted += 1
@@ -1546,11 +1259,8 @@ def infer_records(
                     json.dumps(
                         {
                             "line_number": index,
-                            "document_id": (
-                                document_id
-                                if "document_id" in locals()
-                                else f"{source_name}-{index}"
-                            ),
+                            "document_id": document_id,
+                            "corpus_id": corpus_id,
                             "error_type": type(error).__name__,
                             "error": str(error),
                         },
@@ -1558,18 +1268,16 @@ def infer_records(
                     )
                     + "\n"
                 )
+
                 rejected += 1
 
             processed = accepted + rejected
 
-            if (
-                processed % progress_every == 0
-                or processed == len(records)
-            ):
-                percent = processed / len(records) * 100
+            if processed % progress_every == 0 or processed == total:
+                percent = processed / total * 100 if total else 0
 
                 print(
-                    f"\rStudent inference: {processed}/{len(records)} "
+                    f"\rStudent inference: {processed}/{total} "
                     f"({percent:.1f}%) | "
                     f"Accepted: {accepted} | Rejected: {rejected}",
                     end="",
@@ -1583,45 +1291,38 @@ def run_student_inference(
     args: argparse.Namespace,
     source_name: str,
     prepared_path: Path,
-    run_dir: Path,
     output_dir: Path,
     model_dir: Path,
 ) -> Path:
-    """Reuse completed inference or process newly added source records."""
+    """Reuse completed inference or infer only newly added records."""
 
     parsed_path = output_dir / "parsed_documents.jsonl"
     rejected_path = output_dir / "parser_rejected.jsonl"
     manifest_path = output_dir / "inference_manifest.json"
 
-    lines, source_index = load_source_records(
+    _, source_index = load_source_records(
         prepared_path,
         source_name,
     )
 
     current_keys = set(source_index)
-
-    model_fingerprint = checkpoint_fingerprint(model_dir)
+    model_hash = checkpoint_fingerprint(model_dir)
 
     previous = load_manifest(manifest_path)
 
-    previous_keys = (
-        {
-            tuple(key)
-            for key in previous.get("source_keys", [])
-        }
-        if previous
-        else set()
+    outputs_valid = valid_semantic_jsonl(parsed_path, allow_empty=True) and valid_jsonl(
+        rejected_path, allow_empty=True
     )
 
-    outputs_valid = (
-        valid_semantic_jsonl(parsed_path, allow_empty=True)
-        and valid_jsonl(rejected_path, allow_empty=True)
-    )
+    previous_keys = set()
+
+    if previous is not None:
+        previous_keys = {tuple(key) for key in previous.get("source_keys", [])}
 
     if (
         outputs_valid
         and previous is not None
-        and previous.get("model_fingerprint") == model_fingerprint
+        and previous.get("model_fingerprint") == model_hash
         and previous_keys == current_keys
         and previous.get("parsed_sha256") == file_sha256(parsed_path)
         and previous.get("rejected_sha256") == file_sha256(rejected_path)
@@ -1633,29 +1334,18 @@ def run_student_inference(
         )
         return parsed_path
 
-    # Incremental inference is safe only when previous source identities
-    # are a subset of the current dataset and the student model is unchanged.
     incremental = (
         outputs_valid
         and previous is not None
-        and previous.get("model_fingerprint") == model_fingerprint
+        and previous.get("model_fingerprint") == model_hash
         and previous_keys.issubset(current_keys)
     )
 
     if incremental:
         new_keys = current_keys - previous_keys
 
-        print(
-            f"Reusing previous student inference: {len(previous_keys)} records",
-            flush=True,
-        )
-        print(
-            f"New student inference records: {len(new_keys)}",
-            flush=True,
-        )
-
-        if not new_keys:
-            return parsed_path
+        print(f"Reusing previous inference: {len(previous_keys)} records")
+        print(f"New records requiring inference: {len(new_keys)}")
 
         old_parsed = read_jsonl(parsed_path)
         old_rejected = read_jsonl(rejected_path)
@@ -1672,51 +1362,50 @@ def run_student_inference(
         old_parsed = []
         old_rejected = []
 
+    if not new_keys:
+        return parsed_path
+
     from parser.semantic.semantic_parser import DistilledSemanticParser
 
-    catalog, _ = load_manifest_catalog(
-        resolve_path(args.ontology_bundle)
-    )
+    catalog, _ = load_manifest_catalog(resolve_path(args.ontology_bundle))
 
     student = DistilledSemanticParser.from_pretrained(
         str(model_dir),
         catalog=catalog,
     )
 
-    records = [
-        (source_index[key], key)
-        for key in source_index
-        if key in new_keys
-    ]
+    records = [(source_index[key], key) for key in source_index if key in new_keys]
 
     log_step(6, "FULL-DATASET STUDENT INFERENCE")
 
     with tempfile.TemporaryDirectory(
         prefix=".student-inference-",
         dir=output_dir,
-    ) as temporary:
-        temporary = Path(temporary)
+    ) as temporary_directory:
+        # FIX: Keep the original string variable unchanged.
+        temporary_path = Path(temporary_directory)
 
-        new_parsed_path = temporary / "parsed.jsonl"
-        new_rejected_path = temporary / "rejected.jsonl"
+        new_parsed_path = temporary_path / "parsed.jsonl"
+        new_rejected_path = temporary_path / "rejected.jsonl"
 
         infer_records(
             student,
-            records,
             source_name,
+            records,
             new_parsed_path,
             new_rejected_path,
             args.progress_every,
         )
 
-        new_parsed = read_jsonl(new_parsed_path)
-        new_rejected = read_jsonl(new_rejected_path)
+        write_jsonl(
+            parsed_path,
+            old_parsed + read_jsonl(new_parsed_path),
+        )
 
-        combined_parsed = old_parsed + new_parsed
-        combined_rejected = old_rejected + new_rejected
-
-        write_jsonl(parsed_path, combined_parsed)
-        write_jsonl(rejected_path, combined_rejected)
+        write_jsonl(
+            rejected_path,
+            old_rejected + read_jsonl(new_rejected_path),
+        )
 
     if not valid_semantic_jsonl(parsed_path, allow_empty=True):
         raise RuntimeError("Student inference produced invalid semantic documents.")
@@ -1724,11 +1413,9 @@ def run_student_inference(
     write_manifest(
         manifest_path,
         {
-            "source_keys": sorted(
-                [list(key) for key in current_keys]
-            ),
+            "source_keys": sorted([list(key) for key in current_keys]),
             "prepared_sha256": file_sha256(prepared_path),
-            "model_fingerprint": model_fingerprint,
+            "model_fingerprint": model_hash,
             "parsed_sha256": file_sha256(parsed_path),
             "rejected_sha256": file_sha256(rejected_path),
             "accepted": count_jsonl(parsed_path),
@@ -1751,11 +1438,10 @@ def adapt_documents(
     rejected_path: Path,
     progress_every: int,
 ) -> tuple[int, int]:
-    """Adapt validated semantic results to the hybrid-miner contract."""
+    """Convert validated semantic results to hybrid-miner documents."""
 
     accepted = 0
     rejected = 0
-
     reasons: Counter[str] = Counter()
 
     with (
@@ -1776,9 +1462,7 @@ def adapt_documents(
 
                 adapted = to_semantic_document(result)
 
-                destination.write(
-                    adapted.model_dump_json() + "\n"
-                )
+                destination.write(adapted.model_dump_json() + "\n")
 
                 accepted += 1
 
@@ -1817,8 +1501,8 @@ def adapt_documents(
 
     print(flush=True)
 
-    print(f"Miner documents: {accepted}")
-    print(f"Adapter rejected: {rejected}")
+    print(f"Adapted: {accepted}")
+    print(f"Rejected: {rejected}")
 
     for reason, count in sorted(reasons.items()):
         print(f"  {reason}: {count}")
@@ -1831,21 +1515,20 @@ def run_adapter(
     output_dir: Path,
     progress_every: int,
 ) -> tuple[int, int]:
-    """Reuse adapter output only when its source fingerprint matches."""
+    """Reuse adapter outputs only when their source fingerprints match."""
 
     output_path = output_dir / "miner_documents.jsonl"
     rejected_path = output_dir / "adapter_rejected.jsonl"
     manifest_path = output_dir / "adapter_manifest.json"
 
-    source_fingerprint = file_sha256(parsed_path)
-
+    source_hash = file_sha256(parsed_path)
     previous = load_manifest(manifest_path)
 
     if (
         valid_jsonl(output_path, allow_empty=True)
         and valid_jsonl(rejected_path, allow_empty=True)
         and previous is not None
-        and previous.get("parsed_sha256") == source_fingerprint
+        and previous.get("parsed_sha256") == source_hash
         and previous.get("output_sha256") == file_sha256(output_path)
         and previous.get("rejected_sha256") == file_sha256(rejected_path)
     ):
@@ -1872,11 +1555,12 @@ def run_adapter(
     with tempfile.TemporaryDirectory(
         prefix=".miner-adaptation-",
         dir=output_dir,
-    ) as temporary:
-        temporary = Path(temporary)
+    ) as temporary_directory:
+        # FIX: Keep the original string variable unchanged.
+        temporary_path = Path(temporary_directory)
 
-        temporary_output = temporary / "miner_documents.jsonl"
-        temporary_rejected = temporary / "adapter_rejected.jsonl"
+        temporary_output = temporary_path / "miner_documents.jsonl"
+        temporary_rejected = temporary_path / "adapter_rejected.jsonl"
 
         accepted, rejected = adapt_documents(
             parsed_path,
@@ -1891,7 +1575,7 @@ def run_adapter(
     write_manifest(
         manifest_path,
         {
-            "parsed_sha256": source_fingerprint,
+            "parsed_sha256": source_hash,
             "output_sha256": file_sha256(output_path),
             "rejected_sha256": file_sha256(rejected_path),
             "accepted": accepted,
@@ -1904,7 +1588,7 @@ def run_adapter(
 
 
 # ---------------------------------------------------------------------
-# Stage 8: Final summary
+# Stage 8: Summary
 # ---------------------------------------------------------------------
 
 
@@ -1917,8 +1601,6 @@ def write_summary(
     adapter_accepted: int,
     adapter_rejected: int,
 ) -> dict[str, Any]:
-    """Write a complete per-dataset pipeline summary."""
-
     summary = {
         "source": source_name,
         "pipeline": "offline_teacher_student_to_miner_adapter",
@@ -1928,56 +1610,35 @@ def write_summary(
             "teacher_documents": str(run_dir / "documents.jsonl"),
             "teacher_rejected": str(run_dir / "rejected.jsonl"),
             "student_pairs": str(run_dir / "pairs.jsonl"),
-            "student_train": str(run_dir / "splits" / "train.jsonl"),
-            "student_validation": str(
-                run_dir / "splits" / "validation.jsonl"
-            ),
-            "student_test": str(run_dir / "splits" / "test.jsonl"),
+            "train": str(run_dir / "splits/train.jsonl"),
+            "validation": str(run_dir / "splits/validation.jsonl"),
+            "test": str(run_dir / "splits/test.jsonl"),
             "student_model": str(run_dir / "student"),
             "parsed_documents": str(parsed_path),
-            "miner_documents": str(
-                output_dir / "miner_documents.jsonl"
-            ),
-            "adapter_rejected": str(
-                output_dir / "adapter_rejected.jsonl"
-            ),
+            "miner_documents": str(output_dir / "miner_documents.jsonl"),
+            "adapter_rejected": str(output_dir / "adapter_rejected.jsonl"),
         },
         "counts": {
             "prepared": count_jsonl(prepared_path),
-            "teacher_accepted": count_jsonl(
-                run_dir / "documents.jsonl"
-            ),
-            "teacher_rejected": count_jsonl(
-                run_dir / "rejected.jsonl"
-            ),
-            "student_pairs": count_jsonl(
-                run_dir / "pairs.jsonl"
-            ),
-            "train": count_jsonl(
-                run_dir / "splits" / "train.jsonl"
-            ),
-            "validation": count_jsonl(
-                run_dir / "splits" / "validation.jsonl"
-            ),
-            "test": count_jsonl(
-                run_dir / "splits" / "test.jsonl"
-            ),
+            "teacher_accepted": count_jsonl(run_dir / "documents.jsonl"),
+            "teacher_rejected": count_jsonl(run_dir / "rejected.jsonl"),
+            "student_pairs": count_jsonl(run_dir / "pairs.jsonl"),
+            "train": count_jsonl(run_dir / "splits/train.jsonl"),
+            "validation": count_jsonl(run_dir / "splits/validation.jsonl"),
+            "test": count_jsonl(run_dir / "splits/test.jsonl"),
             "student_inference": count_jsonl(parsed_path),
             "miner_accepted": adapter_accepted,
             "adapter_rejected": adapter_rejected,
         },
     }
 
-    write_manifest(
-        output_dir / "summary.json",
-        summary,
-    )
+    write_manifest(output_dir / "summary.json", summary)
 
     return summary
 
 
 # ---------------------------------------------------------------------
-# Dataset orchestration
+# Per-dataset orchestration
 # ---------------------------------------------------------------------
 
 
@@ -1986,26 +1647,19 @@ def run_source(
     config: dict[str, Any],
     source: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run all stages for one configured source."""
-
     source_name = source["name"]
-
     args.selection_name = source_name
 
     data_dir = resolve_path(args.data_dir)
     output_root = resolve_path(args.output_dir)
 
+    prepared_path = data_dir / "separate" / f"{source_name}.jsonl"
     output_dir = output_root / source_name
-
-    prepared_path = (
-        data_dir / "separate" / f"{source_name}.jsonl"
-    )
-
     run_dir = output_dir / "parser_e2e"
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Stage 1: Prepare or reuse dataset.
+    # STEP 1: Dataset preparation.
     prepare_dataset(
         args,
         config,
@@ -2014,85 +1668,62 @@ def run_source(
         output_dir,
     )
 
-    # Stage 2: Reference extraction and incremental recovery.
+    # STEP 2: Decide teacher extraction behavior.
     log_step(2, "REFERENCE SEMANTIC EXTRACTION")
 
-    prepare_teacher(
+    input_path, resume = prepare_teacher(
         args,
         source_name,
         prepared_path,
         output_dir,
     )
 
-    # Stage 3: Pair validation and splitting through CLI.
-    log_step(3, "STUDENT DATASET PREPARATION")
+    # STEP 3-5: Invoke semantic E2E exactly once.
+    log_step(3, "SEMANTIC CLI: PAIRS, SPLITS, TRAINING AND EVALUATION")
 
-    split_pairs(
-        args,
-        run_dir,
-    )
-
-    # Stage 4: Student checkpoint reuse or CLI training.
-    model_dir = train_student(
+    model_dir = run_semantic_e2e(
         args,
         run_dir,
         output_dir,
+        input_path,
+        resume,
     )
 
-    # Stage 5: Held-out evaluation through CLI.
-    evaluate_student(
-        args,
-        run_dir,
-        model_dir,
-    )
-
-    # Stage 6: Full-dataset student inference.
+    # STEP 6: Full-dataset student inference.
     if args.skip_parsing:
         parsed_path = output_dir / "parsed_documents.jsonl"
 
         if not valid_semantic_jsonl(parsed_path):
-            raise FileNotFoundError(
-                f"Existing student inference is missing or invalid: "
-                f"{parsed_path}"
-            )
-
+            raise FileNotFoundError(f"Completed inference not found: {parsed_path}")
     else:
         parsed_path = run_student_inference(
             args,
             source_name,
             prepared_path,
-            run_dir,
             output_dir,
             model_dir,
         )
 
-    # Stage 7: Hybrid-miner adaptation.
-    adapter_accepted, adapter_rejected = run_adapter(
+    # STEP 7: Miner adaptation.
+    accepted, rejected = run_adapter(
         parsed_path,
         output_dir,
         args.progress_every,
     )
 
-    # Stage 8: Final summary.
+    # STEP 8: Summary.
     summary = write_summary(
         output_dir,
         source_name,
         prepared_path,
         run_dir,
         parsed_path,
-        adapter_accepted,
-        adapter_rejected,
+        accepted,
+        rejected,
     )
 
-    print(
-        f"\nCompleted dataset: {source_name}",
-        flush=True,
-    )
-
-    print(
-        json.dumps(summary["counts"], indent=2),
-        flush=True,
-    )
+    print(f"\nCompleted dataset: {source_name}")
+    print(json.dumps(summary["counts"], indent=2))
 
     return {
         "source": source_name,
@@ -2101,7 +1732,7 @@ def run_source(
 
 
 # ---------------------------------------------------------------------
-# CLI arguments
+# Arguments
 # ---------------------------------------------------------------------
 
 
@@ -2109,28 +1740,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Configuration-driven offline dataset preparation, "
-            "teacher-student semantic parsing and hybrid-miner adaptation."
+            "semantic teacher-student parsing and miner adaptation."
         )
     )
 
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_OFFLINE_CONFIG,
-    )
-
-    parser.add_argument(
-        "--model-config",
-        type=Path,
-        default=DEFAULT_MODEL_CONFIG,
-    )
-
+    parser.add_argument("--config", type=Path, default=DEFAULT_OFFLINE_CONFIG)
+    parser.add_argument("--model-config", type=Path, default=DEFAULT_MODEL_CONFIG)
     parser.add_argument(
         "--training-config",
         type=Path,
         default=DEFAULT_TRAINING_CONFIG,
     )
-
     parser.add_argument(
         "--ontology-bundle",
         type=Path,
@@ -2138,18 +1758,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--profile")
-
-    parser.add_argument(
-        "--selection",
-        help="Dataset name, domain name, or all.",
-    )
+    parser.add_argument("--selection")
 
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=DEFAULT_DATA_DIR,
     )
-
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -2161,13 +1776,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=("lora", "full"),
         default="lora",
     )
-
     parser.add_argument(
         "--min-acceptance",
         type=float,
         default=0.0,
     )
-
     parser.add_argument(
         "--progress-every",
         type=int,
@@ -2178,29 +1791,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--skip-preparation",
         action="store_true",
     )
-
     parser.add_argument(
         "--skip-parsing",
         action="store_true",
-        help="Reuse existing full-dataset student inference.",
     )
-
     parser.add_argument(
         "--skip-training",
         action="store_true",
-        help="Require an existing compatible student checkpoint.",
     )
-
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Allow resuming matching interrupted teacher exports.",
-    )
-
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force dataset regeneration and a fresh parser run.",
     )
 
     return parser
@@ -2220,22 +1821,20 @@ def main() -> int:
     if args.progress_every < 1:
         raise ValueError("--progress-every must be positive.")
 
-    for path in (
+    required_paths = (
         args.config,
         args.model_config,
         args.training_config,
         args.ontology_bundle,
-    ):
+    )
+
+    for path in required_paths:
         resolved = resolve_path(path)
 
         if not resolved.is_file():
-            raise FileNotFoundError(
-                f"Required configuration file not found: {resolved}"
-            )
+            raise FileNotFoundError(f"Required configuration not found: {resolved}")
 
-    config = load_offline_config(
-        resolve_path(args.config)
-    )
+    config = load_config(resolve_path(args.config))
 
     sources = select_sources(
         config,
@@ -2246,9 +1845,11 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
 
     print(
-        "\n" + "=" * 68
+        "\n"
+        + "=" * 68
         + "\nOFFLINE NEURO-SYMBOLIC PREPARATION PIPELINE"
-        + "\n" + "=" * 68,
+        + "\n"
+        + "=" * 68,
         flush=True,
     )
 
@@ -2265,14 +1866,15 @@ def main() -> int:
     results = []
 
     for source in sources:
-        result = run_source(
-            args,
-            config,
-            source,
+        results.append(
+            run_source(
+                args,
+                config,
+                source,
+            )
         )
-        results.append(result)
 
-    numeric_fields = (
+    fields = (
         "prepared",
         "teacher_accepted",
         "teacher_rejected",
@@ -2285,10 +1887,7 @@ def main() -> int:
         "adapter_rejected",
     )
 
-    totals = {
-        field: sum(item[field] for item in results)
-        for field in numeric_fields
-    }
+    totals = {field: sum(item[field] for item in results) for field in fields}
 
     summary = {
         "pipeline": "offline_teacher_student_to_miner_adapter",
@@ -2305,9 +1904,7 @@ def main() -> int:
     )
 
     print(
-        "\n" + "=" * 68
-        + "\nOFFLINE PIPELINE COMPLETED"
-        + "\n" + "=" * 68,
+        "\n" + "=" * 68 + "\nOFFLINE PIPELINE COMPLETED" + "\n" + "=" * 68,
         flush=True,
     )
 

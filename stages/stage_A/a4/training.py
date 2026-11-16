@@ -1,4 +1,3 @@
-
 """Symbolic-head training on a frozen continuous residual."""
 
 from __future__ import annotations
@@ -161,9 +160,7 @@ def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, c
             jnp.stack(
                 [
                     jnp.all(jnp.isfinite(leaf))
-                    for leaf in jax.tree.leaves(
-                        (terms, grads, candidate, next_state)
-                    )
+                    for leaf in jax.tree.leaves((terms, grads, candidate, next_state))
                 ]
             )
         )
@@ -226,9 +223,7 @@ def evaluate(
 
     evaluate_batch = jax.jit(loss) if training.jit else loss
 
-    num_batches = (
-        training.eval_batches if eval_batches is None else eval_batches
-    )
+    num_batches = training.eval_batches if eval_batches is None else eval_batches
 
     batches = make_eval_set(
         blocks,
@@ -311,12 +306,8 @@ def train(
         model,
         frozen_residual,
         optimizer,
-        jnp.asarray(
-            np.stack([record.key_vector for record in bank.records])
-        ),
-        jnp.asarray(
-            np.stack([record.val_vector for record in bank.records])
-        ),
+        jnp.asarray(np.stack([record.key_vector for record in bank.records])),
+        jnp.asarray(np.stack([record.val_vector for record in bank.records])),
         config,
     )
 
@@ -425,15 +416,11 @@ def train(
             seen_shapes.add(shape)
 
             if not bool(finite):
-                raise FloatingPointError(
-                    "Nonfinite loss, gradient or optimizer update"
-                )
+                raise FloatingPointError("Nonfinite loss, gradient or optimizer update")
 
             if measure:
                 if sample["calls"] != len(model.symbolic.layers):
-                    raise RuntimeError(
-                        "CUDA timing did not cover every symbolic layer"
-                    )
+                    raise RuntimeError("CUDA timing did not cover every symbolic layer")
 
                 sample.update(
                     step_seconds=elapsed,
@@ -447,8 +434,7 @@ def train(
             step_times.append(elapsed)
 
             metrics: dict[str, Any] = {
-                name: float(value)
-                for name, value in terms.items()
+                name: float(value) for name, value in terms.items()
             }
 
             metrics["symbolic"] = (
@@ -536,9 +522,7 @@ def train(
         "frozen": frozen,
         "validation": validation,
         "initial_validation": initial_validation,
-        "validation_ce_change": (
-            validation["loss"] - initial_validation["loss"]
-        ),
+        "validation_ce_change": (validation["loss"] - initial_validation["loss"]),
         "training_examples": len(data.train),
         "alignment": data.provenance.get("alignment", {}),
         "communication": _communication_summary(communication_samples),
@@ -597,14 +581,12 @@ def train(
 
     if mean_ms is not None:
         log.info(
-            "Latency: mean training step=%.3f ms "
-            "(excluding first update)",
+            "Latency: mean training step=%.3f ms " "(excluding first update)",
             mean_ms,
         )
     else:
         log.info(
-            "Latency: insufficient updates for a mean "
-            "excluding the first update"
+            "Latency: insufficient updates for a mean " "excluding the first update"
         )
 
     _log_communication(results["communication"])
