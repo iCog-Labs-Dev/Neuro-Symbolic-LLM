@@ -81,8 +81,5 @@ jobs:
       - name: Run benchmark schema and report tests
         run: >-
           python -m pytest
-          tests/benchmark/test_orchestration.py
-          tests/benchmark/test_evaluation.py
           tests/benchmark/test_benchmark.py
-          tests/benchmark/test_research_audits.py
           -v --tb=short

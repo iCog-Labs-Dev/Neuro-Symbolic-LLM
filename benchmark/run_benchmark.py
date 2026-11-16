@@ -1,33 +1,460 @@
-"""Small, artifact-driven A1/A2/A3 benchmark harness."""
+"""Run the complete A1/A2/A3 benchmark and generate internal/external reports.
+
+    python benchmark/run_benchmark.py
+    python benchmark/run_benchmark.py report --output-dir runs/benchmark
+
+Planning, training, evaluation, artifact validation and visualization live here.
+Model training and metric formulas remain in their shared project modules.
+"""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import html
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+import webbrowser
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from hashlib import sha256
+from numbers import Integral, Real
 from pathlib import Path
-from typing import Any, cast
+from statistics import fmean, stdev
+from typing import Any
 
 import numpy as np
 import yaml
 
-from benchmark.provenance import (
-    effective_condition,
-    finalize_attempt,
-    next_attempt_name,
-    sha256_file,
-    source_fingerprint,
-    validate_complete_attempt,
-)
+GENERATED_REPORT_PREFIX = "report_and_visualization/"
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: Path | str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def fingerprint(value: Any) -> str:
+    return sha256_bytes(canonical_json(value).encode("utf-8"))
+
+
+def source_fingerprint(root: Path) -> dict[str, Any]:
+    def git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout.strip()
+
+    commit = git("rev-parse", "HEAD")
+    diff = git("diff", "--binary", "HEAD")
+    untracked = git("ls-files", "--others", "--exclude-standard")
+    untracked_paths = (
+        []
+        if not untracked
+        else sorted(
+            path
+            for path in untracked.splitlines()
+            if path != GENERATED_REPORT_PREFIX.rstrip("/")
+            and not path.startswith(GENERATED_REPORT_PREFIX)
+        )
+    )
+    untracked_source_hashes = {
+        relative: sha256_file(root / relative)
+        for relative in untracked_paths
+        if Path(relative).suffix.lower() in {".py", ".yaml", ".yml", ".toml"}
+        and (root / relative).is_file()
+    }
+    payload = {
+        "git_commit": commit,
+        "tracked_diff_sha256": (
+            None if diff is None else sha256_bytes(diff.encode("utf-8"))
+        ),
+        "untracked_paths": untracked_paths,
+        "untracked_source_hashes": untracked_source_hashes,
+    }
+    payload["source_sha256"] = fingerprint(payload)
+    return payload
+
+
+def effective_condition(
+    *,
+    method: str,
+    seed: int,
+    rank: int,
+    k: int | None,
+    protocol: str,
+    task_order: list[str] | tuple[str, ...],
+    heldout_tasks: list[str] | tuple[str, ...],
+    a2_arm: str | None,
+    stage_config_sha256: str,
+    runtime_config_sha256: str,
+    runtime_source: str,
+    epochs: int | None,
+    source_sha256: str,
+) -> dict[str, Any]:
+    condition = {
+        "schema": "nsllm.condition/v2",
+        "method": method,
+        "seed": int(seed),
+        "rank": int(rank),
+        "training_k": k,
+        "deployment_k": 0 if method == "a3" else None,
+        "protocol": protocol,
+        "task_order": list(task_order),
+        "heldout_tasks": sorted(heldout_tasks),
+        "a2_arm": a2_arm,
+        "stage_config_sha256": stage_config_sha256,
+        "runtime_config_sha256": runtime_config_sha256,
+        "runtime_source": runtime_source,
+        "epochs": epochs,
+        "source_sha256": source_sha256,
+    }
+    condition["condition_sha256"] = fingerprint(condition)
+    return condition
+
+
+def next_attempt_name(condition_dir: Path) -> str:
+    condition_dir.mkdir(parents=True, exist_ok=True)
+    attempt = 1
+    while True:
+        name = f"attempt-{attempt:04d}"
+        if (condition_dir / name).exists():
+            attempt += 1
+            continue
+        claim = condition_dir / f"{name}.claim"
+        try:
+            claim.open("x", encoding="utf-8").close()
+        except FileExistsError:
+            attempt += 1
+            continue
+        return name
+
+
+def finalize_attempt(run_dir: Path, spec: dict[str, Any]) -> None:
+    """Write immutable run identity, hash every artifact, and mark completion."""
+    (run_dir / "spec.json").write_text(
+        json.dumps(spec, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    ignored = {"artifacts.json", "COMPLETE", "FAILED"}
+    artifacts = {}
+    for path in sorted(run_dir.rglob("*")):
+        relative = path.relative_to(run_dir).as_posix()
+        if path.is_file() and relative not in ignored:
+            artifacts[relative] = {
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+    (run_dir / "artifacts.json").write_text(
+        json.dumps(
+            {"version": 1, "artifacts": artifacts},
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "COMPLETE").write_text(
+        json.dumps(
+            {
+                "status": "COMPLETE",
+                "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "artifact_index": "artifacts.json",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def validate_complete_attempt(
+    run_dir: Path,
+    *,
+    condition_sha256: str,
+    config_sha256: str,
+) -> tuple[bool, str | None]:
+    required = (
+        run_dir / "COMPLETE",
+        run_dir / "results.json",
+        run_dir / "config.yaml",
+        run_dir / "spec.json",
+        run_dir / "artifacts.json",
+    )
+    missing = [path.name for path in required if not path.is_file()]
+    if missing:
+        return False, f"missing artifacts: {missing}"
+    try:
+        spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
+        marker = json.loads((run_dir / "COMPLETE").read_text(encoding="utf-8"))
+        index = json.loads((run_dir / "artifacts.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        return False, f"invalid completion metadata: {error}"
+    if spec.get("condition_sha256") != condition_sha256:
+        return False, "condition fingerprint mismatch"
+    if spec.get("config_sha256") != config_sha256:
+        return False, "effective config fingerprint mismatch"
+    materialized_config = run_dir / "provenance" / "materialized_stage.yaml"
+    if (
+        not materialized_config.is_file()
+        or sha256_file(materialized_config) != config_sha256
+    ):
+        return False, "materialized stage config artifact mismatch"
+    runtime_config = run_dir / "provenance" / "materialized_runtime.yaml"
+    expected_runtime = spec.get("runtime_config_sha256")
+    if (
+        not runtime_config.is_file()
+        or not isinstance(expected_runtime, str)
+        or sha256_file(runtime_config) != expected_runtime
+    ):
+        return False, "materialized runtime config artifact mismatch"
+    if marker.get("status") != "COMPLETE":
+        return False, "completion marker is not successful"
+    artifacts = index.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return False, "artifact index is invalid"
+    actual_paths = {
+        path.relative_to(run_dir).as_posix()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+        and path.relative_to(run_dir).as_posix()
+        not in {"artifacts.json", "COMPLETE", "FAILED"}
+    }
+    if actual_paths != set(artifacts):
+        return False, "artifact index coverage mismatch"
+    for relative, metadata in artifacts.items():
+        path = run_dir / relative
+        if not path.is_file() or sha256_file(path) != metadata.get("sha256"):
+            return False, f"artifact hash mismatch: {relative}"
+    return True, None
+
+
+def _finite_float(value: Any, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{field} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be a finite number")
+    return result
+
+
+def aggregate_lm_rows(
+    rows: Sequence[Mapping[str, float | int]],
+) -> dict[str, Any]:
+    """Aggregate additive language-model statistics by evaluated token count."""
+    if not rows:
+        return {"status": "insufficient_data", "tokens": 0}
+
+    tokens = 0
+    totals: dict[str, list[float]] = {
+        name: [] for name in ("loss_sum", "base_loss_sum", "kl_sum", "correct")
+    }
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"LM row {index} must be a mapping")
+        missing = {"tokens", *totals} - set(row)
+        if missing:
+            raise ValueError(f"LM row {index} is missing {sorted(missing)}")
+
+        row_tokens = row["tokens"]
+        if isinstance(row_tokens, bool) or not isinstance(row_tokens, Integral):
+            raise ValueError(f"LM row {index} tokens must be a nonnegative integer")
+        row_tokens = int(row_tokens)
+        if row_tokens < 0:
+            raise ValueError(f"LM row {index} tokens must be a nonnegative integer")
+
+        values = {
+            name: _finite_float(row[name], field=f"LM row {index} {name}")
+            for name in totals
+        }
+        if not 0.0 <= values["correct"] <= row_tokens:
+            raise ValueError(f"LM row {index} correct must be between 0 and tokens")
+
+        tokens += row_tokens
+        for name, value in values.items():
+            totals[name].append(value)
+
+    if tokens == 0:
+        return {"status": "insufficient_data", "tokens": 0}
+
+    loss = math.fsum(totals["loss_sum"]) / tokens
+    base_loss = math.fsum(totals["base_loss_sum"]) / tokens
+    try:
+        perplexity = math.exp(loss)
+        base_perplexity = math.exp(base_loss)
+    except OverflowError as exc:
+        raise ValueError("aggregated LM loss is too large to exponentiate") from exc
+
+    return {
+        "status": "measured",
+        "tokens": tokens,
+        "loss": loss,
+        "base_loss": base_loss,
+        "perplexity": perplexity,
+        "base_perplexity": base_perplexity,
+        "kl": math.fsum(totals["kl_sum"]) / tokens,
+        "token_accuracy": math.fsum(totals["correct"]) / tokens,
+    }
+
+
+def evaluate_long_range(
+    config: Mapping[str, Any],
+    score_choice: Callable[[str, str], float],
+) -> dict[str, Any]:
+    """Evaluate inline multiple-choice prompts with an external scoring callback."""
+    if not isinstance(config, Mapping):
+        raise ValueError("long-range configuration must be a mapping")
+    if config.get("schema") != "long-range/v1":
+        raise ValueError("long-range probes must use schema 'long-range/v1'")
+    if not callable(score_choice):
+        raise ValueError("score_choice must be callable")
+
+    items = config.get("items", [])
+    if not isinstance(items, list):
+        raise ValueError("long-range items must be a list")
+    if not items:
+        return {"status": "not_configured", "reason": "no long-range probes"}
+
+    required = {
+        "id",
+        "family",
+        "distance",
+        "context",
+        "question",
+        "choices",
+        "answer",
+    }
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"long-range item {index} must be a mapping")
+        missing = required - set(item)
+        if missing:
+            raise ValueError(f"long-range item is missing {sorted(missing)}")
+
+        text_fields = ("id", "family", "distance", "context", "question")
+        for field in text_fields:
+            if not isinstance(item[field], str) or not item[field]:
+                raise ValueError(
+                    f"long-range item {index} {field} must be nonempty text"
+                )
+        item_id = item["id"]
+        if item_id in seen_ids:
+            raise ValueError(f"long-range item id {item_id!r} is duplicated")
+        seen_ids.add(item_id)
+
+        choices = item["choices"]
+        if (
+            not isinstance(choices, list)
+            or len(choices) < 2
+            or any(not isinstance(choice, str) or not choice for choice in choices)
+        ):
+            raise ValueError(
+                f"long-range item {item_id!r} requires at least two text choices"
+            )
+
+        answer = item["answer"]
+        if isinstance(answer, bool) or not isinstance(answer, Integral):
+            raise ValueError(f"long-range item {item_id!r} answer must be an index")
+        answer = int(answer)
+        if not 0 <= answer < len(choices):
+            raise ValueError(f"long-range item {item_id!r} answer is out of range")
+
+        filler = item.get("filler", "")
+        if not isinstance(filler, str):
+            raise ValueError(f"long-range item {item_id!r} filler must be text")
+        repeat = item.get("filler_repeat", 0)
+        if isinstance(repeat, bool) or not isinstance(repeat, Integral) or repeat < 0:
+            raise ValueError(
+                f"long-range item {item_id!r} filler_repeat must be a nonnegative integer"
+            )
+
+        prompt = item["context"] + (filler * int(repeat)) + item["question"]
+        scores = [
+            _finite_float(
+                score_choice(prompt, choice),
+                field=f"long-range item {item_id!r} score {choice!r}",
+            )
+            for choice in choices
+        ]
+        predicted = max(range(len(scores)), key=scores.__getitem__)
+        distractors = [score for choice, score in enumerate(scores) if choice != answer]
+        rows.append(
+            {
+                "id": item_id,
+                "family": item["family"],
+                "distance": item["distance"],
+                "answer": answer,
+                "predicted": predicted,
+                "correct": predicted == answer,
+                "margin": scores[answer] - max(distractors),
+                "scores": scores,
+            }
+        )
+
+    by_family: dict[str, dict[str, float]] = {}
+    for family in sorted({row["family"] for row in rows}):
+        selected = [row for row in rows if row["family"] == family]
+        by_family[family] = {
+            "accuracy": math.fsum(row["correct"] for row in selected) / len(selected),
+            "mean_margin": math.fsum(row["margin"] for row in selected) / len(selected),
+        }
+
+    by_distance: dict[str, float] = {}
+    for distance in sorted({row["distance"] for row in rows}):
+        selected = [row for row in rows if row["distance"] == distance]
+        by_distance[distance] = math.fsum(row["correct"] for row in selected) / len(
+            selected
+        )
+
+    near_far_gap = None
+    if "near" in by_distance and "far" in by_distance:
+        near_far_gap = by_distance["near"] - by_distance["far"]
+
+    return {
+        "status": "measured",
+        "accuracy": math.fsum(row["correct"] for row in rows) / len(rows),
+        "mean_margin": math.fsum(row["margin"] for row in rows) / len(rows),
+        "by_family": by_family,
+        "by_distance": by_distance,
+        "near_far_gap": near_far_gap,
+        "items": rows,
+    }
+
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DEFAULT_RUNTIME_CONFIG = ROOT / "configs" / "runtime_datasets.yaml"
 BENCHMARK_RUNTIME_SOURCE = "separate"
 BENCHMARK_LEARNING_RATE = 1.0e-3
@@ -165,10 +592,6 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
-
-
 def _load_deployed_metrics(
     run: dict[str, Any], result: dict[str, Any]
 ) -> dict[str, Any]:
@@ -180,7 +603,6 @@ def _load_deployed_metrics(
     import jax
     import jax.numpy as jnp
 
-    from benchmark.evaluation import aggregate_lm_rows, evaluate_long_range
     from frozenllm.substrate import FrozenSubstrate, identity_modify
     from metrics.performance import (
         calibration_stats,
@@ -975,7 +1397,7 @@ def train_manifest(
     manifest = _read_json(manifest_path)
     config_root = output_dir
     planned_source_sha = str(manifest.get("source", {}).get("source_sha256", ""))
-    for raw in manifest["runs"]:
+    for run_index, raw in enumerate(manifest["runs"], start=1):
         current_source = source_fingerprint(ROOT)
         if planned_source_sha and current_source["source_sha256"] != planned_source_sha:
             raise RuntimeError(
@@ -1049,6 +1471,10 @@ def train_manifest(
         )
         log_path = output_dir / "logs" / f"{spec.run_id}-{attempt_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        print(
+            f"Training {run_index}/{len(manifest['runs'])}: {spec.run_id}\nLog: {log_path}",
+            flush=True,
+        )
         with log_path.open("w", encoding="utf-8") as log:
             completed = subprocess.run(
                 _command(attempt_spec, config, runtime_config),
@@ -2095,3 +2521,1698 @@ def report_manifest(output_dir: Path, report_rank: int = 4) -> Path:
     path = output_dir / "REPORT.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+STAGE_FOLDER_PATTERN = "stage_{stage}"
+GENERAL_REPORT_PATTERN = "stage_{stage}_general_report.md"
+STAGE_REPORT_PATTERN = "{method}_result_and_visualization.md"
+FIGURES_FOLDER = "figures"
+METHODS = ("a1", "a2", "a3")
+METHOD_LABELS = {"a1": "A1", "a2": "A2", "a3": "A3"}
+METHOD_COLORS = {"a1": "#3B82F6", "a2": "#F59E0B", "a3": "#10B981"}
+FIGURE_DPI = 150
+AUDIT_METRICS = {
+    "representation_fracture",
+    "functional_commutator",
+    "factor_overlap",
+    "mixed_curvature",
+    "off_support_leakage",
+    "cross_support_coupling",
+    "fingerprint_separability",
+    "fingerprint_stability",
+    "category_role_accuracy",
+    "support_explanation_accuracy",
+    "naturality_error",
+    "closure_error",
+    "ablation_mae",
+    "ablation_spearman",
+    "task_accuracy",
+    "task_macro_f1",
+    "task_micro_f1",
+    "task_ece",
+    "accuracy_forgetting",
+    "instruction_following",
+}
+VISUALIZATION_OPERATIONAL_METRIC_SPECS = OPERATIONAL_METRIC_SPECS + (
+    ("Mean training step time (seconds)", "mean_step_time", "lower"),
+)
+UNAVAILABLE_REASONS = {
+    "representation_fracture_unavailable": "semantic factors are not configured for A1-A3",
+    "factor_overlap_unavailable": "semantic factors are not configured for A1-A3",
+    "mixed_curvature_unavailable": "no validated per-example curvature protocol is enabled",
+    "off_support_leakage_unavailable": "A1-A3 do not define intended component supports",
+    "causal_fingerprint_unavailable": "independent component-role labels are unavailable",
+    "naturality_unavailable": "category labels and declared transformations are unavailable",
+    "ablation_fidelity_unavailable": "the sampled intervention audit protocol is not enabled",
+    "task_primary_unavailable": "the current benchmark does not use labeled task targets",
+    "task_macro_f1_unavailable": "the current benchmark does not use labeled task targets",
+    "accuracy_forgetting_unavailable": "task-score matrices are unavailable without labeled targets",
+}
+
+
+@dataclass(frozen=True)
+class HeadlineCohort:
+    protocol: str
+    rank: int
+    order: tuple[str, ...]
+    heldout: tuple[str, ...]
+    selected_k: int | None
+    selection: dict[str, Any]
+    records: dict[str, tuple[dict[str, Any], ...]]
+    matched_seeds: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class RunArtifacts:
+    record: dict[str, Any]
+    result: dict[str, Any]
+    meta: dict[str, Any]
+    events: tuple[dict[str, Any], ...]
+    run_dir: Path | None
+
+
+def _read_json(path: Path, *, required: bool = True) -> dict[str, Any]:
+    if not path.is_file():
+        if required:
+            raise FileNotFoundError(path)
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object: {path}")
+    return value
+
+
+def _read_jsonl(path: Path) -> tuple[dict[str, Any], ...]:
+    if not path.is_file():
+        return ()
+    rows = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Invalid JSONL at {path}:{line_number}") from error
+        if not isinstance(value, dict):
+            raise ValueError(f"Expected a JSON object at {path}:{line_number}")
+        rows.append(value)
+    return tuple(rows)
+
+
+def _slug(value: str) -> str:
+    result = []
+    for character in value.lower():
+        if character.isalnum():
+            result.append(character)
+        elif not result or result[-1] != "_":
+            result.append("_")
+    return "".join(result).strip("_") or "metric"
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _flatten_numeric(value: Any, prefix: str = "") -> dict[str, float]:
+    flattened = {}
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_numeric(item, name))
+    else:
+        number = _finite(value)
+        if number is not None and prefix:
+            flattened[prefix] = number
+    return flattened
+
+
+def _sample_cell(values: Sequence[float], *, best: bool = False) -> str:
+    if not values:
+        return "N/A"
+    mean = fmean(values)
+    deviation = stdev(values) if len(values) > 1 else None
+    text = f"{mean:.6g}"
+    if deviation is not None:
+        text += f" +/- {deviation:.3g}"
+    text += f" (n={len(values)})"
+    return f"**{text}**" if best else text
+
+
+def _direction_text(direction: str) -> str:
+    return {"higher": "higher ^", "lower": "lower v", "context": "context"}.get(
+        direction, direction
+    )
+
+
+def _load_plotting():
+    try:
+        import matplotlib
+        import pandas as pd
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        return plt, pd
+    except (ImportError, RuntimeError) as error:
+        raise RuntimeError(
+            "Install the visualization extra to generate report images: pip install -e '.[visualization]'"
+        ) from error
+
+
+def _save_figure(figure: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight", metadata={})
+
+
+def _placeholder(plt: Any, path: Path, title: str, reason: str) -> None:
+    figure, axis = plt.subplots(figsize=(8, 4.5))
+    axis.axis("off")
+    axis.text(0.5, 0.58, title, ha="center", va="center", weight="bold", fontsize=13)
+    axis.text(
+        0.5,
+        0.42,
+        f"not available: {reason}",
+        ha="center",
+        va="center",
+        wrap=True,
+        fontsize=10,
+    )
+    _save_figure(figure, path)
+    plt.close(figure)
+
+
+def _image_markdown(path: Path, report_dir: Path, alt: str, plt_available: bool) -> str:
+    if not plt_available:
+        return f"_Figure unavailable: plotting dependency is not installed ({alt})._"
+    relative = path.relative_to(report_dir).as_posix()
+    return f"![{alt}]({relative})"
+
+
+def _condition_key(
+    record: Mapping[str, Any],
+) -> tuple[str, int, tuple[str, ...], tuple[str, ...]]:
+    return (
+        str(record.get("protocol", "sequential")),
+        int(record.get("rank", 16)),
+        tuple(record.get("task_order", EXPECTED_DOMAINS)),
+        tuple(record.get("heldout_tasks", ())),
+    )
+
+
+def _select_headline_cohort(
+    records: Sequence[dict[str, Any]], report_rank: int
+) -> HeadlineCohort | None:
+    valid = [record for record in records if record.get("status") != "invalid"]
+    conditions = sorted({_condition_key(record) for record in valid})
+    candidates = []
+    for condition in conditions:
+        protocol, rank, order, heldout = condition
+        methods = {
+            str(record.get("method"))
+            for record in valid
+            if _condition_key(record) == condition
+        }
+        if set(METHODS) <= methods:
+            candidates.append(condition)
+    if not candidates:
+        return None
+
+    def preference(condition):
+        protocol, rank, order, heldout = condition
+        return (
+            protocol != "sequential",
+            bool(heldout),
+            order != EXPECTED_DOMAINS,
+            rank != report_rank,
+            -rank,
+            protocol,
+            order,
+            heldout,
+        )
+
+    protocol, rank, order, heldout = min(candidates, key=preference)
+    selection = select_a3_k(
+        valid,
+        protocol=protocol,
+        rank=rank,
+        order=order,
+        heldout=heldout,
+    )
+    selected_k = selection["selected_k"]
+    method_records = {}
+    for method in METHODS:
+        rows = [
+            record
+            for record in valid
+            if record.get("method") == method
+            and _condition_key(record) == (protocol, rank, order, heldout)
+            and (method != "a3" or record.get("k") == selected_k)
+        ]
+        method_records[method] = tuple(rows)
+    seed_sets = [{int(row["seed"]) for row in method_records[m]} for m in METHODS]
+    common = set.intersection(*seed_sets) if all(seed_sets) else set()
+    matched = []
+    for seed in sorted(common):
+        fingerprints = {
+            row.get("runtime_data_sha256")
+            for method in METHODS
+            for row in method_records[method]
+            if int(row["seed"]) == seed
+        }
+        if (
+            len(fingerprints) == 1
+            and None not in fingerprints
+            and "" not in fingerprints
+        ):
+            matched.append(seed)
+    return HeadlineCohort(
+        protocol=protocol,
+        rank=rank,
+        order=order,
+        heldout=heldout,
+        selected_k=selected_k,
+        selection=selection,
+        records=method_records,
+        matched_seeds=tuple(matched),
+    )
+
+
+def _metric_samples(
+    cohort: HeadlineCohort, metric: str
+) -> dict[str, list[tuple[int, float]]]:
+    by_seed: dict[str, dict[int, float]] = {}
+    for method in METHODS:
+        samples = {}
+        for record in cohort.records[method]:
+            seed = int(record["seed"])
+            if seed not in cohort.matched_seeds:
+                continue
+            values = metric_values_for_record(record, metric, cohort.rank)
+            if values:
+                samples[seed] = float(np.mean(values))
+        by_seed[method] = samples
+    seed_sets = [set(by_seed[method]) for method in METHODS]
+    common = set.intersection(*seed_sets) if all(seed_sets) else set()
+    if metric in AUDIT_METRICS:
+        common = {
+            seed
+            for seed in common
+            if len(
+                {
+                    row.get("research_audits", {}).get("protocol_sha256")
+                    for method in METHODS
+                    for row in cohort.records[method]
+                    if int(row["seed"]) == seed
+                }
+            )
+            == 1
+            and all(
+                row.get("research_audits", {}).get("protocol_sha256")
+                for method in METHODS
+                for row in cohort.records[method]
+                if int(row["seed"]) == seed
+            )
+        }
+    return {
+        method: [(seed, by_seed[method][seed]) for seed in sorted(common)]
+        for method in METHODS
+    }
+
+
+def _na_reason(method: str, metric: str, cohort: HeadlineCohort | None) -> str:
+    if metric in {"representation_fracture", "factor_overlap"} and cohort:
+        for row in cohort.records.get(method, ()):
+            factor = (
+                row.get("research_audits", {})
+                .get("metrics", {})
+                .get("factor_organization", {})
+            )
+            if factor.get("status") == "unavailable":
+                return str(factor.get("reason", "shared factor metrics unavailable"))
+    if metric in AUDIT_METRICS:
+        return "requires valid, checkpoint-bound audit evidence with a matching protocol across methods"
+    if metric in UNAVAILABLE_REASONS:
+        return UNAVAILABLE_REASONS[metric]
+    if cohort is None:
+        return (
+            "no A1/A2/A3 condition has matching protocol, rank, order, and held-out set"
+        )
+    rows = cohort.records.get(method, ())
+    if not rows:
+        return "no run exists in the selected comparison cohort"
+    if not cohort.matched_seeds:
+        return "no seed with matching A1/A2/A3 runtime fingerprints"
+    if metric == "residual_compressibility":
+        statuses = sorted(
+            {str(row.get("compressibility_status", "unavailable")) for row in rows}
+        )
+        return "compressibility unavailable: " + ", ".join(statuses)
+    if metric == "sequential_joint_gap":
+        return "matched sequential and joint runs with equal token/step budgets are unavailable"
+    if metric == "update_commutator":
+        return "both alternate task orders are required"
+    if any(metric_values_for_record(row, metric, cohort.rank) for row in rows):
+        return "metric is not available for all three stages on the same matched seeds"
+    deployed_reasons = sorted(
+        {
+            str(row.get("deployed_evaluation", {}).get("reason"))
+            for row in rows
+            if row.get("deployed_evaluation", {}).get("status") != "measured"
+            and row.get("deployed_evaluation", {}).get("reason")
+        }
+    )
+    if deployed_reasons:
+        return "; ".join(deployed_reasons)
+    return "metric was not produced by the selected run profile"
+
+
+def _plot_method_metric(
+    plt: Any,
+    path: Path,
+    label: str,
+    samples: Mapping[str, Sequence[tuple[int, float]]],
+    reason: str,
+) -> None:
+    available = {method: list(rows) for method, rows in samples.items() if rows}
+    if not available:
+        _placeholder(plt, path, label, reason)
+        return
+    figure, axis = plt.subplots(figsize=(8, 5))
+    positions = np.arange(len(METHODS))
+    means = []
+    errors = []
+    for method in METHODS:
+        values = [value for _, value in samples.get(method, ())]
+        means.append(float(np.mean(values)) if values else np.nan)
+        errors.append(float(np.std(values, ddof=1)) if len(values) > 1 else 0.0)
+    axis.bar(
+        positions,
+        means,
+        yerr=errors,
+        capsize=5,
+        color=[METHOD_COLORS[method] for method in METHODS],
+        alpha=0.82,
+        width=0.62,
+    )
+    for index, method in enumerate(METHODS):
+        rows = samples.get(method, ())
+        for point, (seed, value) in enumerate(rows):
+            offset = (point - (len(rows) - 1) / 2) * 0.04
+            axis.scatter(
+                index + offset,
+                value,
+                color="#111827",
+                s=22,
+                zorder=3,
+                label=f"seed {seed}" if index == 0 else None,
+            )
+    axis.set_xticks(positions, [METHOD_LABELS[method] for method in METHODS])
+    axis.set_title(label)
+    axis.grid(axis="y", linestyle="--", alpha=0.3)
+    axis.set_axisbelow(True)
+    _save_figure(figure, path)
+    plt.close(figure)
+
+
+def _metric_table(
+    specs: Sequence[tuple[str, str, str]],
+    cohort: HeadlineCohort | None,
+    plt: Any,
+    pd: Any,
+    figures_dir: Path,
+    report_dir: Path,
+    category: str,
+) -> tuple[list[str], list[str]]:
+    lines = [
+        f"## {category.title()} Metrics",
+        "",
+        "| Metric | A1 | A2 | A3 | Direction |",
+        "|---|---:|---:|---:|---|",
+    ]
+    figures = []
+    for label, metric, direction in specs:
+        samples = (
+            _metric_samples(cohort, metric)
+            if cohort is not None
+            else {method: [] for method in METHODS}
+        )
+        values = {method: [value for _, value in samples[method]] for method in METHODS}
+        means = {
+            method: (
+                float(pd.Series(rows, dtype="float64").mean())
+                if rows and pd is not None
+                else (fmean(rows) if rows else None)
+            )
+            for method, rows in values.items()
+        }
+        best_methods: set[str] = set()
+        if direction in {"higher", "lower"}:
+            present = {
+                method: value for method, value in means.items() if value is not None
+            }
+            if present:
+                target = (
+                    max(present.values())
+                    if direction == "higher"
+                    else min(present.values())
+                )
+                best_methods = {
+                    method
+                    for method, value in present.items()
+                    if math.isclose(value, target)
+                }
+        cells = []
+        for method in METHODS:
+            if values[method]:
+                cells.append(_sample_cell(values[method], best=method in best_methods))
+            else:
+                cells.append(f"N/A ({_na_reason(method, metric, cohort)})")
+        lines.append(
+            f"| {label} | {' | '.join(cells)} | {_direction_text(direction)} |"
+        )
+        figure_path = figures_dir / f"{category}_{_slug(metric)}.png"
+        reason = _na_reason("a1", metric, cohort)
+        if plt is not None:
+            _plot_method_metric(plt, figure_path, label, samples, reason)
+        figures.extend(
+            [
+                "",
+                f"### {label}",
+                "",
+                _image_markdown(
+                    figure_path,
+                    report_dir,
+                    f"A1, A2, and A3 comparison for {label}",
+                    plt is not None,
+                ),
+            ]
+        )
+    return lines, figures
+
+
+def _resolve_path(value: Any, benchmark_dir: Path) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else benchmark_dir / path
+
+
+def _load_run_artifacts(
+    method: str,
+    records: Sequence[dict[str, Any]],
+    manifest: dict[str, Any],
+    benchmark_dir: Path,
+) -> tuple[RunArtifacts, ...]:
+    run_map = {str(run.get("run_id")): run for run in manifest.get("runs", [])}
+    artifacts = []
+    for record in records:
+        if record.get("method") != method or record.get("status") == "invalid":
+            continue
+        manifest_run = run_map.get(str(record.get("run_id")), {})
+        result_path = _resolve_path(
+            record.get("results") or manifest_run.get("results"), benchmark_dir
+        )
+        result = _read_json(result_path, required=False) if result_path else {}
+        run_dir = result_path.parent if result_path and result_path.is_file() else None
+        meta = _read_json(run_dir / "meta.json", required=False) if run_dir else {}
+        events = _read_jsonl(run_dir / "metrics.jsonl") if run_dir else ()
+        artifacts.append(RunArtifacts(record, result, meta, events, run_dir))
+    return tuple(artifacts)
+
+
+def _event_key_inventory(artifacts: Sequence[RunArtifacts]) -> dict[str, list[str]]:
+    inventory: dict[str, set[str]] = defaultdict(set)
+    for artifact in artifacts:
+        for event in artifact.events:
+            event_name = str(event.get("event", "unknown"))
+            inventory[event_name].update(str(key) for key in event)
+    return {name: sorted(keys) for name, keys in sorted(inventory.items())}
+
+
+def _plot_lines(
+    plt: Any,
+    path: Path,
+    title: str,
+    series: Mapping[str, Sequence[tuple[float, float]]],
+    reason: str,
+    *,
+    x_label: str,
+    y_label: str,
+) -> None:
+    available = {name: list(points) for name, points in series.items() if points}
+    if not available:
+        _placeholder(plt, path, title, reason)
+        return
+    figure, axis = plt.subplots(figsize=(8, 5))
+    for index, (name, points) in enumerate(sorted(available.items())):
+        ordered = sorted(points)
+        axis.plot(
+            [point[0] for point in ordered],
+            [point[1] for point in ordered],
+            marker="o",
+            linewidth=1.8,
+            label=name,
+            color=list(METHOD_COLORS.values())[index % len(METHOD_COLORS)],
+        )
+    axis.set_title(title)
+    axis.set_xlabel(x_label)
+    axis.set_ylabel(y_label)
+    axis.grid(True, linestyle="--", alpha=0.3)
+    if len(available) > 1:
+        axis.legend(fontsize=8)
+    _save_figure(figure, path)
+    plt.close(figure)
+
+
+def _plot_heatmap(
+    plt: Any,
+    path: Path,
+    title: str,
+    matrix: Any,
+    reason: str,
+    *,
+    x_labels: Sequence[Any] | None = None,
+    y_labels: Sequence[Any] | None = None,
+) -> None:
+    try:
+        values = np.asarray(matrix, dtype=float)
+    except (TypeError, ValueError):
+        values = np.asarray([])
+    if values.ndim != 2 or not values.size or not np.isfinite(values).any():
+        _placeholder(plt, path, title, reason)
+        return
+    figure, axis = plt.subplots(figsize=(7, 5))
+    image = axis.imshow(values, aspect="auto", cmap="viridis")
+    axis.set_title(title)
+    if x_labels and len(x_labels) == values.shape[1]:
+        axis.set_xticks(range(values.shape[1]), [str(item) for item in x_labels])
+    if y_labels and len(y_labels) == values.shape[0]:
+        axis.set_yticks(range(values.shape[0]), [str(item) for item in y_labels])
+    figure.colorbar(image, ax=axis)
+    _save_figure(figure, path)
+    plt.close(figure)
+
+
+def _selected_artifact(
+    method: str, artifacts: Sequence[RunArtifacts], cohort: HeadlineCohort | None
+) -> RunArtifacts | None:
+    candidates = list(artifacts)
+    if cohort is not None:
+        candidates = [
+            artifact
+            for artifact in candidates
+            if _condition_key(artifact.record)
+            == (cohort.protocol, cohort.rank, cohort.order, cohort.heldout)
+            and (method != "a3" or artifact.record.get("k") == cohort.selected_k)
+            and int(artifact.record.get("seed", -1)) in cohort.matched_seeds
+        ]
+    return (
+        min(candidates, key=lambda row: int(row.record.get("seed", 0)))
+        if candidates
+        else None
+    )
+
+
+def _common_stage_figures(
+    method: str,
+    artifacts: Sequence[RunArtifacts],
+    cohort: HeadlineCohort | None,
+    plt: Any,
+    figures_dir: Path,
+    report_dir: Path,
+) -> list[str]:
+    lines: list[str] = []
+    selected = _selected_artifact(method, artifacts, cohort)
+    plots: list[tuple[str, str, str]] = []
+
+    compression_series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for artifact in artifacts:
+        curve = artifact.record.get("residual_compressibility") or {}
+        for rank, value in curve.items():
+            number = _finite(value)
+            if number is not None:
+                compression_series[
+                    f"seed {artifact.record.get('seed')} K={artifact.record.get('k')}"
+                ].append((float(rank), number))
+    path = figures_dir / "residual_compressibility.png"
+    if plt is not None:
+        _plot_lines(
+            plt,
+            path,
+            "Residual compressibility versus rank",
+            compression_series,
+            "requires at least two ranks with a reliable reference improvement",
+            x_label="rank",
+            y_label="C(r)",
+        )
+    plots.append(
+        (
+            "Residual compressibility",
+            path.name,
+            "Residual compressibility curve by rank",
+        )
+    )
+
+    matrix = selected.record.get("loss_matrix") if selected else None
+    domains = selected.record.get("domains", []) if selected else []
+    path = figures_dir / "loss_matrix.png"
+    if plt is not None:
+        _plot_heatmap(
+            plt,
+            path,
+            "Validation loss matrix",
+            matrix,
+            "loss matrix is unavailable",
+            x_labels=domains,
+            y_labels=range(len(matrix or [])),
+        )
+    plots.append(
+        ("Loss matrix", path.name, "Checkpoint-by-domain validation loss heatmap")
+    )
+
+    perplexity_matrix = selected.result.get("ppl") if selected else None
+    path = figures_dir / "perplexity_matrix.png"
+    if plt is not None:
+        _plot_heatmap(
+            plt,
+            path,
+            "Validation perplexity matrix",
+            perplexity_matrix,
+            "perplexity matrix is unavailable",
+            x_labels=domains,
+            y_labels=range(len(perplexity_matrix or [])),
+        )
+    plots.append(
+        (
+            "Perplexity matrix",
+            path.name,
+            "Checkpoint-by-domain validation perplexity heatmap",
+        )
+    )
+
+    forgetting_series = {}
+    if selected:
+        values = selected.result.get("mean_forgetting") or []
+        forgetting_series["mean forgetting"] = [
+            (index, float(value))
+            for index, value in enumerate(values)
+            if _finite(value) is not None
+        ]
+    path = figures_dir / "forgetting.png"
+    if plt is not None:
+        _plot_lines(
+            plt,
+            path,
+            "Loss-based forgetting",
+            forgetting_series,
+            "forgetting trajectory is unavailable",
+            x_label="training checkpoint",
+            y_label="mean loss increase",
+        )
+    plots.append(("Forgetting", path.name, "Loss-based forgetting trajectory"))
+
+    anchor_series: dict[str, list[tuple[float, float]]] = {}
+    if selected:
+        trajectory = (
+            selected.record.get("deployed_evaluation", {})
+            .get("anchor_kl", {})
+            .get("trajectory", [])
+        )
+        anchor_series["anchor KL"] = [
+            (float(row["checkpoint"]), float(row["kl"]))
+            for row in trajectory
+            if _finite(row.get("checkpoint")) is not None
+            and _finite(row.get("kl")) is not None
+        ]
+    path = figures_dir / "anchor_kl.png"
+    if plt is not None:
+        _plot_lines(
+            plt,
+            path,
+            "Anchor KL across checkpoints",
+            anchor_series,
+            "anchor data or checkpoint trajectory is unavailable",
+            x_label="checkpoint",
+            y_label="KL(base || adapted)",
+        )
+    plots.append(("Anchor KL", path.name, "Anchor KL drift across checkpoints"))
+
+    on_domain_kl: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    if selected:
+        kl_matrix = selected.result.get("kl") or []
+        for checkpoint, row in enumerate(kl_matrix):
+            if not isinstance(row, list):
+                continue
+            for index, value in enumerate(row):
+                number = _finite(value)
+                if number is not None:
+                    domain = (
+                        domains[index] if index < len(domains) else f"domain {index}"
+                    )
+                    on_domain_kl[domain].append((checkpoint, number))
+    path = figures_dir / "on_domain_kl.png"
+    if plt is not None:
+        _plot_lines(
+            plt,
+            path,
+            "On-domain KL across checkpoints",
+            on_domain_kl,
+            "checkpoint KL matrix is unavailable",
+            x_label="training checkpoint",
+            y_label="KL(base || adapted)",
+        )
+    plots.append(("On-domain KL", path.name, "On-domain KL across checkpoints"))
+
+    common_scalars = (
+        ("validation_loss", "Final validation loss", "validation_loss.png"),
+        ("test_loss", "Final held-out test loss", "test_loss.png"),
+        ("token_accuracy", "Token accuracy", "token_accuracy.png"),
+        ("calibration", "Token calibration ECE", "token_ece.png"),
+        ("heldout_transfer", "Held-out transfer", "heldout_transfer.png"),
+        (
+            "sequential_joint_gap",
+            "Sequential versus joint gap",
+            "sequential_joint_gap.png",
+        ),
+        ("long_range", "Long-range accuracy", "long_range.png"),
+        ("mean_step_time", "Mean training step time", "mean_step_time.png"),
+        ("tokens_per_second", "Training throughput", "throughput.png"),
+        ("trainable_params", "Trainable parameter count", "trainable_params.png"),
+        ("inference_latency", "Inference latency", "inference_latency.png"),
+        ("peak_memory", "Peak evaluator memory", "evaluator_memory.png"),
+    )
+    for metric, title, filename in common_scalars:
+        series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for artifact in artifacts:
+            values = metric_values_for_record(
+                artifact.record, metric, int(artifact.record.get("rank", 16))
+            )
+            if not values:
+                continue
+            label = (
+                f"seed={artifact.record.get('seed')} "
+                f"{artifact.record.get('protocol', 'sequential')} "
+                f"order={','.join(artifact.record.get('task_order', []))} "
+                f"heldout={','.join(artifact.record.get('heldout_tasks', []))} "
+                f"K={artifact.record.get('k')}"
+            )
+            series[label].append(
+                (float(artifact.record.get("rank", 16)), float(np.mean(values)))
+            )
+        path = figures_dir / filename
+        if plt is not None:
+            _plot_lines(
+                plt,
+                path,
+                title,
+                series,
+                _na_reason(method, metric, cohort),
+                x_label="rank",
+                y_label=title,
+            )
+        plots.append((title, path.name, f"{METHOD_LABELS[method]} {title}"))
+
+    for title, filename, alt in plots:
+        lines.extend(
+            [
+                "",
+                f"### {title}",
+                "",
+                _image_markdown(
+                    figures_dir / filename,
+                    report_dir,
+                    alt,
+                    plt is not None,
+                ),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "### Task-score matrices",
+            "",
+            "Task-score matrices require explicit checkpoint-by-task labeled audit evidence.",
+        ]
+    )
+    return lines
+
+
+def _training_series(
+    artifacts: Sequence[RunArtifacts], keys: Sequence[str]
+) -> dict[str, list[tuple[float, float]]]:
+    series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for artifact in artifacts:
+        for event in artifact.events:
+            if event.get("event") != "train":
+                continue
+            step = _finite(event.get("global_step"))
+            if step is None:
+                continue
+            for key in keys:
+                value = _finite(event.get(key))
+                if value is not None:
+                    label = f"{artifact.record.get('run_id')} {key}"
+                    series[label].append((step, value))
+    return series
+
+
+def _stage_metric_table(method: str, artifacts: Sequence[RunArtifacts]) -> list[str]:
+    lines = [
+        "## Run Summary",
+        "",
+        "| Run | Seed | Rank | K | Protocol | Validation loss | Test loss | Forgetting | Step time |",
+        "|---|---:|---:|---:|---|---:|---:|---:|---:|",
+    ]
+    for artifact in sorted(
+        artifacts,
+        key=lambda row: (
+            int(row.record.get("seed", 0)),
+            int(row.record.get("rank", 0)),
+            -1 if row.record.get("k") is None else int(row.record["k"]),
+        ),
+    ):
+        record = artifact.record
+        cells = [
+            str(record.get("run_id")),
+            str(record.get("seed")),
+            str(record.get("rank")),
+            str(record.get("k", "N/A")),
+            str(record.get("protocol", "N/A")),
+            str(record.get("final_mean_loss", "N/A")),
+            str(record.get("final_test_mean_loss", "N/A")),
+            str(record.get("mean_forgetting", "N/A")),
+            str(record.get("mean_step_time", "N/A")),
+        ]
+        lines.append("| " + " | ".join(cells) + " |")
+    if not artifacts:
+        lines.append(
+            f"| {METHOD_LABELS[method]} | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |"
+        )
+    return lines
+
+
+def _individual_metric_table(
+    title: str, specs: Sequence[tuple[str, str, str]], artifacts: Sequence[RunArtifacts]
+) -> list[str]:
+    lines = [
+        f"## {title}",
+        "",
+        "| Metric | Run | Value | Interpretation |",
+        "|---|---|---:|---|",
+    ]
+    for label, metric, direction in specs:
+        found = False
+        for artifact in artifacts:
+            values = metric_values_for_record(
+                artifact.record, metric, int(artifact.record.get("rank", 16))
+            )
+            if values:
+                found = True
+                lines.append(
+                    f"| {label} | {artifact.record.get('run_id')} | {fmean(values):.6g} | {_direction_text(direction)} |"
+                )
+        if not found:
+            lines.append(f"| {label} | N/A | N/A | evidence not available |")
+    return lines
+
+
+def _individual_metric_figure(
+    plt: Any,
+    path: Path,
+    title: str,
+    specs: Sequence[tuple[str, str, str]],
+    artifacts: Sequence[RunArtifacts],
+) -> None:
+    available = []
+    for label, metric, _ in specs:
+        points = [
+            (str(a.record.get("run_id")), fmean(values))
+            for a in artifacts
+            if (
+                values := metric_values_for_record(
+                    a.record, metric, int(a.record.get("rank", 16))
+                )
+            )
+        ]
+        if points:
+            available.append((label, points))
+    if not available:
+        _placeholder(
+            plt, path, title, "No measured metrics; see the table for required evidence"
+        )
+        return
+    columns = min(3, len(available))
+    rows = math.ceil(len(available) / columns)
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(5 * columns, 3.4 * rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    for axis, (label, points) in zip(axes.flat, available, strict=False):
+        axis.scatter(
+            range(len(points)), [value for _, value in points], color="#2563eb"
+        )
+        axis.set_xticks(
+            range(len(points)),
+            [name for name, _ in points],
+            rotation=45,
+            ha="right",
+            fontsize=7,
+        )
+        axis.set_title(label)
+        axis.grid(axis="y", linestyle="--", alpha=0.3)
+    for axis in list(axes.flat)[len(available) :]:
+        axis.axis("off")
+    figure.suptitle(title)
+    _save_figure(figure, path)
+    plt.close(figure)
+
+
+def _write_stage_report(
+    method: str,
+    records: Sequence[dict[str, Any]],
+    manifest: dict[str, Any],
+    benchmark_dir: Path,
+    stage_root: Path,
+    cohort: HeadlineCohort | None,
+    plt: Any,
+) -> Path:
+    method_dir = stage_root / METHOD_LABELS[method]
+    figures_dir = method_dir / FIGURES_FOLDER
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = _load_run_artifacts(method, records, manifest, benchmark_dir)
+    inventory = _event_key_inventory(artifacts)
+    report_path = method_dir / STAGE_REPORT_PATTERN.format(method=method)
+    lines = [
+        f"# {METHOD_LABELS[method]} Results and Visualization",
+        "",
+        f"- Runs available: {len(artifacts)}",
+        f"- Headline rank: {cohort.rank if cohort else 'N/A'}",
+        f"- Headline protocol: {cohort.protocol if cohort else 'N/A'}",
+    ]
+    if method == "a3":
+        lines.append(f"- Selected A3 K: {cohort.selected_k if cohort else 'N/A'}")
+    lines.extend(["", *_stage_metric_table(method, artifacts)])
+    lines.extend(
+        [
+            "",
+            *_individual_metric_table(
+                "Internal Metrics", INTERNAL_METRIC_SPECS, artifacts
+            ),
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            *_individual_metric_table(
+                "External Metrics", EXTERNAL_METRIC_SPECS, artifacts
+            ),
+        ]
+    )
+    for category, specs in (
+        ("Internal", INTERNAL_METRIC_SPECS),
+        ("External", EXTERNAL_METRIC_SPECS),
+    ):
+        path = figures_dir / f"{category.lower()}_metrics.png"
+        if plt is not None:
+            _individual_metric_figure(
+                plt,
+                path,
+                f"{METHOD_LABELS[method]} {category.lower()} metrics by run",
+                specs,
+                artifacts,
+            )
+        lines.extend(
+            [
+                "",
+                f"## {category} Metric Plots",
+                "",
+                _image_markdown(
+                    path, method_dir, f"{method} {category} metrics", plt is not None
+                ),
+            ]
+        )
+
+    lines.extend(["", "## Data Availability", ""])
+    if inventory:
+        for event_name, event_keys in inventory.items():
+            lines.append(
+                f"- `{event_name}`: {', '.join(f'`{key}`' for key in event_keys)}"
+            )
+    else:
+        lines.append("- `metrics.jsonl`: N/A (no event records found)")
+
+    lines.extend(
+        [
+            "",
+            "## Run Provenance",
+            "",
+            "| Run | Stage | Model | Python | Git commit | Dirty |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    for artifact in artifacts:
+        meta = artifact.meta
+        lines.append(
+            f"| {artifact.record.get('run_id')} | {meta.get('stage', 'N/A')} | "
+            f"{meta.get('model', 'N/A')} | {meta.get('python', 'N/A')} | "
+            f"{meta.get('git_commit', 'N/A')} | {meta.get('git_dirty', 'N/A')} |"
+        )
+    if not artifacts:
+        lines.append("| N/A | N/A | N/A | N/A | N/A | N/A |")
+
+    if method == "a1":
+        series = _training_series(artifacts, ("loss_task", "loss_total"))
+        path = figures_dir / "training_task_loss.png"
+        if plt is not None:
+            _plot_lines(
+                plt,
+                path,
+                "A1 training task loss",
+                series,
+                "loss_task/loss_total train events were not recorded",
+                x_label="global step",
+                y_label="loss",
+            )
+        lines.extend(
+            [
+                "",
+                "## A1 Training Loss",
+                "",
+                _image_markdown(
+                    path, method_dir, "A1 task training-loss curves", plt is not None
+                ),
+            ]
+        )
+    elif method == "a2":
+        loss_keys = ("loss_task", "loss_total", "loss_cpc", "loss_hid", "loss_stab")
+        series = _training_series(artifacts, loss_keys)
+        path = figures_dir / "auxiliary_losses.png"
+        if plt is not None:
+            _plot_lines(
+                plt,
+                path,
+                "A2 task and auxiliary losses",
+                series,
+                "A2 loss_cpc/loss_hid/loss_stab events were not recorded",
+                x_label="global step",
+                y_label="loss",
+            )
+        lines.extend(
+            [
+                "",
+                "## A2 Objective Terms",
+                "",
+                _image_markdown(
+                    path,
+                    method_dir,
+                    "A2 task, CPC, hidden, and stability losses",
+                    plt is not None,
+                ),
+            ]
+        )
+        diagnostics: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for artifact in artifacts:
+            for index, event in enumerate(artifact.events):
+                if event.get("event") != "a2_diagnostics":
+                    continue
+                for key, value in event.items():
+                    number = _finite(value)
+                    if key not in {"event", "when", "domain"} and number is not None:
+                        diagnostics[key].append((float(index), number))
+            if not any(diagnostics.values()):
+                for key, value in _flatten_numeric(
+                    artifact.result.get("a2_diagnostics", {})
+                ).items():
+                    diagnostics[key].append((float(len(diagnostics[key])), value))
+        path = figures_dir / "a2_diagnostics.png"
+        if plt is not None:
+            _plot_lines(
+                plt,
+                path,
+                "A2 predictor and monitor diagnostics",
+                dict(sorted(diagnostics.items())[:12]),
+                "a2_diagnostics events were not recorded",
+                x_label="diagnostic event",
+                y_label="value",
+            )
+        lines.extend(
+            [
+                "",
+                "## A2 Diagnostics",
+                "",
+                _image_markdown(
+                    path,
+                    method_dir,
+                    "A2 predictor and monitor diagnostics",
+                    plt is not None,
+                ),
+                "",
+                "## A2 vs A1 Paired Deltas",
+                "",
+                "| Run | Seed | Rank | Delta vs A1 |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for artifact in artifacts:
+            record = artifact.record
+            lines.append(
+                f"| {record.get('run_id')} | {record.get('seed')} | {record.get('rank')} | "
+                f"{record.get('paired_delta_vs_a1', 'N/A')} |"
+            )
+    else:
+        # K/rank heatmaps must not average different training protocols or task orders.
+        sweep_artifacts = [
+            a
+            for a in artifacts
+            if cohort is not None
+            and _condition_key(a.record)[0] == cohort.protocol
+            and _condition_key(a.record)[2:] == (cohort.order, cohort.heldout)
+            and int(a.record.get("seed", -1)) in cohort.matched_seeds
+            and any(
+                other.get("seed") == a.record.get("seed")
+                and other.get("runtime_data_sha256")
+                == a.record.get("runtime_data_sha256")
+                for other in cohort.records["a1"]
+            )
+        ]
+        for metric, title in (
+            (
+                "final_mean_loss",
+                "A3 final validation loss over K and rank (available matched seeds)",
+            ),
+            (
+                "mean_forgetting",
+                "A3 forgetting over K and rank (available matched seeds)",
+            ),
+            ("compressibility_c4", "A3 residual compressibility C(4) over K and rank"),
+        ):
+            ranks = sorted({int(a.record["rank"]) for a in sweep_artifacts})
+            ks = sorted(
+                {
+                    int(a.record["k"])
+                    for a in sweep_artifacts
+                    if a.record.get("k") is not None
+                }
+            )
+            grid = np.full((len(ks), len(ranks)), np.nan)
+            for row_index, k in enumerate(ks):
+                for column_index, rank in enumerate(ranks):
+                    metric_values: list[float] = []
+                    for artifact in sweep_artifacts:
+                        if (
+                            artifact.record.get("k") != k
+                            or artifact.record.get("rank") != rank
+                        ):
+                            continue
+                        raw_value = (
+                            (artifact.record.get("residual_compressibility") or {}).get(
+                                "4"
+                            )
+                            if metric == "compressibility_c4"
+                            else artifact.record.get(metric)
+                        )
+                        number = _finite(raw_value)
+                        if number is not None:
+                            metric_values.append(number)
+                    if metric_values:
+                        grid[row_index, column_index] = fmean(metric_values)
+            path = figures_dir / f"k_rank_{_slug(metric)}.png"
+            if plt is not None:
+                _plot_heatmap(
+                    plt,
+                    path,
+                    title,
+                    grid,
+                    "multiple A3 K/rank conditions are unavailable",
+                    x_labels=ranks,
+                    y_labels=ks,
+                )
+            lines.extend(
+                [
+                    "",
+                    f"## {title}",
+                    "",
+                    _image_markdown(path, method_dir, title, plt is not None),
+                ]
+            )
+        step_series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for artifact in sweep_artifacts:
+            value = _finite(artifact.record.get("mean_step_time"))
+            k_value = _finite(artifact.record.get("k"))
+            if value is not None and k_value is not None:
+                step_series[f"rank {artifact.record.get('rank')}"].append(
+                    (k_value, value)
+                )
+        path = figures_dir / "step_time_vs_k.png"
+        if plt is not None:
+            _plot_lines(
+                plt,
+                path,
+                "A3 mean training step time versus K",
+                step_series,
+                "A3 K/step-time sweep is unavailable",
+                x_label="K",
+                y_label="seconds",
+            )
+        lines.extend(
+            [
+                "",
+                "## A3 Step-Time Overhead",
+                "",
+                _image_markdown(
+                    path, method_dir, "A3 training step time versus K", plt is not None
+                ),
+            ]
+        )
+        energy_series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for artifact in artifacts:
+            for event in artifact.events:
+                if event.get("event") != "energy_curve" or not isinstance(
+                    event.get("curve"), list
+                ):
+                    continue
+                for index, value in enumerate(event["curve"]):
+                    number = _finite(value)
+                    if number is not None:
+                        energy_series[
+                            f"seed {artifact.record.get('seed')} K={artifact.record.get('k')}"
+                        ].append((index, number))
+        path = figures_dir / "energy_curve.png"
+        if plt is not None:
+            _plot_lines(
+                plt,
+                path,
+                "A3 predictive-coding energy curve",
+                energy_series,
+                "run_stage_a3.py was not run with --energy-curve",
+                x_label="inference step",
+                y_label="energy",
+            )
+        lines.extend(
+            [
+                "",
+                "## A3 Energy Curve",
+                "",
+                _image_markdown(
+                    path,
+                    method_dir,
+                    "A3 predictive-coding energy curve",
+                    plt is not None,
+                ),
+                "",
+                "## A3 K Selection",
+                "",
+                f"- Selected K: {cohort.selected_k if cohort else 'N/A'}",
+                f"- Rule: {cohort.selection.get('rule') if cohort else 'N/A'}",
+                f"- Mean validation loss by K: {cohort.selection.get('mean_validation_loss_by_k') if cohort else 'N/A'}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Metrics Common To All Stages",
+            *_common_stage_figures(
+                method,
+                artifacts,
+                cohort,
+                plt,
+                figures_dir,
+                method_dir,
+            ),
+            "",
+            "Label-based metrics require separately supplied task predictions and scores; token accuracy measures a different task.",
+        ]
+    )
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
+def _write_general_report(
+    manifest: dict[str, Any],
+    evaluation: dict[str, Any],
+    output_root: Path,
+    stage_root: Path,
+    report_rank: int,
+    plt: Any,
+    pd: Any,
+    manifest_sha256: str,
+) -> tuple[Path, HeadlineCohort | None]:
+    records = [
+        record
+        for record in evaluation.get("records", [])
+        if isinstance(record, dict) and record.get("status") != "invalid"
+    ]
+    cohort = _select_headline_cohort(records, report_rank)
+    report_path = stage_root / GENERAL_REPORT_PATTERN.format(stage="a")
+    figures_dir = stage_root / FIGURES_FOLDER
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    actual_seeds = sorted(
+        {int(record["seed"]) for record in records if "seed" in record}
+    )
+    protocols = sorted(
+        {str(record.get("protocol")) for record in records if record.get("protocol")}
+    )
+    source_sha = manifest.get("source", {}).get("source_sha256", "N/A")
+    lines = [
+        "# Stage A General Report",
+        "",
+        f"- Profile: {manifest.get('profile', 'custom')}",
+        f"- Seeds actually evaluated: {actual_seeds or 'N/A'}",
+        f"- Protocols present: {protocols or 'N/A'}",
+        f"- Source fingerprint: `{source_sha}`",
+        f"- Manifest SHA-256: `{manifest_sha256}`",
+        f"- Run completeness: {evaluation.get('completed_runs', 0)}/{evaluation.get('planned_runs', len(manifest.get('runs', [])))} valid; {evaluation.get('invalid_runs', 0)} invalid",
+    ]
+    if cohort is None:
+        lines.extend(
+            [
+                "- Headline comparison: N/A (no complete A1/A2/A3 cohort)",
+                "- A3 K selection: N/A",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"- Headline condition: protocol={cohort.protocol}, rank={cohort.rank}, order={' -> '.join(cohort.order)}, heldout={list(cohort.heldout)}",
+                f"- Matched seeds: {list(cohort.matched_seeds) or 'N/A'}",
+                f"- A3 selected K: {cohort.selected_k if cohort.selected_k is not None else 'N/A'}",
+                f"- A3 K-selection rule: {cohort.selection['rule']}",
+                f"- A3 mean validation loss by K: {cohort.selection['mean_validation_loss_by_k']}",
+            ]
+        )
+
+    for category, specs in (
+        ("internal", INTERNAL_METRIC_SPECS),
+        ("external", EXTERNAL_METRIC_SPECS),
+        ("operational", VISUALIZATION_OPERATIONAL_METRIC_SPECS),
+    ):
+        table, figures = _metric_table(
+            specs,
+            cohort,
+            plt,
+            pd,
+            figures_dir,
+            stage_root,
+            category,
+        )
+        lines.extend(["", *table, *figures])
+
+    lines.extend(
+        [
+            "",
+            "## General Summary",
+            "",
+        ]
+    )
+    if cohort is None or not cohort.matched_seeds:
+        lines.append(
+            "No complete fingerprint-matched A1/A2/A3 seed cohort is available, so no cross-stage best-method conclusion is reported."
+        )
+    else:
+        for label, metric, direction in EXTERNAL_METRIC_SPECS + INTERNAL_METRIC_SPECS:
+            if direction not in {"higher", "lower"}:
+                continue
+            samples = _metric_samples(cohort, metric)
+            means = {
+                method: fmean(value for _, value in rows)
+                for method, rows in samples.items()
+                if rows
+            }
+            if not means:
+                continue
+            best_value = (
+                max(means.values()) if direction == "higher" else min(means.values())
+            )
+            best = ", ".join(
+                METHOD_LABELS[method]
+                for method, value in means.items()
+                if math.isclose(value, best_value)
+            )
+            lines.append(
+                f"- {label}: {best} has the best observed mean on the matched cohort ({best_value:.6g}; {_direction_text(direction)})."
+            )
+        lines.append(
+            "- Operational metrics are reported separately and are not folded into a composite score."
+        )
+        lines.append(
+            "- Observed rankings are descriptive and do not establish statistical significance or the full research hypothesis."
+        )
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path, cohort
+
+
+def generate_reports_and_visualizations(
+    benchmark_dir: Path | str,
+    *,
+    output_dir: Path | str | None = None,
+    report_rank: int = 4,
+    repository_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Generate deterministic read-only benchmark reports outside run artifacts."""
+    benchmark_root = Path(benchmark_dir).resolve()
+    repository = Path(repository_root or REPOSITORY_ROOT).resolve()
+    destination = (
+        Path(output_dir).resolve()
+        if output_dir
+        else repository / "report_and_visualization"
+    )
+    if destination == repository or destination in repository.parents:
+        raise ValueError(
+            "visualization output must not be the repository root or its ancestor"
+        )
+    if destination == benchmark_root or benchmark_root in destination.parents:
+        raise ValueError(
+            "visualization output must not be inside the benchmark artifact root"
+        )
+    manifest_path = benchmark_root / "manifest.json"
+    evaluation_path = benchmark_root / "evaluation.json"
+    manifest = _read_json(manifest_path)
+    evaluation = _read_json(evaluation_path)
+    manifest_sha = sha256(manifest_path.read_bytes()).hexdigest()
+
+    stage_root = destination / STAGE_FOLDER_PATTERN.format(stage="A")
+    stage_root.mkdir(parents=True, exist_ok=True)
+    plotting = _load_plotting()
+    plt, pd = plotting if plotting is not None else (None, None)
+    general_report, cohort = _write_general_report(
+        manifest,
+        evaluation,
+        destination,
+        stage_root / "comparison",
+        report_rank,
+        plt,
+        pd,
+        manifest_sha,
+    )
+    records = [
+        record for record in evaluation.get("records", []) if isinstance(record, dict)
+    ]
+    stage_reports = {}
+    for method in METHODS:
+        stage_reports[method] = _write_stage_report(
+            method,
+            records,
+            manifest,
+            benchmark_root,
+            stage_root,
+            cohort,
+            plt,
+        )
+
+    readme = destination / "README.md"
+    readme.write_text(
+        "\n".join(
+            [
+                "# Benchmark Reports and Visualizations",
+                "",
+                "Generated from benchmark artifacts without modifying immutable run directories.",
+                "",
+                f"- [Stage A general report]({general_report.relative_to(destination).as_posix()})",
+                f"- [A1 report]({stage_reports['a1'].relative_to(destination).as_posix()})",
+                f"- [A2 report]({stage_reports['a2'].relative_to(destination).as_posix()})",
+                f"- [A3 report]({stage_reports['a3'].relative_to(destination).as_posix()})",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dashboard = _write_dashboard(destination, general_report, stage_reports)
+    return {
+        "output_dir": str(destination),
+        "dashboard": str(dashboard),
+        "readme": str(readme),
+        "general_report": str(general_report),
+        "stage_reports": {method: str(path) for method, path in stage_reports.items()},
+        "figures_enabled": plt is not None,
+    }
+
+
+def _write_dashboard(
+    destination: Path,
+    general_report: Path,
+    stage_reports: Mapping[str, Path],
+) -> Path:
+    """Put both metric groups and every generated figure in one browser view."""
+
+    def inline(value: str) -> str:
+        value = html.escape(value)
+        value = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", value)
+        return re.sub(r"`([^`]+)`", r"<code>\1</code>", value)
+
+    sections = []
+    for label, report in [
+        ("Comparison", general_report),
+        *[(key.upper(), value) for key, value in stage_reports.items()],
+    ]:
+        blocks = []
+        table_open = False
+        for line in report.read_text(encoding="utf-8").splitlines():
+            if line.startswith("|"):
+                cells = [cell.strip() for cell in line.strip("|").split("|")]
+                if all(re.fullmatch(r":?-+:?", cell) for cell in cells):
+                    continue
+                if not table_open:
+                    blocks.append('<div class="table-wrap"><table>')
+                tag = "td" if table_open else "th"
+                blocks.append(
+                    "<tr>"
+                    + "".join(f"<{tag}>{inline(cell)}</{tag}>" for cell in cells)
+                    + "</tr>"
+                )
+                table_open = True
+                continue
+            if table_open:
+                blocks.append("</table></div>")
+                table_open = False
+            image_match = re.fullmatch(r"!\[(.*?)\]\((.*?)\)", line.strip())
+            if image_match:
+                alt, relative = image_match.groups()
+                source = (report.parent / relative).resolve()
+                url = source.relative_to(destination).as_posix()
+                blocks.append(
+                    f'<img loading="lazy" src="{html.escape(url, quote=True)}" alt="{html.escape(alt, quote=True)}">'
+                )
+            elif line.startswith("#"):
+                level = min(len(line) - len(line.lstrip("#")) + 1, 6)
+                blocks.append(
+                    f"<h{level}>{inline(line.lstrip('# ').strip())}</h{level}>"
+                )
+            elif line.strip():
+                blocks.append(f"<p>{inline(line)}</p>")
+        if table_open:
+            blocks.append("</table></div>")
+        sections.append(f'<section id="{label.lower()}">{"".join(blocks)}</section>')
+    banner = "Measured benchmark outputs. Missing measurements are shown as N/A."
+    page = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    page += "<title>A1 / A2 / A3 benchmark</title><style>body{margin:0;background:#f3f6fb;color:#142338;font:16px system-ui}header,main{max-width:1280px;margin:auto;padding:28px}header{background:#142338;color:white}nav{display:flex;gap:24px;flex-wrap:wrap}nav a{color:#b9d9ff}section{background:white;margin:24px 0;padding:24px;border-radius:12px}img{width:100%;height:auto;margin:16px 0}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #d9e2ee}th{background:#eaf1fb}code{overflow-wrap:anywhere}p{line-height:1.6;overflow-wrap:anywhere}</style>"
+    page += f'<header><h1>A1 / A2 / A3 benchmark</h1><p>{html.escape(banner)}</p><nav><a href="#comparison">Comparison</a><a href="#a1">A1</a><a href="#a2">A2</a><a href="#a3">A3</a></nav></header><main>{"".join(sections)}</main></html>'
+    path = destination / "index.html"
+    path.write_text(page, encoding="utf-8")
+    return path
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="run",
+        choices=("run", "plan", "train", "eval", "report"),
+    )
+    parser.add_argument("--output-dir", type=Path, default=Path("runs/benchmark"))
+    parser.add_argument(
+        "--profile", choices=("smoke", "headline", "full"), default="headline"
+    )
+    parser.add_argument("--seeds", nargs="+", type=int)
+    parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument("--k", nargs="+", type=int)
+    parser.add_argument("--ranks", nargs="+", type=int)
+    parser.add_argument(
+        "--protocols",
+        nargs="+",
+        choices=("sequential", "joint", "heldout", "commutator"),
+    )
+    parser.add_argument("--task-order", nargs="+")
+    parser.add_argument("--heldout-task", action="append")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--report-rank", type=int, default=16)
+    parser.add_argument("--no-visualization", action="store_true")
+    parser.add_argument("--visualization-dir", type=Path)
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the generated HTML report in a browser.",
+    )
+    args = parser.parse_args(argv)
+    output_dir = args.output_dir.resolve()
+    visualization_dir = (
+        args.visualization_dir or ROOT / "report_and_visualization"
+    ).resolve()
+    # Fail before expensive training when the requested plotting stack is missing.
+    if not args.no_visualization and args.command in {"run", "eval", "report"}:
+        _load_plotting()
+    profiles = {
+        "smoke": ([0], [16], [4], ["sequential"]),
+        "headline": ([0, 1, 2], [16], [1, 2, 4, 8], ["sequential", "joint"]),
+        "full": (
+            [0, 1, 2, 3, 4],
+            [1, 2, 4, 8, 16, 32, 64],
+            [1, 2, 4, 8],
+            ["sequential", "joint", "heldout", "commutator"],
+        ),
+    }
+    seeds, ranks, ks, protocols = profiles[args.profile]
+    manifest_path = output_dir / "manifest.json"
+    if args.command == "plan" or args.command == "run" and not manifest_path.is_file():
+        manifest = make_manifest(
+            output_dir,
+            seeds=args.seeds or seeds,
+            methods=args.methods,
+            k_values=args.k or ks,
+            rank_values=args.ranks or ranks,
+            epochs=args.epochs,
+            protocols=args.protocols or protocols,
+            task_order=args.task_order,
+            heldout_tasks=args.heldout_task,
+            profile=args.profile,
+        )
+        print(f"Planned {len(manifest['runs'])} runs: {manifest_path}", flush=True)
+    elif args.command == "run":
+        print(
+            f"Resuming existing manifest: {manifest_path}. Use a new output directory for a different experiment.",
+            flush=True,
+        )
+    if args.command in {"run", "train"}:
+        train_manifest(output_dir, resume=not args.no_resume, epochs=args.epochs)
+        print(f"Training complete: {output_dir}", flush=True)
+    if args.command in {"run", "eval"}:
+        evaluation = evaluate_manifest(output_dir)
+        print(
+            f"Evaluated {evaluation['completed_runs']}/{evaluation['planned_runs']} runs",
+            flush=True,
+        )
+    if args.command in {"run", "eval", "report"}:
+        print(report_manifest(output_dir, report_rank=args.report_rank), flush=True)
+        if not args.no_visualization:
+            generated = generate_reports_and_visualizations(
+                output_dir, output_dir=visualization_dir, report_rank=args.report_rank
+            )
+            print(f"Visual report: {generated['dashboard']}", flush=True)
+            if args.open:
+                webbrowser.open(Path(generated["dashboard"]).as_uri())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

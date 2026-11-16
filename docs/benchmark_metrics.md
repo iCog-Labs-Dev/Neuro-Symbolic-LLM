@@ -9,12 +9,54 @@ Install the visualization extra and run from the repository root:
 
 ```sh
 pip install -e '.[visualization]'
-python -m experiments.run_benchmark plan --profile full --output-dir runs/benchmark
-python -m experiments.run_benchmark train --output-dir runs/benchmark
-python -m experiments.run_benchmark eval --output-dir runs/benchmark
-python -m experiments.run_benchmark report --output-dir runs/benchmark
+python benchmark/run_benchmark.py --profile headline --output-dir runs/benchmark
 ```
 
+The single runner plans, trains, evaluates checkpoints, and generates every
+table and figure. Evaluation is part of the runner because it computes the
+measurements; there is no separate evaluation script to run. The two metric
+families are **internal** and **external** metrics, with operational measurements
+reported separately.
+
+The default headline profile uses real LexGLUE text, three seeds, rank 16,
+A3 K in [1, 2, 4, 8], sequential/joint protocols, and the configured epochs.
+The current pinned dataset configuration takes 5,000 EURLEX, 20,000 LEDGAR and
+500 SCOTUS training examples, with separate validation/test splits. These are
+real-data subsets; the profile does not generate synthetic training examples.
+
+For JupyterHub, upload [run_benchmark_jupyterhub.ipynb](../run_benchmark_jupyterhub.ipynb)
+and run its cells in order on a Python 3.11 or 3.12 GPU server. The notebook
+clones the branch (or a selected PR), installs dependencies on that server,
+runs the tests and full pipeline, displays tables and PNG figures inline, and
+provides a results ZIP. It also handles the previous runner layout when
+checking out an older commit. Installation cells are never run on your PC
+merely by opening the notebook.
+
+The benchmark implementation is in [one file](../benchmark/run_benchmark.py),
+and its regression tests are in [one test file](../tests/benchmark/test_benchmark.py).
+Training stages, runtime data loading, and metric formulas remain shared with
+other project code. Only benchmark-specific files and duplicate entry points
+were consolidated.
+
+To regenerate reports from saved evaluation without retraining:
+
+```sh
+python benchmark/run_benchmark.py report --output-dir runs/benchmark
+```
+
+To recompute metrics from existing checkpoints and regenerate figures:
+
+```sh
+python benchmark/run_benchmark.py eval --output-dir runs/benchmark
+```
+
+Individual `plan` and `train` commands remain available for inspecting or
+resuming an experiment. Reusing an output directory reuses its manifest;
+choose a new directory to change the experiment profile or settings. `--open`
+opens the generated HTML report on a desktop.
+
+`report_and_visualization/index.html` is the single browser view containing
+the comparison, method reports, tables and all PNG figures.
 `report_and_visualization/stage_A/` contains `A1/`, `A2/`, `A3/`, and
 `comparison/`. Each has a Markdown report, internal and external tables and
 PNG figures. Missing measurements are explicitly N/A. Re-running reports
@@ -73,8 +115,9 @@ must come from a separately defined and reproducible measurement protocol.
 ## Supplying additional audit measurements
 
 For a completed run, place a JSON file at
-`runs/benchmark/measurement_inputs/<run_id>.json`, then rerun `eval` and
-`report`. This file is outside immutable run artifacts. It must contain:
+`runs/benchmark/measurement_inputs/<run_id>.json`, then rerun the runner's
+`eval` command (which also regenerates reports). This file is outside immutable
+run artifacts. It must contain:
 
 ```json
 {
