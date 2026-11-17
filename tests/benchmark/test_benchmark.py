@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import math
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import jax
@@ -15,10 +18,15 @@ import numpy as np
 import pytest
 import yaml
 
+from benchmark import benchmark as runner
 from benchmark.benchmark import (
     DEFAULT_CONFIGS,
     DEFAULT_RUNTIME_CONFIG,
+    EXTERNAL_METRIC_SPECS,
+    INTERNAL_METRIC_SPECS,
+    MEASURED_METRICS,
     _filter_adapter_params,
+    _load_deployed_metrics,
     _materialize,
     _metric_samples,
     _select_headline_cohort,
@@ -29,10 +37,20 @@ from benchmark.benchmark import (
     expand_specs,
     finalize_attempt,
     make_manifest,
+    measure_ablation_prediction,
+    measurement_reason,
+    metric_values_for_record,
     next_attempt_name,
+    resolve_report_dir,
     select_a3_k,
     sha256_file,
     validate_complete_attempt,
+)
+from benchmark.summary import report_manifest
+from benchmark.visualization import generate_visualizations
+from metrics.adapter_audits import (
+    measure_adapter_ablations,
+    measure_cross_adapter_curvature,
 )
 from metrics.performance import (
     calibration_stats,
@@ -878,3 +896,551 @@ def test_combined_configuration_covers_required_run_axes(tmp_path):
                 if run["protocol"] == "commutator"
             ]
             assert len(orders) == 2 and orders[0] == orders[1][::-1]
+
+
+def test_report_exact_metrics_and_missing_evidence(tmp_path):
+    runs = tmp_path / "runs"
+    reports = tmp_path / "reports"
+    _write_json(runs / "manifest.json", {"runtime_source": "stories"})
+    _write_json(runs / "evaluation.json", {"records": []})
+    path = report_manifest(runs, report_dir=reports)
+    content = path.read_text()
+    assert len(MEASURED_METRICS) == 13
+    assert len(INTERNAL_METRIC_SPECS) == 5
+    assert len(EXTERNAL_METRIC_SPECS) == 8
+    for label, _, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS:
+        assert label in content
+    assert "No evaluated runs" in content
+    assert "Residual direction redundancy" in content
+    assert "Invariant redundancy" not in content
+    assert "![" not in content
+    assert not (runs / "REPORT.md").exists()
+    assert (reports / "index.html").is_file()
+    assert not any(
+        word in content
+        for word in (
+            "Effective rank",
+            "Peak memory",
+            "Trainable parameters",
+            "Curvature",
+        )
+    )
+
+
+def test_report_dir_resolves_from_repo(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert resolve_report_dir() == ROOT / "docs/stage_A_results"
+    assert resolve_report_dir("custom") == ROOT / "custom"
+
+
+def test_general_report_uses_methods_as_rows_and_one_evidence_table(tmp_path):
+    runs = tmp_path / "runs"
+    reports = tmp_path / "reports"
+    order = ["rocstories_task_1", "rocstories_task_2", "rocstories_task_3"]
+    records = []
+    for index, method in enumerate(("a1", "a2", "a3")):
+        records.append(
+            {
+                "run_id": method,
+                "method": method,
+                "seed": 0,
+                "rank": 4,
+                "k": 4 if method == "a3" else None,
+                "protocol": "sequential",
+                "runtime_source": "stories",
+                "runtime_data_sha256": "shared",
+                "task_order": order,
+                "heldout_tasks": [],
+                "final_mean_loss": 3.0 + index / 10,
+                "deployed_evaluation": {
+                    "domains": {
+                        "rocstories": {
+                            "status": "measured",
+                            "token_accuracy": 0.3 + index / 100,
+                        }
+                    }
+                },
+            }
+        )
+    _write_json(runs / "manifest.json", {"runtime_source": "stories"})
+    _write_json(runs / "evaluation.json", {"records": records})
+    content = report_manifest(runs, report_rank=4, report_dir=reports).read_text()
+    assert "Realized task order: rocstories task 1, 2, 3" in content
+    assert "| Method | Residual compressibility |" in content
+    assert "| A1 |" in content and "| A2 |" in content and "| A3 |" in content
+    assert "paired delta" not in content.lower()
+    assert "| Run | Metric | Value |" not in content
+    assert "## Per-dataset token accuracy" not in content
+    assert "## Run conditions" not in content
+    assert (
+        "| Run | Method | Seed | Rank | K | Dataset/test split | Token accuracy | N/A metrics and reasons |"
+        in content
+    )
+    assert "| a1 | A1 | 0 | 4 | None | rocstories | 0.3 (n=1) |" in content
+
+
+def test_effect_magnitudes_are_not_prediction_fidelity():
+    record = {
+        "deployed_evaluation": {
+            "representation": {"adapter_ablations": {"mean_loss_increase": 1.5}}
+        }
+    }
+    for key in ("ablation_mae", "ablation_spearman"):
+        assert metric_values_for_record(record, key, 16) == []
+        assert "predictor" in measurement_reason(record, key)
+    for key in ("adapter_ablation", "causal_fingerprint", "cross_adapter_curvature"):
+        assert metric_values_for_record(record, key, 16) == []
+
+
+def test_reevaluation_replaces_old_metric_catalog_without_editing_manifest(tmp_path):
+    path = tmp_path / "manifest.json"
+    _write_json(path, {"runs": [], "measured_metrics": ["invariant_redundancy"]})
+    original = path.read_bytes()
+    evaluation = evaluate_manifest(tmp_path)
+    assert evaluation["measured_metrics"] == list(MEASURED_METRICS)
+    assert "residual_direction_redundancy" in evaluation["measured_metrics"]
+    assert "invariant_redundancy" not in evaluation["measured_metrics"]
+    assert path.read_bytes() == original
+
+
+def test_summary_has_no_plotting_dependency():
+    import benchmark.summary as summary
+
+    tree = ast.parse(Path(summary.__file__).read_text())
+    imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    assert all(
+        "matplotlib" not in ast.unparse(node)
+        and "visualization" not in ast.unparse(node)
+        for node in imports
+    )
+
+
+def test_empty_artifacts_generate_explicit_na_figures(tmp_path):
+    pytest.importorskip("matplotlib")
+    runs = tmp_path / "runs"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    sentinel = reports / "keep.txt"
+    sentinel.write_text("keep")
+    _write_json(runs / "manifest.json", {})
+    _write_json(runs / "evaluation.json", {"records": []})
+    generate_visualizations(runs, reports)
+    assert sentinel.read_text() == "keep"
+    for section in ("A1", "A2", "A3", "comparison"):
+        folder = reports / "stage_A" / section
+        assert len(list((folder / "figures").glob("*.png"))) == 13
+        assert "![" in next(folder.glob("*.md")).read_text()
+    assert "<img" in (reports / "index.html").read_text()
+
+
+def _audit_parameters():
+    return {
+        "layer_1": {"A": jnp.ones(2), "B": jnp.array([1.0, 2.0])},
+        "layer_2": {"A": jnp.ones(2), "B": jnp.array([3.0, 4.0])},
+    }
+
+
+def test_ablations_record_signed_effects_without_mutating_checkpoint():
+    params = _audit_parameters()
+    audit = measure_adapter_ablations(
+        {
+            "helpful": lambda p: 10 - p["layer_1"]["B"].sum(),
+            "harmful": lambda p: p["layer_2"]["B"].sum(),
+        },
+        params,
+    )
+    assert audit["effects"] == {
+        "layer_1": {"helpful": 3.0, "harmful": 0.0},
+        "layer_2": {"helpful": 0.0, "harmful": -7.0},
+    }
+    assert audit["mean_loss_increase"] == -1
+    assert audit["fingerprint_rms"] == pytest.approx(np.sqrt(58 / 4))
+    np.testing.assert_array_equal(params["layer_1"]["B"], [1, 2])
+    np.testing.assert_array_equal(params["layer_2"]["B"], [3, 4])
+
+
+def test_cross_adapter_norm_covers_both_factors_and_excludes_diagonal_blocks():
+    def loss(p):
+        a, b = p["layer_1"], p["layer_2"]
+        return (
+            3 * jnp.vdot(a["A"], b["B"])
+            + 2 * jnp.vdot(a["B"], b["A"])
+            + 100 * jnp.vdot(a["A"], a["B"])
+        )
+
+    audit = measure_cross_adapter_curvature(loss, _audit_parameters(), samples=3)
+    assert audit["value"] == pytest.approx(np.sqrt(26), rel=0.002)
+    assert list(audit["pairs"]) == ["layer_1:layer_2"]
+    independent = measure_cross_adapter_curvature(
+        lambda p: sum(jnp.sum(block["B"] ** 2) for block in p.values()),
+        _audit_parameters(),
+    )
+    assert independent["value"] == 0
+
+
+def test_audits_reject_undefined_or_nonfinite_measurements():
+    with pytest.raises(ValueError, match="at least two"):
+        measure_cross_adapter_curvature(
+            lambda p: 0, {"layer_1": _audit_parameters()["layer_1"]}
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        measure_cross_adapter_curvature(lambda p: 0, _audit_parameters(), samples=0)
+    with pytest.raises(ValueError, match="non-finite"):
+        measure_adapter_ablations({"bad": lambda p: float("nan")}, _audit_parameters())
+
+
+def test_quadratic_gate_predictor_and_true_ablations_are_independent():
+    params = {"layer_0": {"A": jnp.eye(2), "B": jnp.array([[1.0], [2.0]])}}
+    original = np.asarray(params["layer_0"]["B"]).copy()
+    ids = jnp.array([[0, 1, 1], [1, 0, 0]])
+
+    def loss(p, batch):
+        return 10 + (1 + batch[0, 0]) * p["layer_0"]["B"].sum()
+
+    audit = measure_ablation_prediction(loss, params, {"shared_test": (ids,)})
+    np.testing.assert_allclose(
+        [point["gradient"] for point in audit["pairs"]], [1.5, 3]
+    )
+    np.testing.assert_allclose(
+        [point["fisher_diagonal"] for point in audit["pairs"]], [2.5, 10]
+    )
+    np.testing.assert_allclose(
+        [point["predicted"] for point in audit["pairs"]], [-0.25, 2]
+    )
+    np.testing.assert_allclose(
+        [point["actual"] for point in audit["pairs"]], [-1.5, -3]
+    )
+    assert audit["mae"] == pytest.approx(3.125)
+    assert audit["spearman"] == pytest.approx(-1)
+    split = measure_ablation_prediction(
+        loss, params, {"shared_test": (ids[:1], ids[1:])}
+    )
+    assert split["pairs"] == audit["pairs"]
+    np.testing.assert_array_equal(params["layer_0"]["B"], original)
+
+
+def test_constant_ablation_effects_have_mae_but_no_spearman():
+    params = {"layer_0": {"A": jnp.eye(2), "B": jnp.zeros((2, 2))}}
+    audit = measure_ablation_prediction(
+        lambda p, ids: jnp.sum(p["layer_0"]["B"]),
+        params,
+        {"test": (jnp.ones((1, 3), dtype=jnp.int32),)},
+    )
+    assert audit["mae"] == 0
+    assert audit["spearman"] is None
+    record = {"deployed_evaluation": {"ablation_fidelity": audit}}
+    assert metric_values_for_record(record, "ablation_mae", 2) == [0]
+    assert metric_values_for_record(record, "ablation_spearman", 2) == []
+    assert "nonconstant" in measurement_reason(record, "ablation_spearman")
+
+
+def test_ablation_sampling_and_missing_test_data():
+    params = {"layer_0": {"A": jnp.ones((1, 4)), "B": jnp.arange(4.0)[:, None]}}
+
+    def loss(p, ids):
+        return jnp.sum(p["layer_0"]["B"])
+
+    with pytest.raises(ValueError, match="held-out"):
+        measure_ablation_prediction(loss, params, {})
+    with pytest.raises(ValueError, match="finite"):
+        measure_ablation_prediction(
+            lambda p, ids: loss(p, ids) * jnp.nan,
+            params,
+            {"test": (jnp.ones((1, 3)),)},
+        )
+    audit = measure_ablation_prediction(
+        loss, params, {"test": (jnp.ones((1, 3)),)}, max_components=2
+    )
+    assert [row["channel"] for row in audit["pairs"]] == [0, 3]
+
+
+@pytest.mark.parametrize("method", ["a1", "a2", "a3"])
+@pytest.mark.parametrize("source", ["stories", "separate"])
+def test_checkpoint_evaluation_respects_loader_test_keys(
+    monkeypatch, tmp_path, method, source
+):
+    def module(name, **members):
+        value = ModuleType(name)
+        value.__dict__.update(members)
+        monkeypatch.setitem(sys.modules, name, value)
+
+    class Substrate:
+        def __init__(self, model):
+            self.tokenizer = object()
+            self.architecture = object()
+
+        def run_with_interception(self, ids, modify_fn, intercept_layers):
+            hidden = jax.nn.one_hot(ids, 2)
+            logits = modify_fn(hidden, 0)
+            return SimpleNamespace(logits=logits, hidden_state=lambda layer: hidden)
+
+        def compute_loss(self, logits, ids, losses):
+            probabilities = jax.nn.log_softmax(logits[:, :-1], axis=-1)
+            return -jnp.take_along_axis(probabilities, ids[:, 1:, None], axis=-1).mean()
+
+    class Adapter:
+        layers = (0,)
+        scale = 1.0
+
+        def __init__(self, config, architecture):
+            pass
+
+        def validate_params(self, params):
+            assert params["layer_0"]["B"].shape == (2, 2)
+
+        def encode(self, block, hidden):
+            return hidden @ block["A"]
+
+        def modify_fn(self, params):
+            return (
+                lambda hidden, layer: hidden
+                + self.encode(params["layer_0"], hidden) @ params["layer_0"]["B"]
+            )
+
+    ids = jnp.array([[0, 1, 0], [1, 0, 1]])
+    names = (
+        ["rocstories_task_1", "rocstories_task_2"]
+        if source == "stories"
+        else ["left", "right"]
+    )
+    test_sets = (
+        {"rocstories": (ids,)} if source == "stories" else dict.fromkeys(names, (ids,))
+    )
+    tasks = [
+        SimpleNamespace(name=name, train_blocks=np.asarray([[index, index, 1 - index]]))
+        for index, name in enumerate(names)
+    ]
+    runtime = SimpleNamespace(tasks=tasks, get_test_sets=lambda *args: test_sets)
+    calls = []
+
+    def load_runtime_data(**kwargs):
+        calls.append(kwargs)
+        return runtime
+
+    module(
+        "frozenllm.substrate",
+        FrozenSubstrate=Substrate,
+        identity_modify=lambda hidden, layer: hidden,
+    )
+    module(
+        "residual",
+        ResidualAdapter=Adapter,
+        ResidualConfig=SimpleNamespace(from_dict=lambda config: config),
+    )
+    module(
+        "runtime.data_loader",
+        load_runtime_data=load_runtime_data,
+        load_runtime_config=lambda path: {},
+    )
+    module(
+        "stages.stage_base",
+        TrainingConfig=SimpleNamespace(
+            from_dict=lambda config: SimpleNamespace(
+                model="tiny", seq_len=3, batch_size=2, eval_batches=1, epochs=1
+            )
+        ),
+        make_eval_set=lambda blocks, *args: (jnp.asarray(blocks),),
+    )
+    module(
+        "stages.results",
+        load_params=lambda path: {
+            "layer_0": {"A": jnp.eye(2), "B": jnp.array([[0.2, -0.1], [0.4, 0.3]])}
+        },
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text("adapter: {}\n")
+    checkpoint = tmp_path / "attempt" / "params"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "task_1_finished.npz").touch()
+    run = {
+        "method": method,
+        "config": str(config),
+        "materialized_runtime_config": str(config),
+        "runtime_source": source,
+        "task_order": names,
+        "output_dir": str(tmp_path),
+        "run_name": "attempt",
+    }
+    measured = _load_deployed_metrics(run, {})
+    assert measured["status"] == "measured"
+    assert set(measured["domains"]) == set(test_sets)
+    assert calls[0]["task_order"] == names
+    conflict = measured["representation"]["task_gradient_conflict"]
+    assert conflict["status"] == "measured"
+    assert list(conflict["evaluation_batches"]) == names
+    assert conflict["split"].startswith("train")
+    redundancy = measured["representation"]["residual_direction_redundancy"]["layer_0"]
+    assert redundancy["read"] == pytest.approx(0)
+    assert redundancy["write"] == pytest.approx(1 / np.sqrt(5))
+    assert measured["ablation_fidelity"]["status"] == "measured"
+    assert measured["ablation_fidelity"]["pairs"]
+    record = {"deployed_evaluation": measured}
+    for key in (
+        "token_accuracy",
+        "calibration",
+        "domain_kl",
+        "residual_direction_redundancy",
+        "task_gradient_conflict",
+        "ablation_mae",
+        "ablation_spearman",
+    ):
+        assert metric_values_for_record(record, key, 2), key
+    assert metric_values_for_record(record, "invariant_redundancy", 2) == []
+
+
+@pytest.mark.parametrize("source", ["stories", "separate"])
+def test_runtime_source_and_optional_order(tmp_path, source):
+    config = tmp_path / "runtime.yaml"
+    config.write_text(yaml.safe_dump({"runtime": {"source": source}, "datasets": []}))
+    manifest = runner.make_manifest(
+        tmp_path / "runs",
+        seeds=[0],
+        methods=["a1"],
+        k_values=[1],
+        runtime_config=config,
+    )
+    row = manifest["runs"][0]
+    assert row["runtime_source"] == source
+    assert row["task_order"] == []
+    assert source in row["run_id"]
+    spec = runner.expand_specs(
+        tmp_path, seeds=[0], methods=["a1"], k_values=[1], runtime_config=config
+    )[0]
+    command = runner._command(spec, Path(row["materialized_config"]))
+    assert "--task-order" not in command
+    assert "--heldout-task" not in command
+    overridden = runner.expand_specs(
+        tmp_path,
+        seeds=[0],
+        methods=["a1"],
+        k_values=[1],
+        runtime_config=config,
+        runtime_source="custom",
+        task_order=["arbitrary"],
+    )[0]
+    assert overridden.runtime_source == "custom"
+    assert runner._command(overridden, Path(overridden.config))[-2:] == [
+        "--task-order",
+        "arbitrary",
+    ]
+
+
+@pytest.mark.parametrize(
+    "protocol,flag", [("heldout", "--heldout-task"), ("commutator", "--task-order")]
+)
+def test_named_protocols_fail_before_materialization(tmp_path, protocol, flag):
+    with pytest.raises(ValueError, match=flag):
+        runner.make_manifest(
+            tmp_path, seeds=[0], methods=["a1"], k_values=[1], protocols=[protocol]
+        )
+    assert not (tmp_path / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("source", ["stories", "separate"])
+def test_realized_identity_and_resume(tmp_path, monkeypatch, source):
+    monkeypatch.setattr(
+        runner, "source_fingerprint", lambda root: {"source_sha256": "source"}
+    )
+    output = tmp_path / "runs"
+    runner.make_manifest(
+        output, seeds=[0], methods=["a1"], k_values=[1], runtime_source=source
+    )
+    calls = []
+
+    def subprocess_run(command, **kwargs):
+        calls.append(command)
+        folder = (
+            Path(command[command.index("--output-dir") + 1])
+            / command[command.index("--run-name") + 1]
+        )
+        folder.mkdir(parents=True)
+        runtime = command[command.index("--runtime-config") + 1]
+        config = command[command.index("--config") + 1]
+        (folder / "config.yaml").write_bytes(Path(config).read_bytes())
+        runner._write_json(
+            folder / "meta.json",
+            {"runtime_data": {"task_order": ["generated_task"], "source": source}},
+        )
+        runner._write_json(
+            folder / "results.json",
+            {"domains": ["generated_task"], "loss": [[2.0]], "base_loss": [3.0]},
+        )
+        assert yaml.safe_load(Path(runtime).read_text())["runtime"]["source"] == source
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.subprocess, "run", subprocess_run)
+    runner.train_manifest(output)
+    row = runner._read_json(output / "manifest.json")["runs"][0]
+    assert row["task_order"] == ["generated_task"]
+    assert row["run_id"] != row["planned_run_id"]
+    spec = runner._read_json(Path(row["run_dir"]) / "spec.json")
+    assert spec["condition_sha256"] == row["condition_sha256"]
+    assert spec["run_id"] == row["run_id"]
+    runner.train_manifest(output)
+    assert len(calls) == 1
+
+    def deployed(run, result):
+        assert run["task_order"] == ["generated_task"]
+        return {"status": "unavailable", "reason": "test stub"}
+
+    monkeypatch.setattr(runner, "_load_deployed_metrics", deployed)
+    result = runner.evaluate_manifest(output)
+    assert result["records"][0]["task_order"] == ["generated_task"]
+    runner.train_manifest(output, epochs=2)
+    assert len(calls) == 2
+    updated = runner._read_json(output / "manifest.json")["runs"][0]
+    assert updated["run_name"] == "attempt-0002"
+
+
+def test_default_cli_runs_plan_train_eval(tmp_path, monkeypatch):
+    calls = []
+
+    def plan(*args, **kwargs):
+        calls.append("plan")
+        return {"runs": []}
+
+    monkeypatch.setattr(runner, "make_manifest", plan)
+    monkeypatch.setattr(
+        runner, "train_manifest", lambda *args, **kwargs: calls.append("train")
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_manifest",
+        lambda *args: calls.append("eval") or {"completed_runs": 0, "planned_runs": 0},
+    )
+    assert runner.main(["--output-dir", str(tmp_path)]) == 0
+    assert calls == ["plan", "train", "eval"]
+
+
+def test_generated_reports_excluded_from_tracked_fingerprint(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    reports = tmp_path / "docs/stage_A_results"
+    reports.mkdir(parents=True)
+    file = reports / "report.md"
+    file.write_text("first")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    before = runner.source_fingerprint(tmp_path)
+    file.write_text("updated")
+    assert runner.source_fingerprint(tmp_path) == before
+    (reports / "extra.json").write_text(json.dumps({}))
+    assert runner.source_fingerprint(tmp_path) == before
