@@ -941,9 +941,7 @@ def interrupted_teacher_checkpoint_matches(
             return False
 
         for name in expected_files:
-            partial = run_dir / (
-                teacher_paths(run_dir)[name].name + ".partial"
-            )
+            partial = run_dir / (teacher_paths(run_dir)[name].name + ".partial")
 
             if not partial.is_file():
                 return False
@@ -1389,9 +1387,7 @@ def run_semantic_e2e(
             skip_training=compatible_student,
         ),
         accepted_returncodes=(0, 2),
-        progress_total=(
-            count_jsonl(input_path) if input_path is not None else None
-        ),
+        progress_total=(count_jsonl(input_path) if input_path is not None else None),
     )
 
     if e2e_returncode == 2:
