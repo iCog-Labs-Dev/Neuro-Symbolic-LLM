@@ -952,6 +952,183 @@ def interrupted_teacher_checkpoint_matches(
         return False
 
 
+def restore_verified_teacher_from_recovery(
+    args: argparse.Namespace,
+    source_name: str,
+    prepared_path: Path,
+    output_dir: Path,
+) -> bool:
+    """Restore the newest complete teacher extraction matching the current contract."""
+    from parser.ontology.catalog import load_manifest_catalog
+    from parser.semantic.catalog_prompt import (
+        _discourse_catalog_guide,
+        _load_prompt_config,
+        _prompt_fingerprint,
+        build_catalog_document_prompt,
+        build_router_prompt,
+    )
+    from parser.semantic.model_config import load_model_profile
+    from parser.semantic.semantic_parser import PARSER_VERSION
+
+    run_dir = output_dir / "parser_e2e"
+    recovery_root = output_dir / "recovery"
+
+    _, source_index = load_source_records(prepared_path, source_name)
+    expected_keys = set(source_index)
+
+    if not expected_keys:
+        raise ValueError("No source records available for teacher recovery.")
+
+    profile = load_model_profile(
+        resolve_path(args.model_config),
+        profile_name=args.profile,
+    )
+    catalog, _ = load_manifest_catalog(resolve_path(args.ontology_bundle))
+
+    router_version = build_router_prompt("compatibility check").version
+    general_version = build_catalog_document_prompt(
+        "compatibility check",
+        catalog=catalog,
+    ).version
+
+    discourse_version, discourse_template = _load_prompt_config(
+        REPO_ROOT / "configs/parser_config/discourse_prompt.yaml",
+        "discourse",
+    )
+
+    discourse_guidance = discourse_template.replace(
+        "{discourse_catalog_guide}",
+        _discourse_catalog_guide(catalog),
+    ).strip()
+
+    discourse_version = (
+        f"{discourse_version}+sha256." f"{_prompt_fingerprint(discourse_guidance)}"
+    )
+
+    accepted_prompt_versions = {
+        f"{router_version}|{general_version}",
+        f"{router_version}|{general_version}|{discourse_version}",
+    }
+
+    expected_ontology_versions = list(catalog.versions)
+
+    def is_compatible(candidate: Path) -> bool:
+        valid, keys = validate_teacher_artifacts(candidate, source_name)
+
+        if not valid or keys != expected_keys:
+            return False
+
+        observed = set()
+
+        try:
+            for record in read_jsonl(candidate / "documents.jsonl"):
+                result = SemanticParseResult.model_validate(record)
+                document = result.document
+                key = (document.corpus_id, document.document_id)
+
+                if key not in source_index or key in observed:
+                    return False
+
+                _, _, expected_text, expected_context = source_record(
+                    source_index[key],
+                    jsonl=True,
+                    corpus_id=source_name,
+                )
+
+                if document.source_text != expected_text:
+                    return False
+
+                provenance = record.get("provenance", {})
+
+                if (
+                    provenance.get("provider") != profile.provider
+                    or provenance.get("model") != profile.model
+                    or provenance.get("parser_version") != PARSER_VERSION
+                    or provenance.get("prompt_version") not in accepted_prompt_versions
+                    or provenance.get("ontology_versions") != expected_ontology_versions
+                ):
+                    return False
+
+                observed.add(key)
+
+            for record in read_jsonl(candidate / "rejected.jsonl"):
+                raw_line = record.get("raw_line")
+
+                if not isinstance(raw_line, str):
+                    return False
+
+                key = source_identity(raw_line, source_name)
+
+                if key not in source_index or key in observed:
+                    return False
+
+                observed.add(key)
+
+            return observed == expected_keys
+
+        except (OSError, ValueError, KeyError, TypeError, ValidationError):
+            return False
+
+    candidates = [run_dir]
+
+    if recovery_root.is_dir():
+        candidates.extend(recovery_root.glob("*/parser_e2e"))
+
+    candidates = sorted(
+        {candidate for candidate in candidates if candidate.is_dir()},
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+
+    selected = next(
+        (candidate for candidate in candidates if is_compatible(candidate)),
+        None,
+    )
+
+    if selected is None:
+        return False
+
+    print(f"Verified teacher extraction: {selected}", flush=True)
+
+    if selected != run_dir:
+        if run_dir.exists():
+            archive_paths(
+                [run_dir],
+                "interrupted-run-before-teacher-restore",
+                recovery_root,
+            )
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        for _, destination in teacher_paths(run_dir).items():
+            shutil.copy2(selected / destination.name, destination)
+
+    valid, restored_keys = validate_teacher_artifacts(
+        run_dir,
+        source_name,
+    )
+
+    if not valid or restored_keys != expected_keys:
+        raise RuntimeError("Restored teacher artifacts failed validation.")
+
+    write_teacher_manifest(
+        output_dir / "teacher_manifest.json",
+        run_dir,
+        source_index,
+        teacher_fingerprint(args),
+    )
+
+    print(
+        f"Reusing teacher extraction: "
+        f"{count_jsonl(run_dir / 'documents.jsonl')} accepted, "
+        f"{count_jsonl(run_dir / 'rejected.jsonl')} rejected, "
+        f"{len(restored_keys)} total.",
+        flush=True,
+    )
+
+    return True
+
+
 def prepare_teacher(
     args: argparse.Namespace,
     source_name: str,
@@ -977,6 +1154,16 @@ def prepare_teacher(
     expected_fingerprint = teacher_fingerprint(args)
     current_source_fingerprints = source_fingerprints(current_index)
     previous = load_manifest(manifest_path)
+
+    # Recover complete, provenance-compatible teacher artifacts from
+    # previous runs before declaring the existing extraction incompatible.
+    if not args.force and restore_verified_teacher_from_recovery(
+        args,
+        source_name,
+        prepared_path,
+        output_dir,
+    ):
+        return None, True
 
     # Resume an interrupted teacher export before considering archival.
     if (
