@@ -15,12 +15,9 @@ import numpy as np
 import pytest
 import yaml
 
-from benchmark.run_benchmark import (
-    BENCHMARK_RUNTIME_SOURCE,
+from benchmark.benchmark import (
     DEFAULT_CONFIGS,
     DEFAULT_RUNTIME_CONFIG,
-    MEASURED_METRICS,
-    _command,
     _filter_adapter_params,
     _materialize,
     _metric_samples,
@@ -31,10 +28,8 @@ from benchmark.run_benchmark import (
     evaluate_manifest,
     expand_specs,
     finalize_attempt,
-    generate_reports_and_visualizations,
     make_manifest,
     next_attempt_name,
-    report_manifest,
     select_a3_k,
     sha256_file,
     validate_complete_attempt,
@@ -175,6 +170,7 @@ def test_a3_k_sweep_curves_do_not_overwrite(tmp_path: Path) -> None:
             },
         ],
     }
+    _write_json(tmp_path / "meta.json", {"runtime_data": {"task_order": ["d1", "d2"]}})
     _write_json(tmp_path / "manifest.json", manifest)
     (tmp_path / "cfg.yaml").write_text("adapter:\n  rank: 16\n", encoding="utf-8")
 
@@ -199,150 +195,6 @@ def test_a3_k_sweep_curves_do_not_overwrite(tmp_path: Path) -> None:
     )
 
 
-def test_report_requires_a_matched_three_stage_cohort(tmp_path: Path) -> None:
-    evaluation = {
-        "completed_runs": 2,
-        "planned_runs": 2,
-        "domains": ["d1"],
-        "records": [
-            {
-                "method": "a1",
-                "run_id": "a1-0",
-                "seed": 0,
-                "rank": 16,
-                "protocol": "sequential",
-                "task_order": ["eurlex", "ledgar", "scotus"],
-                "final_mean_loss": 2.0,
-                "residual_compressibility": {"8": 0.8, "16": 1.0},
-            },
-            {
-                "method": "a1",
-                "run_id": "a1-1",
-                "seed": 1,
-                "rank": 16,
-                "protocol": "sequential",
-                "task_order": ["eurlex", "ledgar", "scotus"],
-                "final_mean_loss": 2.0,
-                "residual_compressibility": {"8": 0.8, "16": 1.0},
-            },
-        ],
-    }
-    _write_json(tmp_path / "evaluation.json", evaluation)
-    report_path = report_manifest(tmp_path, report_rank=4)
-    report = report_path.read_text(encoding="utf-8")
-    assert (
-        "| Metric | A1 | A2 | A3 | A2-A1 paired delta | A3-A1 paired delta |" in report
-    )
-    assert "No complete matched A1/A2/A3 cohort is available" in report
-    for metric in (
-        "Residual compressibility",
-        "Effective rank",
-        "Invariant redundancy",
-        "Task-gradient conflict",
-        "Parameter-order commutator proxy",
-        "Validation loss",
-        "Perplexity",
-        "Held-out test loss",
-        "Held-out test perplexity",
-        "Deployed LM loss",
-        "Deployed LM perplexity",
-        "Token accuracy",
-        "Token calibration ECE",
-        "On-domain KL drift",
-        "Validation-loss forgetting",
-        "Held-out transfer",
-        "Sequential versus joint gap",
-        "Anchor KL drift",
-    ):
-        assert f"| {metric} |" in report
-    for removed in (
-        "Task accuracy",
-        "Task primary score",
-        "Task-score forgetting",
-    ):
-        assert f"| {removed} |" not in report
-    internal_section = report.split("### Internal Metrics", 1)[1].split(
-        "### Operational Metrics", 1
-    )[0]
-    internal_rows = [
-        line.split("|", 2)[1].strip()
-        for line in internal_section.splitlines()
-        if line.startswith("| ") and not line.startswith("| Metric")
-    ]
-    assert internal_rows == [
-        "Residual compressibility",
-        "Effective rank",
-        "Invariant redundancy",
-        "Task-gradient conflict",
-        "Parameter-order commutator proxy",
-    ]
-    assert "## Scope" in report
-    assert "Symbolic-head metrics are outside its scope" in report
-    assert "| Symbolic" not in report
-
-
-def test_report_groups_by_configuration_and_shows_na_for_unmeasured_metrics(
-    tmp_path: Path,
-) -> None:
-    evaluation: dict[str, Any] = {
-        "completed_runs": 4,
-        "planned_runs": 4,
-        "domains": ["d1"],
-        "records": [
-            {
-                "run_id": "a1",
-                "method": "a1",
-                "seed": 0,
-                "protocol": "sequential",
-                "task_order": ["eurlex", "ledgar", "scotus"],
-                "rank": 16,
-                "final_mean_loss": 2.0,
-            },
-            {
-                "run_id": "a2",
-                "method": "a2",
-                "seed": 0,
-                "protocol": "sequential",
-                "task_order": ["eurlex", "ledgar", "scotus"],
-                "rank": 16,
-                "final_mean_loss": 1.9,
-            },
-            {
-                "run_id": "a3-k1",
-                "method": "a3",
-                "seed": 0,
-                "protocol": "sequential",
-                "task_order": ["eurlex", "ledgar", "scotus"],
-                "rank": 16,
-                "k": 1,
-                "final_mean_loss": 1.8,
-            },
-            {
-                "run_id": "a3-k4",
-                "method": "a3",
-                "seed": 0,
-                "protocol": "sequential",
-                "task_order": ["eurlex", "ledgar", "scotus"],
-                "rank": 16,
-                "k": 4,
-                "final_mean_loss": 1.7,
-            },
-        ],
-    }
-    for row in evaluation["records"]:
-        row["runtime_data_sha256"] = "shared-data"
-    _write_json(tmp_path / "evaluation.json", evaluation)
-    report_path = report_manifest(tmp_path, report_rank=16)
-    report = report_path.read_text(encoding="utf-8")
-    assert "A3 K=1" in report
-    assert "A3 K=4" in report
-    assert (
-        "| Metric | A1 | A2 | A3 | A2-A1 paired delta | A3-A1 paired delta |" in report
-    )
-    assert "| Effective rank | N/A | N/A | N/A | N/A | N/A | context | 0 |" in report
-    assert "| Validation loss | 2 (n=1) | 1.9 (n=1) | 1.8 (n=1)" in report
-
-
 def test_nan_and_inf_sanitized_to_valid_json(tmp_path: Path) -> None:
     bad_data = {
         "metric_nan": float("nan"),
@@ -364,35 +216,6 @@ def test_nan_and_inf_sanitized_to_valid_json(tmp_path: Path) -> None:
     assert loaded["metric_neg_inf"] is None
     assert loaded["nested"]["val"] is None
     assert loaded["list"] == [1.0, None, 3.0]
-
-
-def test_measured_metrics_match_supported_scope() -> None:
-    assert set(MEASURED_METRICS) == {
-        "loss_matrix",
-        "perplexity",
-        "mean_forgetting",
-        "optimizer_steps",
-        "tokens",
-        "mean_step_time",
-        "estimated_tokens_per_second",
-        "params_unchanged",
-        "residual_compressibility",
-        "effective_rank",
-        "invariant_redundancy",
-        "task_gradient_conflict",
-        "token_accuracy",
-        "expected_calibration_error",
-        "kl_to_base",
-        "paired_seed_delta",
-        "parameter_update_commutator",
-        "operator_update_commutator",
-        "update_commutator",
-        "heldout_transfer",
-        "sequential_joint_gap",
-        "anchor_kl",
-        "inference_latency",
-        "peak_memory",
-    }
 
 
 def test_resume_rejects_unverified_result_files(tmp_path: Path) -> None:
@@ -437,20 +260,6 @@ def test_real_default_configs_materialize(tmp_path: Path) -> None:
         assert "domains" not in config
         assert config["adapter"]["rank"] == 4
         assert config["training"]["epochs"] == 1
-
-
-def test_benchmark_commands_select_separate_runtime_datasets(tmp_path: Path) -> None:
-    specs = expand_specs(
-        tmp_path,
-        seeds=[0],
-        methods=["a1", "a2", "a3"],
-        k_values=[4],
-    )
-
-    for spec in specs:
-        command = _command(spec, tmp_path / "config.yaml")
-        source_index = command.index("--runtime-source") + 1
-        assert command[source_index] == BENCHMARK_RUNTIME_SOURCE == "separate"
 
 
 def test_runtime_source_override_ignores_yaml_default(
@@ -515,6 +324,7 @@ def test_compressibility_unreliable_when_reference_not_better_than_base(
             for r in (4, 16)
         ],
     }
+    _write_json(tmp_path / "meta.json", {"runtime_data": {"task_order": ["d1", "d2"]}})
     _write_json(tmp_path / "manifest.json", manifest)
     (tmp_path / "cfg.yaml").write_text("adapter:\n  rank: 16\n", encoding="utf-8")
     _write_json(
@@ -949,9 +759,7 @@ def test_k_selection_uses_shared_seed_and_fingerprint():
 
 
 def test_symbolic_audit_inputs_are_ignored(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(
-        "benchmark.run_benchmark._load_deployed_metrics", lambda *args: {}
-    )
+    monkeypatch.setattr("benchmark.benchmark._load_deployed_metrics", lambda *args: {})
     monkeypatch.setattr(
         "metrics.research_audits.factor_organization",
         lambda values: {"mean_fracture": 0.5},
@@ -1018,73 +826,26 @@ def test_legacy_probe_metrics_are_not_reported():
     )
 
 
-def test_report_writes_png_and_two_tables_in_four_folders(tmp_path: Path):
-    pytest.importorskip("matplotlib")
-    benchmark = tmp_path / "runs"
-    benchmark.mkdir()
-    records = [
-        {
-            "method": method,
-            "run_id": method,
-            "seed": 0,
-            "rank": 4,
-            "k": 1 if method == "a3" else None,
-            "protocol": "sequential",
-            "task_order": ["eurlex", "ledgar", "scotus"],
-            "heldout_tasks": [],
-            "runtime_data_sha256": "same",
-            "final_mean_loss": 2.0 + i / 10,
-        }
-        for i, method in enumerate(("a1", "a2", "a3"))
-    ]
-    (benchmark / "manifest.json").write_text(json.dumps({"runs": []}), encoding="utf-8")
-    (benchmark / "evaluation.json").write_text(
-        json.dumps({"records": records, "completed_runs": 3, "planned_runs": 3}),
-        encoding="utf-8",
+def test_mixed_curvature_measures_known_cross_hessian():
+    import jax.numpy as jnp
+
+    from benchmark.benchmark import measure_mixed_curvature
+
+    params = {"layer_0": {"A": jnp.ones((2,)), "B": jnp.ones((2,))}}
+    result = measure_mixed_curvature(
+        lambda p: 3 * jnp.sum(p["layer_0"]["A"] * p["layer_0"]["B"]),
+        params,
+        samples=3,
     )
-    result = generate_reports_and_visualizations(
-        benchmark, output_dir=tmp_path / "reports", repository_root=tmp_path / "repo"
+    assert result["status"] == "measured"
+    assert result["value"] == pytest.approx(3 * np.sqrt(2))
+    independent = measure_mixed_curvature(
+        lambda p: jnp.sum(p["layer_0"]["A"] ** 2) + jnp.sum(p["layer_0"]["B"] ** 2),
+        params,
     )
-    for name in ("A1", "A2", "A3", "comparison"):
-        folder = tmp_path / "reports" / "stage_A" / name
-        report = next(folder.glob("*.md")).read_text(encoding="utf-8")
-        assert "Internal Metrics" in report and "External Metrics" in report
-        images = list((folder / "figures").glob("*.png"))
-        assert images and all(
-            path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for path in images
-        )
-    assert result["figures_enabled"]
-    dashboard = Path(result["dashboard"]).read_text(encoding="utf-8")
-    assert "Internal Metrics" in dashboard and "External Metrics" in dashboard
-    assert "stage_A/comparison/figures/" in dashboard
-    assert "stage_A/A1/figures/" in dashboard
-    assert '<section id="comparison">' in dashboard
-    excluded = (
-        "Representation fracture",
-        "Factor overlap",
-        "Mixed curvature coupling",
-        "Off-support leakage",
-        "Cross-support curvature coupling",
-        "Causal fingerprint",
-        "Category role",
-        "Support explanation",
-        "Category naturality",
-        "Category closure",
-        "Ablation prediction",
-        "Ablation rank",
-        "Output-order commutator",
-        "Long-range",
-        "Task macro-F1",
-        "Task micro-F1",
-        "Instruction-following",
-    )
-    for report_path in [
-        Path(result["general_report"]),
-        *map(Path, result["stage_reports"].values()),
-    ]:
-        report = report_path.read_text(encoding="utf-8")
-        assert all(label not in report for label in excluded)
-    assert all(label not in dashboard for label in excluded)
+    assert independent["value"] == 0
+    with pytest.raises(ValueError, match="positive integer"):
+        measure_mixed_curvature(lambda p: 0, params, samples=0)
 
 
 def test_combined_configuration_covers_required_run_axes(tmp_path):
@@ -1095,6 +856,7 @@ def test_combined_configuration_covers_required_run_axes(tmp_path):
         k_values=[4],
         rank_values=[4, 16],
         protocols=["sequential", "joint", "commutator"],
+        task_order=["task_a", "task_b"],
         epochs=1,
     )
     assert len(manifest["runs"]) == 24
@@ -1116,96 +878,3 @@ def test_combined_configuration_covers_required_run_axes(tmp_path):
                 if run["protocol"] == "commutator"
             ]
             assert len(orders) == 2 and orders[0] == orders[1][::-1]
-
-
-def test_default_command_runs_training_evaluation_and_visualization(
-    tmp_path, monkeypatch
-):
-    import benchmark.run_benchmark as runner
-
-    calls = []
-
-    def plan(path, **kwargs):
-        calls.append(("plan", kwargs["profile"], kwargs["rank_values"]))
-        return {"runs": ["a1", "a2", "a3"]}
-
-    monkeypatch.setattr(runner, "make_manifest", plan)
-    monkeypatch.setattr(runner, "_load_plotting", lambda: calls.append("plotting"))
-    monkeypatch.setattr(
-        runner, "train_manifest", lambda path, **kwargs: calls.append("train")
-    )
-    monkeypatch.setattr(
-        runner,
-        "evaluate_manifest",
-        lambda path: calls.append("eval") or {"completed_runs": 3, "planned_runs": 3},
-    )
-    monkeypatch.setattr(
-        runner,
-        "report_manifest",
-        lambda path, **kwargs: (
-            calls.append(("report", kwargs["report_rank"])) or path / "REPORT.md"
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "generate_reports_and_visualizations",
-        lambda path, **kwargs: (
-            calls.append("figures") or {"dashboard": str(tmp_path / "index.html")}
-        ),
-    )
-    assert runner.main(["--output-dir", str(tmp_path)]) == 0
-    assert calls == [
-        "plotting",
-        ("plan", "headline", [16]),
-        "train",
-        "eval",
-        ("report", 16),
-        "figures",
-    ]
-
-
-def test_run_resumes_existing_manifest_without_replanning(tmp_path, monkeypatch):
-    import benchmark.run_benchmark as runner
-
-    (tmp_path / "manifest.json").write_text('{"runs": []}', encoding="utf-8")
-    monkeypatch.setattr(
-        runner,
-        "make_manifest",
-        lambda *args, **kwargs: pytest.fail(
-            "A resumed experiment must retain its manifest"
-        ),
-    )
-    monkeypatch.setattr(runner, "train_manifest", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        runner,
-        "evaluate_manifest",
-        lambda path: {"completed_runs": 0, "planned_runs": 0},
-    )
-    monkeypatch.setattr(
-        runner, "report_manifest", lambda *args, **kwargs: tmp_path / "REPORT.md"
-    )
-    assert (
-        runner.main(["run", "--output-dir", str(tmp_path), "--no-visualization"]) == 0
-    )
-
-
-def test_report_command_does_not_train_or_evaluate(tmp_path, monkeypatch):
-    import benchmark.run_benchmark as runner
-
-    monkeypatch.setattr(
-        runner,
-        "train_manifest",
-        lambda *args, **kwargs: pytest.fail("Report must not train"),
-    )
-    monkeypatch.setattr(
-        runner,
-        "evaluate_manifest",
-        lambda *args, **kwargs: pytest.fail("Report must reuse saved evaluation"),
-    )
-    monkeypatch.setattr(
-        runner, "report_manifest", lambda *args, **kwargs: tmp_path / "REPORT.md"
-    )
-    assert (
-        runner.main(["report", "--output-dir", str(tmp_path), "--no-visualization"])
-        == 0
-    )

@@ -1,138 +1,115 @@
-# A1–A3 metrics, visualizations and run configurations
+# Stage A benchmark metrics
 
-This report compares continuous residual methods A1, A2 and A3 on a frozen
-language model. It excludes A4 symbolic-head/retrieval/bank metrics and all
-separately supplied factor, category, intervention and probe audits.
+Run the complete pipeline from the repository:
 
-There are **5 internal metrics**, **13 external metrics**, and separate
-operational measurements. These are the only metrics included in the main
-comparison tables, individual-method metric tables and final rankings.
-Measured values are plotted; missing prerequisites produce N/A, never zero.
+```bash
+bash scripts/run_benchmark_full.sh --profile headline
+```
 
-## Internal metrics
+Or run its independent steps:
 
-| Metric | What it measures | Required configuration |
+```bash
+python -m benchmark.benchmark run --output-dir runs/benchmark
+python -m benchmark.summary --output-dir runs/benchmark --report-dir docs/stage_A_results
+python -m benchmark.visualization --output-dir runs/benchmark --report-dir docs/stage_A_results
+```
+
+The benchmark defaults to `run`: plan if no manifest exists, train/resume, then
+evaluate. `plan`, `train` and `eval` are standalone commands. Summary and
+visualization consume saved artifacts without retraining. Use module invocation,
+not direct execution of the Python files.
+
+## Data path audit
+
+The old benchmark used both paths: `_command`/`train_manifest` launched the
+three `experiments/run_stage_a*.py` runners as subprocesses;
+`_load_deployed_metrics` independently imported `load_runtime_data` to rebuild
+checkpoint evaluation data. The runners use the shared loader, training loop
+and stage evaluation. This split is retained.
+
+The benchmark no longer invents domains or requires LexGLUE names.
+`--runtime-config` selects YAML (default `configs/runtime_datasets.yaml`), and
+`--runtime-source` optionally overrides `runtime.source`. The shipped YAML
+defaults to ROCStories (`stories`); `--runtime-source separate` selects its
+existing LexGLUE configuration. Task discovery and name validation belong to
+the loader. `--task-order` and `--heldout-task` are forwarded only when supplied.
+Config-defined ordering and held-out settings remain available to the loader.
+
+Planning uses a neutral source tag when no order is supplied. Completion reads
+`meta.json` → `runtime_data.task_order` into the manifest and condition, and adds
+a deterministic task-order digest to the public run ID. `planned_run_id` and
+`requested_task_order` retain original identity for paths and resume. Evaluation
+replays the materialized runtime YAML and realized order. The `heldout` protocol
+requires explicit `--heldout-task`; `commutator` requires explicit `--task-order`.
+No names are guessed, including in stories mode.
+
+## Exactly 13 reported metrics
+
+No benchmark scores are embedded here. Evidence descriptions below specify
+implemented measurements, not claims that a model run has succeeded.
+
+| Group | Metric | Evidence and availability on ROCStories |
 |---|---|---|
-| Residual compressibility | Retained loss improvement at a smaller adapter rank relative to the highest-rank reference | A matched rank sweep, e.g. ranks 4 and 16. The reference must improve reliably on the frozen base. A single rank does not establish a useful compression curve. |
-| Effective rank | Spectral effective rank of each learned residual operator | Any trained checkpoint; deployed representation evaluation must succeed. This is descriptive: larger is not automatically better. |
-| Invariant redundancy | Redundancy of the residual factors under the implementation's invariant estimator | Any trained checkpoint; deployed representation evaluation must succeed. |
-| Task-gradient conflict | Negative cosine interaction between gradients for the dataset domains | Multiple domains evaluated at a common checkpoint on matched batches. Zero gradients do not establish agreement. |
-| Parameter-order commutator proxy | Normalized parameter distance after training in opposite domain orders | `commutator` protocol, matched initialization, rank, K, optimizer steps and training tokens. This is a parameter-space proxy, not an output-space or symbolic commutator. |
+| Internal | Residual compressibility | Shared guarded ratio of validation-loss improvements across matched ranks. N/A for a single rank or nonpositive/too-small reference improvement. |
+| Internal | Task-gradient conflict | Shared gradient-conflict formula on gradients of mean held-out CE at the final checkpoint. Needs batches from at least two tasks. |
+| Internal | Invariant redundancy | Shared formula applied to final adapter A/B matrices; aggregated across layers. |
+| Internal | Ablation prediction MAE | N/A: no validated component-effect predictor with paired measured held-out ablations. |
+| Internal | Ablation rank correlation (Spearman) | N/A for the same reason; effect magnitude alone is not prediction fidelity. |
+| External | Validation loss | Mean final validation CE across tasks from runner results. |
+| External | Perplexity | Exponential of mean final validation loss. |
+| External | Held-out test loss | Mean task test CE from runner results; test split is distinct from validation. |
+| External | Held-out test perplexity | Exponential of mean task test CE. |
+| External | Validation-loss forgetting | Shared runner's final mean validation-loss forgetting. |
+| External | On-domain KL drift | Final checkpoint versus frozen base on each task's held-out test batches. |
+| External | Token accuracy | Correct next-token predictions using the shared masked-token formula on test batches. |
+| External | Calibration ECE | Shared calibration bins pooled over test batches within each task. |
 
-## External metrics
+Missing measurements are N/A with reasons. Checkpoint metrics are aggregated
+across task values in report tables. Token accuracy is a language-model measure,
+not classification or story-ending task accuracy. Reports also show the token
+accuracy breakdown for each task. Reports compare A1/A2/A3 only
+on matching conditions and data fingerprints. A3 K selection uses validation
+loss on common seeds/data across K; test values do not select K. Operational
+scores are excluded; `params_unchanged` remains a run-validity field.
 
-| Metric | What it measures | Required evidence/configuration |
-|---|---|---|
-| Validation loss | Mean next-token validation cross-entropy across domains | Sequential or joint run with validation data. |
-| Perplexity | Reported validation perplexity | Same validation evaluation. PPL is derived from cross-entropy; a mean of domain PPLs is not necessarily exp(mean domain loss). |
-| Held-out test loss | Next-token loss on the separate test splits of the trained domains | Test splits and saved checkpoints. |
-| Held-out test perplexity | Perplexity on those separate test splits | Same test evaluation. |
-| Deployed LM loss | Next-token loss after loading the saved deployment parameters | Common deployed evaluator on matched held-out batches. |
-| Deployed LM perplexity | Perplexity from that deployed evaluation | Same deployed evaluation. |
-| Token accuracy | Fraction of valid next-token predictions that are correct | Token predictions and next-token labels; this is not legal-document classification accuracy. |
-| Token calibration ECE | Difference between token confidence and empirical correctness | Pooled confidence/correct/count statistics on valid tokens. |
-| On-domain KL drift | KL(base || adapted) on the trained domains | Frozen-base and adapted predictions on the same tokens. |
-| Validation-loss forgetting | Increase in earlier-domain loss relative to the previous best after learning that domain | Sequential checkpoint-by-domain loss matrix. This is loss-based forgetting, not accuracy forgetting. |
-| Held-out transfer | Base loss minus adapted loss on a separately configured unseen domain | An evaluation-only held-out domain. The current runtime config includes UnfairTOS; it is not used for training. |
-| Sequential versus joint gap | Final sequential validation loss minus matched joint loss | Both protocols with the same seed, rank, K, domains, optimizer-step count and training-token budget. Budget mismatches are reported as N/A. |
-| Anchor KL drift | KL(base || adapted) on fixed general-language anchor text | The configured anchor text and common next-token evaluation. No A4 head or category labels are needed. |
+Smoke and headline profiles have one rank (16), so compressibility is explicitly
+N/A. Pass `--ranks 4 16` or a wider sweep to measure it. The full profile uses
+ranks 1, 2, 4, 8, 16, 32, 64, but also requests named heldout and commutator
+protocols: supply their names or use `--protocols sequential joint`. Rank
+comparisons match method, seed, K, protocol, realized order, held-out set and
+runtime data fingerprint.
 
-EURLEX, LEDGAR and SCOTUS provide real text for language-model adaptation.
-Their legal classification labels are not used by this benchmark. Test loss
-on those domains and transfer to an unseen domain are different measurements.
+## Files and output ownership
 
-## Operational measurements and training diagnostics
+- [benchmark.py](../benchmark/benchmark.py): planning, orchestration, evaluation,
+  immutable artifact validation and shared pure helpers. Heavy imports are local.
+- [summary.py](../benchmark/summary.py): Markdown/JSON tables, stage reports and
+  dashboard. No matplotlib import; figure links require existing files.
+- [visualization.py](../benchmark/visualization.py): matplotlib and PNG generation.
+  Refreshes summary links after figures exist. Missing matplotlib produces an
+  actionable error only when figures are requested.
 
-The comparison visualization also reports trainable parameter count, training
-tokens/second, mean training step time, inference latency and peak evaluator
-memory. These are not combined into a single performance score.
+Raw artifacts remain in `runs/benchmark`. Reports go to `docs/stage_A_results`,
+resolved against the repository root regardless of current directory. Both
+reporting CLIs accept `--report-dir`. Layout: `index.html`, `REPORT.md`,
+`metrics.json`, `stage_A/A1`, `A2`, `A3`, `comparison`, and figure folders.
+Matching files are overwritten; unrelated files are never removed.
 
-Individual method reports include available training-loss curves,
-checkpoint-by-domain validation loss/perplexity heatmaps, forgetting and KL
-trajectories. A2 additionally plots hidden/CPC/stability auxiliary losses.
-A3 plots loss/forgetting versus K and rank, step-time overhead and a PC energy
-curve when that curve was recorded. Missing diagnostics are labeled explicitly.
-An A3 K sweep changes training-time latent inference; deployed evaluation does
-not settle latents using the test targets. K is separate from the epoch count.
+`docs/stage_A_results` is deliberately tracked, not ignored. It is excluded from
+both tracked diffs and untracked source fingerprints, so regenerating reports
+does not invalidate resume. Source changes still invalidate provenance. Custom
+report directories are not automatically excluded; use the default location
+for this guarantee.
 
-## Excluded from these reports
+The wrapper supports `PROFILE`, `OUTPUT_DIR`, `REPORT_DIR`, `RUNTIME_CONFIG`,
+`RUNTIME_SOURCE`, corresponding lowercase flags, and extra benchmark arguments
+after `--`. Steps fail fast. The tracked [notebook](../run_benchmark_jupyterhub.ipynb)
+uses the same modules and archives the report directory without embedded results.
 
-- Representation fracture and factor overlap, including their shared A4-module formulas.
-- Mixed-curvature coupling, cross-support curvature coupling and off-support leakage.
-- Causal fingerprint separability/stability, category-role accuracy and support explanations.
-- Category naturality/closure, ablation fidelity and the output-order commutator probe.
-- Long-range multiple-choice probes, instruction-following probes, labeled-task accuracy/F1/ECE and accuracy-based forgetting.
-- A4-only symbolic-head, retrieval, template-bank, column and symbolic geometry/transfer metrics.
+## Validation limits
 
-Mixed-Hessian metrics do not intrinsically require A4, but need separately
-declared measurements; they are excluded with the other supplied audits.
-The A1–A3 evaluator no longer reads `measurement_inputs` audit files. Legacy
-audit fields in previously saved evaluation files cannot add excluded rows.
-Shared metric libraries remain available to other project code.
-
-## Configurations that make the retained metrics available
-
-All commands run the single [benchmark runner](../benchmark/run_benchmark.py).
-Use a new output directory when changing an experiment. Reusing a directory
-resumes its existing manifest; changing CLI flags does not replace that plan.
-The examples explicitly use one epoch for turnaround. Use adequate data and
-multiple seeds for research conclusions; document sampling and compute budgets.
-
-| Configuration | Seeds | Ranks | Protocols | A3 K | Training runs | Purpose |
-|---|---|---|---|---|---:|---|
-| Quick K comparison | 0 | 16 | sequential | 1, 4, 6, 8 | 6 | Basic internal/external metrics and A3 K comparison; no useful rank curve, joint gap or order proxy. |
-| Rank comparison | 0 | 4, 16 | sequential | 4 | 6 | Compressibility plus basic metrics; lower rank is compared with the rank-16 reference. |
-| Sequential/joint comparison | 0 | 16 | sequential, joint | 4 | 6 | Sequential-versus-joint gap when budgets match. |
-| Task-order comparison | 0 | 16 | commutator | 4 | 6 | Each method runs EURLEX→LEDGAR→SCOTUS and the reverse order. |
-| Combined coverage | 0 | 4, 16 | sequential, joint, commutator | 4 | 24 | Prerequisite runs for all retained metric families. Values are still N/A if a measurement is undefined or evaluation fails. |
-| Combined coverage, repeated seeds | 0, 1, 2 | 4, 16 | sequential, joint, commutator | 4 | 72 | Repeated-seed means, variation and paired comparisons. |
-
-Quick K comparison:
-
-```sh
-python benchmark/run_benchmark.py run --profile headline --seeds 0 --ranks 16 --k 1 4 6 8 --protocols sequential --epochs 1 --report-rank 16 --output-dir runs/a1-a3-quick
-```
-
-Combined coverage with one fixed K to keep the experiment count smaller:
-
-```sh
-python benchmark/run_benchmark.py run --profile headline --seeds 0 --ranks 4 16 --k 4 --protocols sequential joint commutator --epochs 1 --report-rank 4 --output-dir runs/a1-a3-coverage
-```
-
-Use `--seeds 0 1 2` with a new output directory for the 72-run version. Using
-all four K values in the combined configuration gives 48 runs for one seed,
-or 144 runs for three seeds. These commands use the checked-in real-data
-subsets; the separate quick notebook's smaller data overrides do not apply to
-CLI commands automatically.
-
-The default headline profile has three seeds, rank 16, K=[1,2,4,8] and the
-sequential/joint protocols: 36 runs. Its fixed rank and lack of reversed task
-orders do not cover every internal metric. The `full` profile adds wider
-rank/protocol sweeps and can require substantial compute.
-
-## Reports, existing results and JupyterHub
-
-To regenerate the narrower report from saved evaluation, **without retraining**:
-
-```sh
-python benchmark/run_benchmark.py report --output-dir runs/your-existing-run --report-rank 16
-```
-
-To recompute deployed measurements from saved checkpoints and then regenerate
-reports, use `eval` instead. Source/checkpoint integrity checks still apply.
-
-The HTML overview is generated at `report_and_visualization/index.html`.
-The Markdown comparison, individual A1/A2/A3 reports and PNGs are under
-`report_and_visualization/stage_A/`. Tables show metric availability and the
-summary reports the best observed value for each applicable metric on matched
-seeds. It does not assert statistical significance or select a universal winner.
-Existing unreferenced image files are not deleted; notebook galleries display
-only images linked by the current report so excluded figures cannot reappear.
-
-The separately supplied JupyterHub notebook clones the
-branch or a selected PR, installs dependencies on the server, checks GPU and
-training imports, runs the pipeline, displays tables/figures and exports a ZIP.
-The downloadable small-data notebook uses all three domains, one seed, one
-epoch and six runs. It can show the basic metrics, but not a joint gap or
-alternate-order proxy, and its one-rank setting does not establish a compression
-curve. No dataset or seed setting guarantees a fixed completion time.
+Planning and contract tests cover stories and separate sources. A real local
+smoke attempt cannot reach data loading because the Python environment lacks
+`optax`. Successful model training and ROCStories numeric results are therefore
+not claimed. Install the project training dependencies and run both source smoke
+profiles on the intended training host before accepting runtime performance.

@@ -142,20 +142,21 @@ Train and evaluate all three methods, then generate internal and external
 metric tables, comparison plots, individual method plots and a final summary:
 
 ```bash
-python benchmark/run_benchmark.py --profile headline
+bash scripts/run_benchmark_full.sh --profile headline
 ```
 
-The headline profile uses real LexGLUE subsets and three seeds. Open
-`report_and_visualization/index.html` to see the comparison and all individual
+The headline profile uses the YAML runtime source (ROCStories by default) and three seeds. Use `--runtime-source separate` for LexGLUE. Open
+`docs/stage_A_results/index.html` to see the comparison and all individual
 reports. To regenerate reports from saved measurements without retraining:
 
 ```bash
-python benchmark/run_benchmark.py report --output-dir runs/benchmark
+python -m benchmark.summary --output-dir runs/benchmark
+python -m benchmark.visualization --output-dir runs/benchmark
 ```
 
 See [benchmark metrics](docs/benchmark_metrics.md) for metric definitions,
-evidence requirements and profiles. JupyterHub notebooks are supplied separately
-and are not tracked in this repository.
+evidence requirements and profiles. The [JupyterHub notebook](run_benchmark_jupyterhub.ipynb)
+runs the same modules. Generated reports in `docs/stage_A_results` are tracked.
 
 ## Configuration and Results
 

@@ -177,7 +177,7 @@ known-first-party = [
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
 [tool.mypy]
-# Resolve the single-file benchmark namespace relative to the repository root.
+# Resolve the benchmark package relative to the repository root.
 namespace_packages = true
 explicit_package_bases = true
 python_version = "3.12"

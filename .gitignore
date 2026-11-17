@@ -138,7 +138,6 @@ htmlcov/
 Thumbs.db
 .DS_Store
 runs/
-/report_and_visualization/
 /benchmark-work/
 /benchmark-results-*.zip
 models/
