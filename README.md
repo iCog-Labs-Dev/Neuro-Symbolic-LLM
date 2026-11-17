@@ -103,7 +103,7 @@ The pipeline uses `configs/offline_data.yaml` and stores outputs under `data/sym
 
 The student-generated semantic results are saved as `parsed_documents.jsonl`.
 
-See [Semantic Parser documentation](parser/README.md) for details.
+For pipeline configuration, model setup, and detailed execution instructions, see the [Semantic Parser documentation](parser/README.md).
 
 ### 2. Run the Symbolic Miner
 
@@ -124,7 +124,6 @@ The miner performs semantic document export, PeTTa emission, admission, pattern 
 
 See [Symbolic Pipeline documentation](symbolic_pipeline/README.md) for details.
 
-For pipeline configuration, model setup, and detailed execution instructions, see the [Semantic Parser documentation](parser/README.md).
 
 ### 2. Stage A Experiments
 
