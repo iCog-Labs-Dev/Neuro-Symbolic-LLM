@@ -30,6 +30,7 @@ except (ImportError, RuntimeError):
     load_dataset = None
 
 from frozenllm.substrate import FrozenSubstrate, identity_modify
+from losses.shared import model_loss_terms
 from metrics.performance import (
     mean_forgetting,
     mean_seen_accuracy,
@@ -40,7 +41,7 @@ from metrics.representation import loss_improvement
 from residual import AdapterParams, ResidualAdapter, ResidualConfig
 from stages.results import RunWriter, load_params
 
-SECTIONS = ("adapter", "objective", "training", "domains")
+SECTIONS = ("adapter", "objective", "training", "domains", "a3_hybrid")
 # Domain names become file names (params/task_<t>_<name>.npz).
 DOMAIN_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -80,27 +81,36 @@ class TrainingConfig:
     model: str = "gpt2"
     seq_len: int = 128
     batch_size: int = 8
-    # Default epochs per domain; a domain's ``epochs`` overrides it.
     epochs: int = 3
     learning_rate: float = 1.0e-3
     eval_batches: int = 8
+    test_batches: int = 8
     log_every: int = 10
     seed: int = 0
-    # Fresh Adam moments at each domain boundary.
     reset_optimizer: bool = True
     output_dir: str = "runs"
     jit: bool = True
 
     def __post_init__(self) -> None:
-        for name in ("seq_len", "batch_size", "eval_batches", "log_every"):
+        for name in (
+            "seq_len",
+            "batch_size",
+            "eval_batches",
+            "test_batches",
+            "log_every",
+        ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+
         if self.epochs < 0:
             raise ValueError(f"epochs must be >= 0, got {self.epochs}")
+
         if self.seq_len < 2:
             raise ValueError("seq_len must be >= 2 for next-token training.")
-        if not math.isfinite(self.learning_rate) or not self.learning_rate > 0:
+
+        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
+
         if not isinstance(self.jit, bool):
             raise ValueError(f"jit must be a boolean, got {self.jit!r}")
 
@@ -143,7 +153,7 @@ class RunConfig:
     # Stage objective config: any frozen dataclass with ``from_dict``.
     objective: Any
     training: TrainingConfig
-    domains: tuple[DomainConfig, ...]
+    domains: tuple[DomainConfig, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,22 +164,169 @@ class RunConfig:
         }
 
 
-def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
-    raw = yaml.safe_load(path.read_text()) or {}
+def load_configs(
+    path: Path,
+    objective_cls: type[Any],
+    objective_section: str = "objective",
+) -> RunConfig:
+    """Load stage configuration together with shared training settings.
+
+    Shared configuration:
+        configs/training.yaml
+
+    Stage configuration:
+        configs/stage_A/<stage>.yaml
+
+    Shared settings provide the common defaults.
+    Explicit stage settings override them.
+    """
+
+    if objective_section not in {"objective", "a3_hybrid"}:
+        raise ValueError(f"Unsupported objective section: {objective_section}")
+
+    # ---------------------------------------------------------
+    # Load stage-specific configuration
+    # ---------------------------------------------------------
+
+    stage_path = Path(path)
+
+    if not stage_path.is_file():
+        raise FileNotFoundError(f"Stage configuration not found: {stage_path}")
+
+    raw = yaml.safe_load(stage_path.read_text(encoding="utf-8")) or {}
+
     unknown = sorted(set(raw) - set(SECTIONS))
+
     if unknown:
-        raise ValueError(f"Unknown config sections in {path}: {unknown}.")
-    domains_raw = raw.get("domains")
-    if not isinstance(domains_raw, list) or not domains_raw:
-        raise ValueError(f"{path}: 'domains' must be a non-empty list of domains.")
-    domains = tuple(DomainConfig.from_dict(d) for d in domains_raw)
-    names = [d.name for d in domains]
+        raise ValueError(f"Unknown config sections in {stage_path}: {unknown}.")
+
+    # ---------------------------------------------------------
+    # Load shared configuration
+    # ---------------------------------------------------------
+
+    repo_root = Path(__file__).resolve().parents[1]
+    shared_path = repo_root / "configs" / "training.yaml"
+
+    if not shared_path.is_file():
+        raise FileNotFoundError(
+            f"Shared training configuration not found: {shared_path}"
+        )
+
+    shared = yaml.safe_load(shared_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(shared, Mapping):
+        raise ValueError("Shared training configuration must be a YAML mapping.")
+
+    allowed_sections = {"model", "training", "evaluation"}
+    unknown = sorted(set(shared) - allowed_sections)
+
+    if unknown:
+        raise ValueError(f"Unknown shared configuration sections: {unknown}")
+
+    model = shared.get("model") or {}
+    training = shared.get("training") or {}
+    evaluation = shared.get("evaluation") or {}
+
+    for name, section in (
+        ("model", model),
+        ("training", training),
+        ("evaluation", evaluation),
+    ):
+        if not isinstance(section, Mapping):
+            raise ValueError(
+                f"Shared configuration section {name!r} " "must be a mapping."
+            )
+
+    # ---------------------------------------------------------
+    # Merge adapter configuration
+    # ---------------------------------------------------------
+
+    shared_adapter = {
+        key: model[key]
+        for key in (
+            "rank",
+            "alpha",
+            "activation",
+            "init_std",
+            "layers",
+            "seed",
+        )
+        if key in model
+    }
+
+    stage_adapter = raw.get("adapter") or {}
+
+    if not isinstance(stage_adapter, Mapping):
+        raise ValueError("Stage adapter configuration must be a mapping.")
+
+    adapter_config = {
+        **shared_adapter,
+        **stage_adapter,
+    }
+
+    adapter = ResidualConfig.from_dict(adapter_config)
+
+    # ---------------------------------------------------------
+    # Merge training configuration
+    # ---------------------------------------------------------
+
+    shared_training = {}
+
+    if "name" in model:
+        shared_training["model"] = model["name"]
+
+    for key in ("seq_len", "batch_size", "seed"):
+        if key in model:
+            shared_training[key] = model[key]
+
+    shared_training.update(training)
+
+    # Map evaluation settings to TrainingConfig.
+    if "validation_batches" in evaluation:
+        shared_training["eval_batches"] = evaluation["validation_batches"]
+
+    if "test_batches" in evaluation:
+        shared_training["test_batches"] = evaluation["test_batches"]
+
+    stage_training = raw.get("training") or {}
+
+    if not isinstance(stage_training, Mapping):
+        raise ValueError("Stage training configuration must be a mapping.")
+
+    # Explicit stage settings override shared defaults.
+    training_config = {
+        **shared_training,
+        **stage_training,
+    }
+
+    training_cfg = TrainingConfig.from_dict(training_config)
+
+    # ---------------------------------------------------------
+    # Load stage-specific objective
+    # ---------------------------------------------------------
+
+    objective = objective_cls.from_dict(raw.get(objective_section) or {})
+
+    # ---------------------------------------------------------
+    # Load optional legacy domains
+    # ---------------------------------------------------------
+
+    domains_raw = raw.get("domains", [])
+
+    if not isinstance(domains_raw, list):
+        raise ValueError(f"{stage_path}: 'domains' must be a list.")
+
+    domains = tuple(DomainConfig.from_dict(domain) for domain in domains_raw)
+
+    names = [domain.name for domain in domains]
+
     if len(set(names)) != len(names):
-        raise ValueError(f"{path}: domain names must be unique, got {names}.")
+        raise ValueError(f"{stage_path}: domain names must be unique, got {names}.")
+
     return RunConfig(
-        adapter=ResidualConfig.from_dict(raw.get("adapter") or {}),
-        objective=objective_cls.from_dict(raw.get("objective") or {}),
-        training=TrainingConfig.from_dict(raw.get("training") or {}),
+        adapter=adapter,
+        objective=objective,
+        training=training_cfg,
         domains=domains,
     )
 
@@ -199,6 +356,17 @@ def apply_run_overrides(cfg: RunConfig, args: Any) -> RunConfig:
     if args.eval_batches is not None:
         training = replace(training, eval_batches=args.eval_batches)
     return replace(cfg, adapter=adapter, training=training, domains=domains)
+
+
+def format_params(count: int) -> str:
+    """Format parameter counts using K, M or B."""
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.2f}B"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.2f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.2f}K"
+    return str(count)
 
 
 @dataclass(frozen=True)
@@ -263,28 +431,6 @@ def base_logits(substrate: FrozenSubstrate, input_ids: jax.Array) -> jax.Array:
         input_ids, modify_fn=identity_modify, intercept_layers=()
     )
     return jax.lax.stop_gradient(result.logits)
-
-
-def model_loss_terms(
-    substrate: FrozenSubstrate,
-    adapted: jax.Array,
-    labels: jax.Array,
-    lambda_kl: float,
-    base: jax.Array | None = None,
-) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-    """Shared A1/A2 task and KL calculation; only the augmented branch is live."""
-    if base is None:
-        task = substrate.compute_loss(adapted, labels, losses=("CE",))
-        return task, task, None
-    total, parts = substrate.compute_loss(
-        adapted,
-        labels,
-        losses=("CE", "KL"),
-        base_logits=jax.lax.stop_gradient(base),
-        weights={"KL": lambda_kl},
-        return_components=True,
-    )
-    return total, parts["ce"], parts["kl"]
 
 
 def make_optimizer(
@@ -840,52 +986,48 @@ def log_experiment_header(
     run_dir: Any,
     domains: Sequence[Domain],
     start_time: str | None = None,
+    stage: str = "A1",
 ) -> None:
-    """Log structured initialization banner and experiment hyperparameters."""
+    """Log a compact experiment header for A1, A2 and A3."""
+
     train_cfg = cfg.training
-    ratio = (n_trainable / n_frozen * 100.0) if n_frozen > 0 else 0.0
-    ts = start_time or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    total_params = n_trainable + n_frozen
+    ratio = n_trainable / total_params * 100.0 if total_params > 0 else 0.0
 
     logger.info("=" * 78)
-    logger.info("STAGE A1: SEQUENTIAL RESIDUAL ADAPTER TRAINING")
+    logger.info(
+        "STAGE %s: SEQUENTIAL RESIDUAL ADAPTER TRAINING",
+        stage.upper(),
+    )
     logger.info("=" * 78)
-    logger.info("Started At         : %s", ts)
+
     logger.info(
         "Model Architecture : %s (%d layers, hidden_dim=%d)",
         train_cfg.model,
         arch.num_layers,
         arch.hidden_size,
     )
+
     logger.info(
         "Residual Adapter   : target_layers=%s | rank=%d | alpha=%s",
         list(adapter.layers),
         cfg.adapter.rank,
         cfg.adapter.alpha,
     )
+
     logger.info(
         "Parameters         : %s trainable | %s frozen (%.3f%% trainable)",
-        f"{n_trainable:,}",
-        f"{n_frozen:,}",
+        format_params(n_trainable),
+        format_params(n_frozen),
         ratio,
     )
+
     logger.info(
-        "Hyperparameters    : batch_size=%d | seq_len=%d | lr=%.2e | jit=%s",
-        train_cfg.batch_size,
-        train_cfg.seq_len,
-        train_cfg.learning_rate,
-        train_cfg.jit,
+        "Tasks              : %d sequential task(s)",
+        len(domains),
     )
-    logger.info("Run Directory      : %s", run_dir)
-    logger.info("Curriculum (%d domain(s)):", len(domains))
-    for i, d in enumerate(domains, 1):
-        logger.info(
-            "  [%d] %-10s -> %d blocks | %d eval batches | %d epoch(s)",
-            i,
-            d.name,
-            len(d.train_blocks),
-            len(d.eval_set),
-            d.epochs,
-        )
+
     logger.info("-" * 78)
 
 
@@ -948,13 +1090,13 @@ def log_final_summary(
         final_forg = "None" if forgetting[-1] is None else f"{forgetting[-1]:+.4f}"
         logger.info("  • Mean Forgetting: [%s] (Final: %s)", forg_str, final_forg)
 
-    status_str = (
-        "PASSED (Base model parameters 100% frozen)"
-        if frozen.get("params_unchanged")
-        else "FAILED (Base model parameters modified!)"
-    )
-    logger.info("Substrate Integrity: %s", status_str)
-    logger.info("=" * 78)
+    if frozen.get("params_unchanged"):
+        logger.info("=" * 78)
+    else:
+        logger.info(
+            "Substrate Integrity: %s", "FAILED (Base model parameters modified!)"
+        )
+        logger.info("=" * 78)
 
 
 __all__ = [

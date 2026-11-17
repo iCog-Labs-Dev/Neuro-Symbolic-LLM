@@ -144,7 +144,7 @@ def main(
     from residual import ResidualAdapter
     from residual.symbolic_head.jax_head import Retriever, SymbolicHead
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
-    from stages.stage_A.A3_model import A3Config, A3Model
+    from stages.stage_A.a3 import A3HybridConfig, A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
     from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, load_config
     from stages.stage_A.a4.data import load_data
@@ -184,7 +184,11 @@ def main(
     bank = load_bank(args.patterns, args.embeddings)
     if len(bank.records) < config.minimum_templates:
         raise ValueError(f"Bank needs at least {config.minimum_templates} templates")
-    inherited = load_configs(config.residual_config, A3Config)
+    inherited = load_configs(
+        config.residual_config,
+        A3HybridConfig,
+        objective_section="a3_hybrid",
+    )
     substrate_reused = substrate is not None
     substrate = _resolve_substrate(config.training.model, substrate)
     adapter = ResidualAdapter(inherited.adapter, substrate.architecture)
@@ -257,7 +261,9 @@ def main(
                         ).hexdigest()
                         for name in (
                             "experiments/run_stage_a4.py",
-                            "stages/stage_A/A3_model.py",
+                            "stages/stage_A/a3/a3_model.py",
+                            "stages/stage_A/a3/a3_graph.py",
+                            "stages/stage_A/a3/a3_tail.py",
                             "stages/stage_A/a4/data.py",
                             "stages/stage_A/a4/model.py",
                             "stages/stage_A/a4/objective.py",

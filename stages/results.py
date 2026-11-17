@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import pickle
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -122,10 +123,20 @@ class RunWriter:
             raise ValueError(
                 f"run_name must be a plain directory name, got {run_name!r}"
             )
+
         self.dir = Path(root) / run_name
-        # Never mix artifacts from two runs.
+
+        # Remove previous run artifacts if the directory exists.
+        if self.dir.exists():
+            if not self.dir.is_dir() or self.dir.is_symlink():
+                raise ValueError(f"Run path is not a regular directory: {self.dir}")
+            shutil.rmtree(self.dir)
+
+        # Create a clean directory for the new run.
         self.dir.mkdir(parents=True, exist_ok=False)
-        self._metrics: IO[str] | None = (self.dir / "metrics.jsonl").open("a")
+
+        # Start a fresh metrics file.
+        self._metrics: IO[str] | None = (self.dir / "metrics.jsonl").open("w")
 
     def __enter__(self) -> RunWriter:
         return self

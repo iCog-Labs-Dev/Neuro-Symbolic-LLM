@@ -247,12 +247,17 @@ def test_parser_exposes_active_prompt_identity_without_generation():
     assert parser.prompt_version == expected
 
 
-def test_routed_extraction_prompt_with_discourse_keeps_one_input_section():
-    source = "The committee discussed the proposal, but it postponed the vote."
-    prompt = catalog_prompt.build_routed_extraction_prompt(
-        source, catalog=load_ontology_catalog(), run_discourse=True
+def test_routed_prompt_finds_numbered_input_section():
+    from parser.semantic.catalog_prompt import (
+        build_routed_extraction_prompt,
     )
 
-    assert prompt.text.count(source) == 1
-    assert len(catalog_prompt._INPUT_HEADING.findall(prompt.text)) == 1
+    prompt = build_routed_extraction_prompt(
+        "Although it rained, Mira left.",
+        catalog=load_ontology_catalog(),
+        run_discourse=True,
+    )
+
     assert "FINAL COMBINED EXTRACTION REQUIREMENTS" in prompt.text
+    assert "## 14. INPUT" in prompt.text
+    assert prompt.text.count("Source text:\nAlthough it rained, Mira left.") == 1

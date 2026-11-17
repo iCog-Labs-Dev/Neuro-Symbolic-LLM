@@ -13,7 +13,8 @@ from metrics.representation import (
     residual_redundancy,
 )
 from residual import ResidualAdapter
-from stages.stage_A.a2 import A2Config, a2_objective, adapter_params
+
+from .a2 import A2Config, a2_objective, adapter_params
 
 
 def internal_metrics(

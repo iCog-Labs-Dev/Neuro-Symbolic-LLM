@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from stages.stage_A.A3_model import A3Model
+from stages.stage_A.a3 import A3Model
 
 
 def restore_a3_weights(

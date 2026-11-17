@@ -390,14 +390,23 @@ def build_routed_extraction_prompt(
     # Keep the shared general instructions in one place.
     # Insert the discourse extension before the source input
     # so the source is not sent twice.
-    # Match the heading by its name, so renumbering the sections cannot break it.
-    markers = list(_INPUT_HEADING.finditer(general.text))
-    if not markers:
-        raise ValueError("General prompt must contain an INPUT section")
 
-    start = markers[-1].start()
-    general_instructions, input_section = general.text[:start], general.text[start:]
+    input_pattern = re.compile(r"(?m)^##\s+\d+\.\s+INPUT\s*$")
 
+    input_sections = list(input_pattern.finditer(general.text))
+
+    if len(input_sections) != 1:
+        raise ValueError(
+            "General prompt must contain exactly one numbered INPUT section"
+        )
+
+    input_section_match = input_sections[0]
+
+    input_heading = input_section_match.group(0)
+
+    general_instructions = general.text[: input_section_match.start()]
+
+    input_section = general.text[input_section_match.end() :]
     combined = (
         discourse_guidance
         + "\n\n"
@@ -464,6 +473,8 @@ def build_routed_extraction_prompt(
     Do not return a separate DiscourseExtraction object.
     """
         + "\n\n"
+        + input_heading
+        + "\n"
         + input_section
     )
 

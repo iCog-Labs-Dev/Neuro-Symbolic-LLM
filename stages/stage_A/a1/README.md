@@ -321,8 +321,15 @@ from residual import ResidualAdapter, ResidualConfig
 from stages.stage_A.a1 import A1Config, a1_objective
 
 # Tiny 12-block GPT-2; use FrozenSubstrate("gpt2") for the real checkpoint.
-cfg = GPT2Config(n_layer=12, n_head=4, n_embd=32, n_positions=32, vocab_size=64,
-                 bos_token_id=1, eos_token_id=2)
+cfg = GPT2Config(
+    n_layer=12,
+    n_head=4,
+    n_embd=32,
+    n_positions=32,
+    vocab_size=64,
+    bos_token_id=1,
+    eos_token_id=2,
+)
 substrate = FrozenSubstrate(GPT2LMHeadModel(cfg).eval(), config=cfg)
 
 adapter = ResidualAdapter(ResidualConfig(rank=4), substrate.architecture)
@@ -330,8 +337,11 @@ params = adapter.init_params()  # adapter.layers == (7, 8, 9, 10)
 
 ids = jnp.arange(9, dtype=jnp.int32)[None, :]
 (total, terms), grads = jax.value_and_grad(a1_objective, has_aux=True)(
-    params, substrate=substrate, adapter=adapter,
-    config=A1Config(lambda_kl=0.1), input_ids=ids,
+    params,
+    substrate=substrate,
+    adapter=adapter,
+    config=A1Config(lambda_kl=0.1),
+    input_ids=ids,
 )
 assert substrate.params_unchanged()
 ```
