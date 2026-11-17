@@ -895,6 +895,65 @@ def merge_teacher_artifacts(
 # ---------------------------------------------------------------------
 
 
+def interrupted_teacher_checkpoint_matches(
+    run_dir: Path,
+    prepared_path: Path,
+) -> bool:
+    """Check whether an interrupted teacher export can be resumed safely."""
+
+    checkpoint = run_dir / "documents.jsonl.checkpoint.json"
+
+    if not checkpoint.is_file():
+        return False
+
+    try:
+        state = load_manifest(checkpoint)
+
+        if state is None:
+            return False
+
+        identity = state.get("identity", {})
+
+        expected_outputs = {
+            name: str(output.resolve())
+            for name, output in teacher_paths(run_dir).items()
+        }
+
+        if identity.get("source_sha256") != file_sha256(prepared_path):
+            return False
+
+        if identity.get("source_path") != str(prepared_path.resolve()):
+            return False
+
+        if identity.get("outputs") != expected_outputs:
+            return False
+
+        if state.get("complete") is not False:
+            return False
+
+        for field in ("line_number", "accepted", "rejected"):
+            value = state.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                return False
+
+        expected_files = set(expected_outputs)
+        if set(state.get("files", {})) != expected_files:
+            return False
+
+        for name in expected_files:
+            partial = run_dir / (
+                teacher_paths(run_dir)[name].name + ".partial"
+            )
+
+            if not partial.is_file():
+                return False
+
+        return True
+
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
 def prepare_teacher(
     args: argparse.Namespace,
     source_name: str,
@@ -920,6 +979,22 @@ def prepare_teacher(
     expected_fingerprint = teacher_fingerprint(args)
     current_source_fingerprints = source_fingerprints(current_index)
     previous = load_manifest(manifest_path)
+
+    # Resume an interrupted teacher export before considering archival.
+    if (
+        run_dir.exists()
+        and not args.force
+        and interrupted_teacher_checkpoint_matches(
+            run_dir,
+            prepared_path,
+        )
+    ):
+        print(
+            "Found compatible interrupted teacher extraction. "
+            "Resuming from its existing checkpoint.",
+            flush=True,
+        )
+        return prepared_path, True
 
     if run_dir.exists() and not args.force:
         valid, old_keys = validate_teacher_artifacts(
@@ -1305,7 +1380,7 @@ def run_semantic_e2e(
             recovery_root,
         )
 
-    run_cli(
+    e2e_returncode = run_cli(
         e2e_command(
             args,
             run_dir,
@@ -1313,8 +1388,18 @@ def run_semantic_e2e(
             resume=resume,
             skip_training=compatible_student,
         ),
-        progress_total=(count_jsonl(input_path) if input_path is not None else None),
+        accepted_returncodes=(0, 2),
+        progress_total=(
+            count_jsonl(input_path) if input_path is not None else None
+        ),
     )
+
+    if e2e_returncode == 2:
+        print(
+            "WARNING: E2E completed, but some held-out test predictions "
+            "were invalid. Continuing with validated artifacts.",
+            flush=True,
+        )
 
     if not validate_teacher_artifacts(
         run_dir,
