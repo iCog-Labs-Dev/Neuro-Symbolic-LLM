@@ -155,8 +155,8 @@ python -m benchmark.visualization --output-dir runs/benchmark
 ```
 
 See [benchmark metrics](docs/benchmark_metrics.md) for metric definitions,
-evidence requirements and profiles. The [JupyterHub notebook](run_benchmark_jupyterhub.ipynb)
-runs the same modules. Generated reports in `docs/stage_A_results` are tracked.
+evidence requirements and profiles. JupyterHub notebooks are kept locally and
+are not tracked. Generated reports in `docs/stage_A_results` are tracked.
 
 ## Configuration and Results
 

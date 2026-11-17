@@ -103,8 +103,8 @@ for this guarantee.
 
 The wrapper supports `PROFILE`, `OUTPUT_DIR`, `REPORT_DIR`, `RUNTIME_CONFIG`,
 `RUNTIME_SOURCE`, corresponding lowercase flags, and extra benchmark arguments
-after `--`. Steps fail fast. The tracked [notebook](../run_benchmark_jupyterhub.ipynb)
-uses the same modules and archives the report directory without embedded results.
+after `--`. Steps fail fast. JupyterHub notebooks are local-only; use the module
+commands or shell wrapper above to run the pipeline from a fresh checkout.
 
 ## Validation limits
 

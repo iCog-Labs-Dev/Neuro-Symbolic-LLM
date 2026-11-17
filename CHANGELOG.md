@@ -1,5 +1,7 @@
 # Unreleased
 
+- Remove the JupyterHub notebook from version control; keep local notebook copies ignored.
+
 - Split Stage A benchmark orchestration, summaries and plotting into independent
   module CLIs; default orchestration runs planning, training and evaluation.
 - Use YAML runtime source and loader-realized task order for dataset-independent

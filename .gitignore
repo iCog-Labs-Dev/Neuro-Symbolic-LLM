@@ -76,6 +76,8 @@ logs/
 bin/
 # Jupyter
 .ipynb_checkpoints/
+/john.ipynb
+/run_benchmark_jupyterhub.ipynb
 
 # Build artifacts
 *.egg-info/
