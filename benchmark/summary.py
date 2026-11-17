@@ -40,7 +40,17 @@ def _tables(records: list[dict[str, Any]]) -> list[str]:
         lines.append(
             f"| {record['run_id']} | {record.get('protocol', 'N/A')} | {record.get('seed', 'N/A')} | {record.get('rank', 'N/A')} | {record.get('k', 'N/A')} | {' → '.join(record.get('task_order', []))} | {', '.join(record.get('heldout_tasks', []))} |"
         )
-    lines.append("")
+    lines += [
+        "",
+        "Measurement notes: task-gradient conflict uses fixed task-specific training "
+        "batches as a diagnostic at the final checkpoint. Residual direction "
+        "redundancy averages read/write direction overlap across layers. Ablation "
+        "fidelity compares quadratic gate-gradient/empirical-Fisher predictions "
+        "against actual held-out loss changes for sampled rank channels; paired "
+        "values and sample counts are saved in evaluation.json. Old evaluations "
+        "must be recomputed to obtain these measurements.",
+        "",
+    ]
     for category, specs in (
         ("Internal", INTERNAL_METRIC_SPECS),
         ("External", EXTERNAL_METRIC_SPECS),
@@ -65,11 +75,11 @@ def _tables(records: list[dict[str, Any]]) -> list[str]:
                 lines.append(f"| N/A | {label} | N/A | No evaluated runs |")
         lines.append("")
     lines += [
-        "## Per-task token accuracy",
+        "## Per-dataset token accuracy",
         "",
-        "Next-token prediction accuracy on each task's test split; this is not labeled task accuracy.",
+        "Next-token prediction accuracy on loader-provided test splits. Stories training tasks share one dataset-level test split; this is not labeled task accuracy.",
         "",
-        "| Run | Task | Token accuracy |",
+        "| Run | Dataset/test split | Token accuracy |",
         "|---|---|---|",
     ]
     for record in records:

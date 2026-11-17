@@ -24,6 +24,8 @@ def test_report_exact_metrics_and_missing_evidence(tmp_path):
     for label, _, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS:
         assert label in content
     assert "No evaluated runs" in content
+    assert "Residual direction redundancy" in content
+    assert "Invariant redundancy" not in content
     assert "![" not in content
     assert not (runs / "REPORT.md").exists()
     assert (reports / "index.html").is_file()
@@ -57,6 +59,19 @@ def test_effect_magnitudes_are_not_prediction_fidelity():
         assert "predictor" in measurement_reason(record, key)
     for key in ("adapter_ablation", "causal_fingerprint", "cross_adapter_curvature"):
         assert metric_values_for_record(record, key, 16) == []
+
+
+def test_reevaluation_replaces_old_metric_catalog_without_editing_manifest(tmp_path):
+    from benchmark.benchmark import evaluate_manifest
+
+    path = tmp_path / "manifest.json"
+    _write_json(path, {"runs": [], "measured_metrics": ["invariant_redundancy"]})
+    original = path.read_bytes()
+    evaluation = evaluate_manifest(tmp_path)
+    assert evaluation["measured_metrics"] == list(MEASURED_METRICS)
+    assert "residual_direction_redundancy" in evaluation["measured_metrics"]
+    assert "invariant_redundancy" not in evaluation["measured_metrics"]
+    assert path.read_bytes() == original
 
 
 def test_summary_has_no_plotting_dependency():

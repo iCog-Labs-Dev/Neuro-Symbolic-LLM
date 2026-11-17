@@ -51,26 +51,78 @@ implemented measurements, not claims that a model run has succeeded.
 | Group | Metric | Evidence and availability on ROCStories |
 |---|---|---|
 | Internal | Residual compressibility | Shared guarded ratio of validation-loss improvements across matched ranks. N/A for a single rank or nonpositive/too-small reference improvement. |
-| Internal | Task-gradient conflict | Shared gradient-conflict formula on gradients of mean held-out CE at the final checkpoint. Needs batches from at least two tasks. |
-| Internal | Invariant redundancy | Shared formula applied to final adapter A/B matrices; aggregated across layers. |
-| Internal | Ablation prediction MAE | N/A: no validated component-effect predictor with paired measured held-out ablations. |
-| Internal | Ablation rank correlation (Spearman) | N/A for the same reason; effect magnitude alone is not prediction fidelity. |
+| Internal | Task-gradient conflict | Shared gradient-conflict formula on mean CE gradients from fixed, task-specific training batches at the final checkpoint. Diagnostic only; no updates. Requires at least two tasks. |
+| Internal | Residual direction redundancy | Mean absolute pairwise cosine of distinct columns of A (read directions) and rows of B (write directions), using the shared residual_redundancy formula. Report averages the read/write values across layers; evaluation.json retains both. |
+| Internal | Ablation prediction MAE | MAE between quadratic gate-space predictions and actual test-loss changes after zeroing sampled rank-channel write rows. |
+| Internal | Ablation rank correlation (Spearman) | Shared tie-aware Spearman on the same paired predictions/effects. N/A only when fewer than two pairs exist or either vector is constant (or evaluation fails). |
 | External | Validation loss | Mean final validation CE across tasks from runner results. |
 | External | Perplexity | Exponential of mean final validation loss. |
 | External | Held-out test loss | Mean task test CE from runner results; test split is distinct from validation. |
 | External | Held-out test perplexity | Exponential of mean task test CE. |
 | External | Validation-loss forgetting | Shared runner's final mean validation-loss forgetting. |
-| External | On-domain KL drift | Final checkpoint versus frozen base on each task's held-out test batches. |
+| External | On-domain KL drift | Final checkpoint versus frozen base on loader-provided held-out test batches. |
 | External | Token accuracy | Correct next-token predictions using the shared masked-token formula on test batches. |
-| External | Calibration ECE | Shared calibration bins pooled over test batches within each task. |
+| External | Calibration ECE | Shared calibration bins pooled over test batches within each dataset. |
 
 Missing measurements are N/A with reasons. Checkpoint metrics are aggregated
-across task values in report tables. Token accuracy is a language-model measure,
+across dataset values in report tables. Token accuracy is a language-model measure,
 not classification or story-ending task accuracy. Reports also show the token
-accuracy breakdown for each task. Reports compare A1/A2/A3 only
+accuracy breakdown for each dataset. Reports compare A1/A2/A3 only
 on matching conditions and data fingerprints. A3 K selection uses validation
 loss on common seeds/data across K; test values do not select K. Operational
 scores are excluded; `params_unchanged` remains a run-validity field.
+
+ROCStories supplies `rocstories_task_1..N` training chunks but one shared test
+split keyed by the configured dataset name (normally `rocstories`). Evaluation
+iterates the loader's test dictionary, not the task list. It does not duplicate
+the same test set under each task name. Task-gradient conflict uses each task's
+own training blocks because stories validation/test data are shared; these
+diagnostic gradients must not be interpreted as held-out generalization evidence.
+
+### Ablation probe and research-plan alignment
+
+The probe follows the quadratic approximation in research plan v8 section 7.8
+and Appendix B. Each selected residual rank channel has a scalar gate on its
+row of B. All gates start at 1; an ablation changes one to 0, so its perturbation
+is -1. Predictions are `-g_i + F_ii / 2`, where `g_i` is the held-out mean CE
+gate gradient and `F_ii` is the mean squared **per-sequence** CE gate gradient.
+Both are weighted by valid next-token counts. This is a diagonal empirical
+Fisher in gate coordinates, a sequence-level curvature approximation, not the
+exact hidden-state Hessian or token-level Fisher. Prediction quality is measured,
+not assumed; negative correlation or large errors are retained.
+
+Up to 16 evenly spaced channels across sorted layers are selected without
+consulting outcomes. Actual signed effects are `CE(ablated) - CE(full)` on the
+same fixed test sequences. No ablation outcomes are used to fit the predictor.
+Evaluation saves gradients, Fisher diagonals, predictions, measured effects,
+baseline/ablated losses, dataset names and sample counts under
+`deployed_evaluation.ablation_fidelity`. MAE and Spearman pool component/dataset
+pairs equally. A3 uses deployed K=0 behavior, as for all checkpoint metrics.
+This adds reverse passes per test sequence and forward passes per selected
+channel; it does not retrain or alter the checkpoint.
+
+Residual direction redundancy matches sections 2.5 and 7.9: overlap of the
+actual read/write directions. It replaces invariant redundancy in benchmark
+tables and figures; the shared metric formulas remain unchanged. Previously
+saved invariant values are not reinterpreted as direction redundancy.
+
+### Refresh an existing run without retraining
+
+On the original training host, update `benchmark-final`, retain the original
+run directory with its manifest, materialized configs, metadata and checkpoints,
+then run the following with `RUNS_DIR` set to that directory:
+
+```bash
+python -m benchmark.benchmark eval --output-dir "$RUNS_DIR"
+python -m benchmark.summary --output-dir "$RUNS_DIR" --report-dir docs/stage_A_results
+python -m benchmark.visualization --output-dir "$RUNS_DIR" --report-dir docs/stage_A_results
+```
+
+The general report is generated at
+`docs/stage_A_results/stage_A/comparison/stage_a_general_report.md`.
+An uploaded Markdown report by itself cannot reconstruct checkpoint metrics.
+Do not run `plan` or `train` to refresh completed runs. Summary/visualization
+alone also cannot repair an old evaluation.json; run checkpoint `eval` first.
 
 Smoke and headline profiles have one rank (16), so compressibility is explicitly
 N/A. Pass `--ranks 4 16` or a wider sweep to measure it. The full profile uses

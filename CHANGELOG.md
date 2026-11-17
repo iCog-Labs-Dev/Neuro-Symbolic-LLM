@@ -1,5 +1,13 @@
 # Unreleased
 
+- Fix ROCStories checkpoint evaluation to respect dataset-level test keys, and
+  use distinct task training probes for diagnostic gradient conflict.
+- Measure held-out rank-channel ablations against quadratic gate/Fisher
+  predictions; report actual MAE/Spearman with explicit undefined-score reasons.
+- Replace benchmark invariant redundancy with read/write residual direction
+  redundancy from the existing shared formula. Training and loader behavior are
+  unchanged. Existing checkpoints can be re-evaluated without retraining.
+
 - Remove the JupyterHub notebook from version control; keep local notebook copies ignored.
 
 - Split Stage A benchmark orchestration, summaries and plotting into independent

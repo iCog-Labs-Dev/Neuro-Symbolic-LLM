@@ -469,7 +469,7 @@ EXTERNAL_METRIC_SPECS = (
 INTERNAL_METRIC_SPECS = (
     ("Residual compressibility", "residual_compressibility", "higher"),
     ("Task-gradient conflict", "task_gradient_conflict", "lower"),
-    ("Invariant redundancy", "invariant_redundancy", "lower"),
+    ("Residual direction redundancy", "residual_direction_redundancy", "lower"),
     ("Ablation prediction MAE", "ablation_mae", "lower"),
     ("Ablation rank correlation (Spearman)", "ablation_spearman", "higher"),
 )
@@ -544,7 +544,7 @@ def _load_deployed_metrics(
     )
     from metrics.representation import (
         gradient_conflict_summary,
-        invariant_redundancy,
+        residual_redundancy,
     )
     from residual import ResidualAdapter, ResidualConfig
     from runtime.data_loader import (
@@ -552,7 +552,7 @@ def _load_deployed_metrics(
         load_runtime_data,
     )
     from stages.results import load_params
-    from stages.stage_base import TrainingConfig
+    from stages.stage_base import TrainingConfig, make_eval_set
 
     if run.get("method") not in DEFAULT_CONFIGS:
         return {"status": "unavailable", "reason": "unsupported Stage A method"}
@@ -609,13 +609,19 @@ def _load_deployed_metrics(
     runtime_config = load_runtime_config(runtime_config_path)
     evaluation_config = runtime_config.get("evaluation", {})
     calibration_bins = int(evaluation_config.get("calibration_bins", 15))
-    domains = runtime_data.tasks
     test_sets = runtime_data.get_test_sets(
         training.batch_size,
         training.eval_batches,
     )
     metrics_by_domain: dict[str, dict[str, Any]] = {}
-    batches_by_domain: dict[str, tuple[jax.Array, ...]] = {}
+    # Stories tasks are training chunks sharing one dataset-level test split.
+    # Keep its loader-provided key; duplicating it per task invents task evidence.
+    task_probes = {
+        task.name: make_eval_set(
+            task.train_blocks, training.batch_size, training.eval_batches
+        )
+        for task in runtime_data.tasks
+    }
 
     def deployed_with_params(
         deployed_params: dict[str, dict[str, jax.Array]],
@@ -684,9 +690,7 @@ def _load_deployed_metrics(
             ).logits
         return substrate.compute_loss(adapted, ids, losses=("CE",))
 
-    for domain in domains:
-        batches = test_sets[domain.name]
-        batches_by_domain[domain.name] = batches
+    for name, batches in test_sets.items():
         rows: list[dict[str, float | int]] = []
         conf_sums = []
         acc_sums = []
@@ -731,7 +735,7 @@ def _load_deployed_metrics(
         else:
             pooled_ece = None
         aggregate = aggregate_lm_rows(rows)
-        metrics_by_domain[domain.name] = {
+        metrics_by_domain[name] = {
             "status": aggregate["status"],
             "loss": aggregate.get("loss"),
             "ppl": aggregate.get("perplexity"),
@@ -741,7 +745,7 @@ def _load_deployed_metrics(
         }
 
     gradients: dict[str, Any] = {}
-    for name, batches in batches_by_domain.items():
+    for name, batches in task_probes.items():
         if not batches:
             continue
         gradients[name] = jax.grad(
@@ -760,13 +764,15 @@ def _load_deployed_metrics(
                     conflict_pairs[f"{left}:{names[j]}"] = float(conflict_matrix[i, j])
 
     representation: dict[str, Any] = {
-        "invariant_redundancy": {},
+        "residual_direction_redundancy": {},
         "task_gradient_conflict": {
             "status": "measured" if conflict_pairs else "insufficient_data",
-            "estimator": "gradient_of_mean_ce_over_configured_evaluation_batches",
-            "evaluation_batches": {
-                name: len(batches_by_domain[name]) for name in names
-            },
+            "estimator": "gradient_of_mean_ce_over_fixed_task_training_batches",
+            "split": "train (diagnostic only; no parameter updates)",
+            "reason": (
+                None if conflict_pairs else "Requires at least two task gradients."
+            ),
+            "evaluation_batches": {name: len(task_probes[name]) for name in names},
             "pairs": conflict_pairs,
             "mean": (
                 float(np.mean(list(conflict_pairs.values())))
@@ -780,14 +786,148 @@ def _load_deployed_metrics(
         if not layer_name.startswith("layer_"):
             continue
         a, b = block["A"], block["B"]
-        representation["invariant_redundancy"][layer_name] = float(
-            invariant_redundancy(a, b)
-        )
+        representation["residual_direction_redundancy"][layer_name] = {
+            direction: float(value)
+            for direction, value in residual_redundancy(a, b).items()
+        }
+
+    # A probe failure must not discard already measured external metrics.
+    try:
+        ablations = measure_ablation_prediction(loss_for, params, test_sets)
+    except (RuntimeError, ValueError) as exc:
+        ablations = {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
 
     return {
         "status": "measured",
         "domains": metrics_by_domain,
         "representation": representation,
+        "ablation_fidelity": ablations,
+    }
+
+
+def measure_ablation_prediction(
+    loss_for: Callable[[Any, Any], Any],
+    params: dict[str, Any],
+    test_sets: dict[str, Any],
+    *,
+    max_components: int = 16,
+) -> dict[str, Any]:
+    """Compare a gate-space quadratic predictor with actual held-out ablations.
+
+    One atom is one rank channel (one row of B). Gating that row scales its
+    entire hidden contribution. At the full model (gate=1), removal has delta=-1.
+    The prediction is -g + F/2, using a diagonal, sequence-level empirical Fisher
+    E[(d CE_sequence / d gate)^2]. This is a declared curvature approximation,
+    not an exact Hessian or a predictor fitted to the true ablation outcomes.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from metrics.research_audits import ablation_fidelity
+
+    if isinstance(max_components, bool) or max_components < 1:
+        raise ValueError("max_components must be positive")
+    atoms = [
+        (layer, i)
+        for layer in sorted(params)
+        for i in range(params[layer]["B"].shape[0])
+    ]
+    if not atoms:
+        raise ValueError("No residual rank channels to ablate")
+    selected = np.linspace(
+        0, len(atoms) - 1, min(max_components, len(atoms)), dtype=int
+    )
+    components = [atoms[i] for i in selected]
+    full = jnp.ones(len(components), dtype=jnp.float32)
+
+    def gated(gates: Any) -> dict[str, Any]:
+        out = {layer: dict(block) for layer, block in params.items()}
+        for i, (layer, channel) in enumerate(components):
+            out[layer]["B"] = (
+                out[layer]["B"].at[channel].set(params[layer]["B"][channel] * gates[i])
+            )
+        return out
+
+    pairs = []
+    domains = {}
+    for name, batches in test_sets.items():
+        gradient_sum = np.zeros(len(components))
+        fisher_sum = np.zeros(len(components))
+        baseline_sum = 0.0
+        tokens = 0
+        sequences = []
+        # Iterate sequences to define the empirical Fisher independently of batch size.
+        # Accumulate on the host so no full-model gradient tape spans the dataset.
+        for batch in batches:
+            for index in range(len(batch)):
+                ids = batch[index : index + 1]
+                count = int(np.asarray(ids[:, 1:] != -100).sum())
+                if not count:
+                    continue
+                loss, grad = jax.value_and_grad(
+                    lambda gates, ids=ids: loss_for(gated(gates), ids)
+                )(full)
+                grad = np.asarray(grad, dtype=np.float64)
+                baseline_sum += float(loss) * count
+                gradient_sum += grad * count
+                fisher_sum += grad**2 * count
+                tokens += count
+                sequences.append((ids, count))
+        if not tokens:
+            continue
+        baseline = baseline_sum / tokens
+        gradient = gradient_sum / tokens
+        fisher = fisher_sum / tokens
+        predicted = -gradient + 0.5 * fisher
+        domains[name] = {
+            "full_loss": baseline,
+            "tokens": tokens,
+            "sequences": len(sequences),
+        }
+        for i, (layer, channel) in enumerate(components):
+            ablated_params = gated(full.at[i].set(0.0))
+            ablated = (
+                sum(
+                    float(loss_for(ablated_params, ids)) * count
+                    for ids, count in sequences
+                )
+                / tokens
+            )
+            pairs.append(
+                {
+                    "dataset": name,
+                    "layer": layer,
+                    "channel": channel,
+                    "gradient": float(gradient[i]),
+                    "fisher_diagonal": float(fisher[i]),
+                    "predicted": float(predicted[i]),
+                    "actual": ablated - baseline,
+                    "ablated_loss": ablated,
+                }
+            )
+    if not pairs:
+        raise ValueError("No held-out test tokens for paired ablation measurements")
+    scores = ablation_fidelity(
+        [row["predicted"] for row in pairs], [row["actual"] for row in pairs]
+    )
+    return {
+        "status": "measured",
+        "predictor": "negative gate gradient plus half diagonal sequence empirical Fisher",
+        "split": "test",
+        "component": "one residual rank channel at one layer",
+        "intervention": "zero one row of B; hold all other parameters fixed",
+        "selection": "evenly spaced channels across sorted layers; no outcome-based selection",
+        "max_components": max_components,
+        "total_components": len(atoms),
+        "measured_components": len(components),
+        "domains": domains,
+        "pairs": pairs,
+        **scores,
+        "spearman_reason": (
+            None
+            if scores["spearman"] is not None
+            else "Spearman requires at least two pairs and nonconstant predicted and actual effects."
+        ),
     }
 
 
@@ -1600,7 +1740,10 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
         "schema": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "domains": manifest.get("domains", []),
-        "measured_metrics": manifest.get("measured_metrics", list(MEASURED_METRICS)),
+        # A saved manifest may predate a metric replacement. Describe this
+        # evaluation, without rewriting the immutable training plan.
+        "measured_metrics": list(MEASURED_METRICS),
+        "evaluator_sha256": sha256_file(Path(__file__)),
         "config_fingerprints": fingerprints,
         "records": records,
         "completed_runs": sum(row.get("status") != "invalid" for row in records),
@@ -1645,8 +1788,12 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
         value = record.get(fields[metric])
     elif metric == "residual_compressibility":
         value = (record.get(metric) or {}).get(str(rank))
-    elif metric == "invariant_redundancy":
+    elif metric == "residual_direction_redundancy":
         value = representation.get(metric)
+    elif metric in AUDIT_METRICS:
+        audit = deployed.get("ablation_fidelity", {})
+        field = "mae" if metric == "ablation_mae" else "spearman"
+        value = audit.get(field) if audit.get("status") == "measured" else None
     elif metric == "task_gradient_conflict":
         value = representation.get(metric, {}).get("mean")
     elif metric in {"domain_kl", "token_accuracy", "calibration"}:
@@ -1669,14 +1816,24 @@ def measurement_reason(record: dict[str, Any], metric: str) -> str:
     if record.get("status") == "invalid":
         return str(record.get("reason", "invalid run artifacts"))
     if metric in AUDIT_METRICS:
-        return "No validated held-out component-effect predictor and paired ablation measurements; prediction fidelity is not measured."
+        audit = record.get("deployed_evaluation", {}).get("ablation_fidelity", {})
+        return str(
+            (audit.get("spearman_reason") if metric == "ablation_spearman" else None)
+            or audit.get("reason")
+            or record.get("deployed_evaluation", {}).get("reason")
+            or "No paired predictor/ablation measurements saved; rerun checkpoint eval."
+        )
     if metric == "residual_compressibility":
         return (
             "Requires a matched rank sweep with positive reference improvement: "
             + str(record.get("compressibility_status", "unavailable"))
         )
     return str(
-        record.get("deployed_evaluation", {}).get("reason")
+        record.get("deployed_evaluation", {})
+        .get("representation", {})
+        .get(metric, {})
+        .get("reason")
+        or record.get("deployed_evaluation", {}).get("reason")
         or "Required measurement absent or insufficient held-out data."
     )
 
