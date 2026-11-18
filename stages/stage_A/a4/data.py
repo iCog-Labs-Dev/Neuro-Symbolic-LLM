@@ -30,17 +30,19 @@ class A4Data:
         positions = np.column_stack((np.arange(len(indices)), targets[:, 0])).astype(
             np.int32
         )
-        return positions, targets[:, 1]
+        return positions, (
+            targets[:, 1] if self.targets.shape[1] == 2 else targets[:, 1:]
+        )
 
 
 def load_data(args: Any, tokenizer: Any, bank: Any, training: Any) -> A4Data:
     """Validate split separation, bank identity and complete firing-label coverage."""
     payload = args.alignment_labels.read_bytes()
     manifest = json.loads(payload)
-    if (
-        isinstance(manifest, dict)
-        and manifest.get("contract_version") == "alignment-occurrences-v2"
-    ):
+    if isinstance(manifest, dict) and manifest.get("contract_version") in {
+        "alignment-occurrences-v2",
+        "alignment-query-sets-v1",
+    }:
         return _load_occurrences(args, tokenizer, bank, training, manifest, payload)
     arrays, hashes, provenance = {}, {}, {}
     splits = (
@@ -163,6 +165,7 @@ def padded_source_blocks(path, tokenizer, seq_len, max_rows, max_blocks):
 
 
 def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4Data:
+    grouped = manifest.get("contract_version") == "alignment-query-sets-v1"
     if manifest.get("bank_snapshot_sha256") != bank.input_snapshot_sha256:
         raise ValueError("Alignment examples belong to another bank")
     if manifest.get("seq_len") != training.seq_len:
@@ -194,7 +197,10 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
         or mask.dtype != np.bool_
         or mask.shape != ids.shape
         or targets.dtype != np.int32
-        or targets.shape != (count, 2)
+        or targets.ndim != 2
+        or targets.shape[0] != count
+        or targets.shape[1] < 2
+        or (not grouped and targets.shape[1] != 2)
         or not isinstance(labels, list)
         or len(labels) != count
         or np.any(mask[:, 1:] & ~mask[:, :-1])
@@ -233,7 +239,14 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
     seen = set()
     for index, label in enumerate(labels):
         identity = (label["corpus_id"], label["document_id"])
-        if identity not in documents or label["template_id"] not in lookup:
+        positives = label.get("positive_labels", []) if grouped else [label]
+        names = [item["template_id"] for item in positives]
+        if (
+            identity not in documents
+            or not names
+            or len(set(names)) != len(names)
+            or any(name not in lookup for name in names)
+        ):
             raise ValueError("Occurrence refers to an unknown source or template")
         text, encoded = documents[identity]
         start, end, position = (
@@ -259,30 +272,43 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
                 mask[index], np.arange(training.seq_len) < len(expected)
             )
             or not np.array_equal(
-                targets[index], [position, lookup[label["template_id"]]]
+                targets[index],
+                [position]
+                + [lookup[name] for name in names]
+                + [-1] * (targets.shape[1] - 1 - len(names)),
             )
         ):
             raise ValueError(
                 "Prepared occurrence differs from its source/tokenizer/target"
             )
-        spans = label["source_spans"]
-        if not spans or any(
-            not (0 <= span["start"] < span["end"] <= len(text))
-            or text[span["start"] : span["end"]] != span["text"]
-            for span in spans
-        ):
-            raise ValueError("Occurrence evidence differs from source text")
-        first = min(span["start"] for span in spans)
-        last = max(span["end"] for span in spans)
-        offsets = encoded["offset_mapping"]
-        covered = [
-            i
-            for i, (left, right) in enumerate(offsets)
-            if right > first and left < last
-        ]
-        if not covered or min(covered) < start or max(covered) != start + position:
-            raise ValueError("Label must follow complete evidence inside its window")
-        key = (identity, start, position, label["template_id"])
+        latest = -1
+        for positive in positives:
+            spans = positive["source_spans"]
+            if not spans or any(
+                not (0 <= span["start"] < span["end"] <= len(text))
+                or text[span["start"] : span["end"]] != span["text"]
+                for span in spans
+            ):
+                raise ValueError("Occurrence evidence differs from source text")
+            first = min(span["start"] for span in spans)
+            last = max(span["end"] for span in spans)
+            covered = [
+                i
+                for i, (left, right) in enumerate(encoded["offset_mapping"])
+                if right > first and left < last
+            ]
+            if not covered or min(covered) < start or max(covered) > start + position:
+                raise ValueError(
+                    "Label must follow complete evidence inside its window"
+                )
+            latest = max(latest, max(covered))
+        if latest != start + position:
+            raise ValueError("Query endpoint must follow its latest positive evidence")
+        key = (
+            (identity, start, position)
+            if grouped
+            else (identity, start, position, names[0])
+        )
         if key in seen:
             raise ValueError("Duplicate occurrence-template training pair")
         seen.add(key)
@@ -295,7 +321,14 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
         "alignment": {
             "sha256": hashlib.sha256(payload).hexdigest(),
             "examples": count,
-            "distinct_templates": len(set(targets[:, 1].tolist())),
+            "distinct_templates": len(
+                set(targets[:, 1:][targets[:, 1:] >= 0].tolist())
+            ),
+            "key_objective": (
+                "positive-versus-unlabelled-set"
+                if grouped
+                else "single-positive-softmax"
+            ),
             "selection_policy": manifest.get("selection_policy"),
             "coverage": manifest.get("coverage"),
         },

@@ -11,10 +11,12 @@ import pytest
 from scripts.prepare_alignment_labels import (
     collect_examples,
     exact_paths,
+    group_positive_queries,
     hypothetical_assertion_only,
     parse_args,
     qualified_pattern_ids,
     select_examples,
+    select_query_examples,
 )
 from scripts.prepare_retrieval_probes import (
     causal_probes,
@@ -169,6 +171,54 @@ def test_changed_evidence_is_rejected(tmp_path):
             lambda row: row["pattern"],
             4,
         )
+
+
+def test_grouped_queries_keep_earlier_positives_but_never_future_evidence(tmp_path):
+    source = {("c", "a"): {"source_text": "1 2 3"}}
+    path = occurrence_file(tmp_path, [("A", 0, 3, "1 2"), ("B", 2, 5, "2 3")])
+    rows, encoded, _ = collect_examples(
+        source, Tokenizer(), [path], {"A", "B"}, lambda row: row["pattern"], 4
+    )
+    grouped = group_positive_queries(rows, encoded)
+    assert [row["token_index"] for row in grouped] == [1, 2]
+    assert [[p["template_id"] for p in row["positive_labels"]] for row in grouped] == [
+        ["A"],
+        ["A", "B"],
+    ]
+    assert grouped[0]["positive_labels"][0]["source_spans"] == rows[0]["source_spans"]
+
+
+def test_query_selection_balances_documents_without_manufacturing_examples():
+    rows = [
+        {
+            "corpus_id": "c",
+            "document_id": name,
+            "window_start": 0,
+            "window_end": 4,
+            "token_index": index,
+        }
+        for name, count in [("a", 20), ("b", 1), ("c", 1)]
+        for index in range(count)
+    ]
+    selected = select_query_examples(rows, 3, 1, 2)
+    assert {row["document_id"] for row in selected} == {"a", "b", "c"}
+    assert selected == select_query_examples(rows, 3, 1, 2)
+    assert len(select_query_examples(rows, 100, 1, 2)) == len(rows)
+    with pytest.raises(ValueError, match="query locations"):
+        select_query_examples(rows, 100, 30, 2)
+
+
+def test_repeated_pattern_keeps_evidence_at_the_current_query_endpoint(tmp_path):
+    source = {("c", "a"): {"source_text": "1 2 3"}}
+    path = occurrence_file(tmp_path, [("A", 0, 1, "1"), ("A", 4, 5, "3")])
+    rows, encoded, _ = collect_examples(
+        source, Tokenizer(), [path], {"A"}, lambda row: row["pattern"], 4
+    )
+    grouped = group_positive_queries(rows, encoded)
+    assert grouped[-1]["token_index"] == 2
+    assert grouped[-1]["positive_labels"][0]["source_spans"] == [
+        {"start": 4, "end": 5, "text": "3"}
+    ]
 
 
 def test_selection_is_deterministic_and_has_no_replacement():
@@ -329,6 +379,56 @@ def test_occurrence_manifest_loads_short_contexts_and_labels(prepared):
     assert data.train_mask.sum(axis=1).tolist() == [3, 3]
     assert data.targets.tolist() == [[1, 0], [2, 1]]
     assert data.validation_mask.tolist() == [[True, True, False, False]]
+
+
+def grouped_prepared(prepared):
+    args, _, manifest = prepared
+    old = manifest["labels"]
+    manifest["contract_version"] = "alignment-query-sets-v1"
+    manifest["labels"] = [
+        {
+            **row,
+            "positive_labels": [
+                {"template_id": p["template_id"], "source_spans": p["source_spans"]}
+                for p in old[: index + 1]
+            ],
+        }
+        for index, row in enumerate(old)
+    ]
+    arrays = args.alignment_labels.parent / manifest["arrays_file"]
+    np.savez_compressed(
+        arrays,
+        input_ids=np.array([[1, 2, 3, 0]] * 2, np.int32),
+        token_mask=np.array([[True, True, True, False]] * 2),
+        targets=np.array([[1, 0, -1], [2, 0, 1]], np.int32),
+    )
+    manifest["arrays_sha256"] = hashlib.sha256(arrays.read_bytes()).hexdigest()
+    return prepared
+
+
+def test_grouped_manifest_and_batch_keep_all_positive_indices(prepared):
+    data = admit_prepared(grouped_prepared(prepared))
+    positions, targets = data.batch_labels(np.array([1, 0]))
+    assert positions.tolist() == [[0, 2], [1, 1]]
+    assert targets.tolist() == [[0, 1], [0, -1]]
+    assert (
+        data.provenance["alignment"]["key_objective"]
+        == "positive-versus-unlabelled-set"
+    )
+
+
+@pytest.mark.parametrize("mutation", ["future", "duplicate", "missing"])
+def test_grouped_manifest_rejects_invalid_positive_sets(prepared, mutation):
+    grouped_prepared(prepared)
+    labels = prepared[2]["labels"]
+    if mutation == "future":
+        labels[0]["positive_labels"] = labels[1]["positive_labels"]
+    elif mutation == "duplicate":
+        labels[1]["positive_labels"][1] = labels[1]["positive_labels"][0]
+    else:
+        labels[1]["positive_labels"] = []
+    with pytest.raises(ValueError):
+        admit_prepared(prepared)
 
 
 @pytest.mark.parametrize(

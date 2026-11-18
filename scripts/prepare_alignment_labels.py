@@ -50,6 +50,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--exact", type=Path, nargs="+")
     parser.add_argument("--model")
+    parser.add_argument(
+        "--group-positives",
+        action="store_true",
+        default=None,
+        help="Balance query locations across documents and retain every known visible positive",
+    )
     for name in (
         "seq-len",
         "target-examples",
@@ -77,6 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "embeddings",
             "output",
             "model",
+            "group_positives",
             "seq_len",
             "target_examples",
             "minimum_examples",
@@ -126,6 +133,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if getattr(args, name) is None:
             setattr(args, name, default)
     args.sources = args.sources or args.documents
+    if args.group_positives is None:
+        args.group_positives = False
+    if not isinstance(args.group_positives, bool):
+        parser.error("group_positives must be boolean")
     for name in (
         "sources",
         "documents",
@@ -346,6 +357,98 @@ def select_examples(
     return selected
 
 
+def group_positive_queries(examples, encoded):
+    """Collect all audited positives visible at each existing query endpoint.
+
+    No future evidence, cross-document merging, new matches or artificial text
+    variations are introduced. Absence from these supplied audits is not a
+    certificate of semantic non-relevance.
+    """
+    by_document = defaultdict(list)
+    for row in examples:
+        identity = row["corpus_id"], row["document_id"]
+        spans = row["source_spans"]
+        left, right = min(s["start"] for s in spans), max(s["end"] for s in spans)
+        covered = [
+            i
+            for i, (a, b) in enumerate(encoded[identity]["offset_mapping"])
+            if b > left and a < right
+        ]
+        if not covered:
+            raise ValueError("Positive evidence does not cover tokens")
+        by_document[identity].append((min(covered), max(covered), row))
+    result = []
+    for identity in sorted(by_document):
+        occurrences = by_document[identity]
+        anchors = {
+            (row["window_start"], row["window_end"], row["token_index"])
+            for _, _, row in occurrences
+        }
+        for start, end, position in sorted(anchors):
+            positives = {}
+            for first, last, row in occurrences:
+                if first >= start and last <= start + position:
+                    previous = positives.get(row["template_id"])
+                    if previous is None or last > previous[0]:
+                        positives[row["template_id"]] = (last, row)
+            if not positives:
+                raise ValueError("A query must retain its source-derived positive")
+            result.append(
+                {
+                    "corpus_id": identity[0],
+                    "document_id": identity[1],
+                    "window_start": start,
+                    "window_end": end,
+                    "token_index": position,
+                    "positive_labels": [
+                        {
+                            "template_id": name,
+                            "source_spans": positives[name][1]["source_spans"],
+                        }
+                        for name in sorted(positives)
+                    ],
+                }
+            )
+    return result
+
+
+def select_query_examples(queries, target, minimum, seed):
+    """Round-robin documents, then windows, then query locations; no replacement."""
+    if len(queries) < minimum:
+        raise ValueError(
+            f"Only {len(queries)} eligible query locations; minimum is {minimum}"
+        )
+    rng = random.Random(seed)
+    documents = defaultdict(lambda: defaultdict(list))
+    for row in queries:
+        documents[row["corpus_id"], row["document_id"]][
+            row["window_start"], row["window_end"]
+        ].append(row)
+    ordered = {}
+    for identity in sorted(documents):
+        windows = documents[identity]
+        names = sorted(windows)
+        rng.shuffle(names)
+        for rows in windows.values():
+            rng.shuffle(rows)
+        ordered[identity] = []
+        while names:
+            for name in names:
+                ordered[identity].append(windows[name].pop())
+            names = [name for name in names if windows[name]]
+        ordered[identity].reverse()
+    names = list(ordered)
+    rng.shuffle(names)
+    selected = []
+    while names and len(selected) < target:
+        for name in names:
+            selected.append(ordered[name].pop())
+            if len(selected) == target:
+                break
+        names = [name for name in names if ordered[name]]
+    return selected
+
+
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     import numpy as np
     from hybrid_miner.ontology import OntologyBundle
@@ -392,16 +495,26 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     eligible, encoded, counts = collect_examples(
         sources, tokenizer, paths, set(lookup), identify, args.seq_len
     )
-    labels = select_examples(
-        eligible, args.target_examples, args.minimum_examples, args.seed
+    grouped = getattr(args, "group_positives", False)
+    candidates = group_positive_queries(eligible, encoded) if grouped else eligible
+    labels = (select_query_examples if grouped else select_examples)(
+        candidates, args.target_examples, args.minimum_examples, args.seed
     )
     ids, masks, targets = [], [], []
+
+    def positive_rows(row):
+        return row["positive_labels"] if grouped else [row]
+
+    max_positives = max(len(positive_rows(row)) for row in labels)
     for label in labels:
         source = encoded[label["corpus_id"], label["document_id"]]["input_ids"]
         tokens = source[label["window_start"] : label["window_end"]]
         ids.append(tokens + [pad] * (args.seq_len - len(tokens)))
         masks.append([True] * len(tokens) + [False] * (args.seq_len - len(tokens)))
-        targets.append([label["token_index"], lookup[label["template_id"]]])
+        positives = [lookup[row["template_id"]] for row in positive_rows(label)]
+        targets.append(
+            [label["token_index"], *positives] + [-1] * (max_positives - len(positives))
+        )
     coverage = {
         **counts,
         "eligible_pairs": len(eligible),
@@ -410,7 +523,13 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "minimum_examples": args.minimum_examples,
         "target_met": len(labels) >= args.target_examples,
         "eligible_templates": len({row["template_id"] for row in eligible}),
-        "selected_templates": len({row["template_id"] for row in labels}),
+        "selected_templates": len(
+            {p["template_id"] for row in labels for p in positive_rows(row)}
+        ),
+        "eligible_query_locations": len(candidates) if grouped else None,
+        "selected_positive_memberships": sum(len(positive_rows(row)) for row in labels),
+        "maximum_positives_per_query": max_positives,
+        "selection_unit": "query" if grouped else "pair",
         "selected_source_documents": len(
             {(row["corpus_id"], row["document_id"]) for row in labels}
         ),
@@ -425,6 +544,18 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             }
         ),
         "source_document_count": len(sources),
+        "distinct_visible_query_prefixes": len(
+            {
+                tuple(
+                    encoded[row["corpus_id"], row["document_id"]]["input_ids"][
+                        row["window_start"] : row["window_start"]
+                        + row["token_index"]
+                        + 1
+                    ]
+                )
+                for row in labels
+            }
+        ),
         "hypothetical_only_bindings_excluded": counts.get(
             "hypothetical_only_bindings_excluded", 0
         ),
@@ -441,7 +572,9 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             targets=np.asarray(targets, dtype=np.int32),
         )
     payload = {
-        "contract_version": "alignment-occurrences-v2",
+        "contract_version": (
+            "alignment-query-sets-v1" if grouped else "alignment-occurrences-v2"
+        ),
         "preparation_source_sha256": file_digest(Path(__file__).resolve()),
         "seq_len": args.seq_len,
         "model": args.model,
@@ -462,7 +595,12 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 for row in documents.values()
             }
         ),
-        "selection_policy": "unique template/source/window/endpoint pairs; seeded template round-robin; no replacement",
+        "selection_policy": (
+            "query-level known positives; seeded document/window round-robin; no replacement"
+            if grouped
+            else "unique template/source/window/endpoint pairs; seeded template round-robin; no replacement"
+        ),
+        "positive_set_scope": "All supplied audited matches whose complete evidence is visible at the query; not independent semantic completeness certification",
         "factuality_policy": FACTUALITY_POLICY,
         "source_semantic_correctness": "Source-span identity checked; semantic correctness requires independent audit",
         "coverage": coverage,

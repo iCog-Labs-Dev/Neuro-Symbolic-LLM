@@ -90,6 +90,16 @@ does not mean distinct text count. Coverage reports both. The
 padding contributes neither CE nor alignment targets. Legacy
 `alignment-labels-v1` is also accepted.
 
+For query-balanced supervision, set `group_positives: true` in the preparation
+YAML. This emits `alignment-query-sets-v1`: each query retains all supplied
+exact-match positives whose evidence is already visible. Selection balances
+documents and windows; target/minimum counts refer to queries rather than pairs.
+Coverage distinguishes full windows, visible query prefixes and positive
+memberships. The opt-in key objective compares each positive against unlabelled
+bank entries, excluding other known positives from its denominator. Unlabelled
+does not mean independently certified negative. Value errors are averaged over
+positives per query. Legacy manifests retain the original objective.
+
 Preparation excludes hypothetical-only assertion bindings and reports their
 count. Explicit rule-structure bindings remain eligible; unclassified factuality
 is retained and counted. The same policy applies to retrieval probes. This does
