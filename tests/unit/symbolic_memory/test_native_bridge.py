@@ -367,6 +367,34 @@ def host_search(library, handle, query, top_m):
 
 
 @pytest.mark.parametrize("backend", ["flat", "hnsw"])
+def test_compiled_refresh_replaces_vectors_without_replacing_registry(
+    cpu_bank, backend
+):
+    library, create = cpu_bank
+    if not hasattr(library, "NativeUpdateBank"):
+        pytest.skip("Rebuild the library with explicit bank refresh support")
+    handle, ids = create(make_index(backend))
+    keys = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    values = np.asarray([[7.0, 8.0], [9.0, 10.0]], dtype=np.float32)
+    assert library.NativeUpdateBank(handle, keys, values, 2, 2) == 0
+    code, packed, _ = host_search(
+        library, handle, np.asarray([[1.0, 0.0]], dtype=np.float32), 1
+    )
+    assert code == 0, library.NativeLastError()
+    np.testing.assert_array_equal(packed[:2], keys[1])
+    np.testing.assert_array_equal(packed[2:4], values[1])
+    assert packed[-1] == ids.index("id-1")
+    invalid = keys.copy()
+    invalid[0, 0] = np.nan
+    assert library.NativeUpdateBank(handle, invalid, values, 2, 2) != 0
+    code, after, _ = host_search(
+        library, handle, np.asarray([[1.0, 0.0]], dtype=np.float32), 1
+    )
+    assert code == 0
+    np.testing.assert_array_equal(after, packed)
+
+
+@pytest.mark.parametrize("backend", ["flat", "hnsw"])
 def test_compiled_cpu_search_matches_existing_index(cpu_bank, backend):
     library, create = cpu_bank
     index = make_index(backend, count=40, dim=16)

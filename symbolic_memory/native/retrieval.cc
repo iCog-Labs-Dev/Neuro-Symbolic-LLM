@@ -5,6 +5,7 @@
 #include <faiss/IndexHNSW.h>
 #include <faiss/impl/io.h>
 #include <faiss/index_io.h>
+#include <faiss/clone_index.h>
 #include <faiss/utils/utils.h>
 #include <omp.h>
 #include <atomic>
@@ -264,6 +265,32 @@ extern "C" int NativeInvalidateBank(int64_t id) {
   if (!bank) return -1;
   bank->valid.store(false);
   return 0;
+}
+// Explicit experimental refresh. Shape/registry stay fixed, so compiled handles
+// remain usable. Build the replacement before publishing it under the bank lock.
+extern "C" int NativeUpdateBank(int64_t id, const float* keys, const float* values,
+                                  size_t rows, size_t dim) {
+  try {
+    auto bank = Find(banks, id);
+    if (!bank || !keys || !values) throw std::invalid_argument("Unknown native bank");
+    std::lock_guard<std::mutex> lock(bank->mutex);
+    if (!bank->valid.load() || rows != bank->rows || dim != bank->dim)
+      throw std::invalid_argument("Refresh must preserve a valid bank's shape");
+    size_t elements = Product({rows, dim});
+    std::vector<float> next_keys(keys, keys + elements), next_values(values, values + elements);
+    for (size_t i = 0; i < elements; ++i)
+      if (!std::isfinite(next_keys[i]) || !std::isfinite(next_values[i]))
+        throw std::invalid_argument("Refresh vectors must be finite");
+    std::vector<float> normalized(next_keys);
+    faiss::fvec_renorm_L2(dim, rows, normalized.data());
+    omp_set_num_threads(bank->threads);
+    std::unique_ptr<faiss::Index> next(faiss::clone_index(bank->index.get()));
+    next->reset();
+    next->add(rows, normalized.data());
+    bank->keys.swap(next_keys); bank->values.swap(next_values); bank->index.swap(next);
+    return 0;
+  } catch (const std::exception& error) { last_error = error.what(); return -1; }
+    catch (...) { last_error = "Unknown native bank refresh failure"; return -1; }
 }
 extern "C" int NativeCloseBank(int64_t id) {
   std::shared_ptr<Bank> bank;

@@ -252,6 +252,15 @@ def _configure_library(library: Any) -> None:
     for name, (arguments, result) in signatures.items():
         function = getattr(library, name)
         function.argtypes, function.restype = arguments, result
+    if hasattr(library, "NativeUpdateBank"):
+        library.NativeUpdateBank.argtypes = [
+            ctypes.c_int64,
+            _FLOAT,
+            _FLOAT,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+        ]
+        library.NativeUpdateBank.restype = ctypes.c_int
 
 
 def _library(path: Path) -> tuple[Any, str]:
@@ -415,6 +424,7 @@ class NativeJaxRetriever:
         self._output_layout = output_layout
         self._return_mode = return_mode
         self._index = index
+        self._native_order = mapping.copy()
         self.template_ids = identifiers
         self._matches = min(top_m, len(identifiers))
         self._device_id = device_id
@@ -493,6 +503,37 @@ class NativeJaxRetriever:
                 ):
                     return buffer.value.decode()
         return None
+
+    def refresh_vectors(self, keys: np.ndarray, values: np.ndarray) -> None:
+        """Replace an experimental working bank between completed training steps.
+
+        The ID registry, dimensions and index family are preserved. This does
+        not mutate the original Python index or persist anything to MORK.
+        Callers must not submit model calls concurrently with a refresh.
+        """
+        expected = (len(self.template_ids), self.info["vector_dimension"])
+        if keys.shape != expected or values.shape != expected:
+            raise ValueError("Refreshed vectors must preserve bank shape")
+        if not np.isfinite(keys).all() or not np.isfinite(values).all():
+            raise ValueError("Refreshed vectors must be finite")
+        if not hasattr(self._library, "NativeUpdateBank"):
+            raise RuntimeError(
+                "Joint projection requires an explicitly rebuilt native library"
+            )
+        keys = np.ascontiguousarray(keys[self._native_order], dtype=np.float32)
+        values = np.ascontiguousarray(values[self._native_order], dtype=np.float32)
+        jax.effects_barrier()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Native retriever is closed")
+            if self._library.NativeUpdateBank(self._bank, keys, values, *expected):
+                raise _error(self._library, "Native bank refresh failed")
+            self.info["working_bank_refreshes"] = (
+                self.info.get("working_bank_refreshes", 0) + 1
+            )
+            self.info["working_bank_vectors_sha256"] = hashlib.sha256(
+                keys.tobytes() + values.tobytes()
+            ).hexdigest()
 
     def _context(self, count: int) -> int:
         with self._lock:

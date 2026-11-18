@@ -94,13 +94,27 @@ class SymbolicHead:
             )
         return hidden.astype(jnp.float32) @ params["W_sym"] + params["b_sym"]
 
-    def apply(self, params: HeadParams, hidden: jax.Array, layer_idx: int) -> jax.Array:
+    def apply(
+        self,
+        params: HeadParams,
+        hidden: jax.Array,
+        layer_idx: int,
+        *,
+        bank_vectors=None,
+    ) -> jax.Array:
         if layer_idx not in self.layers:
             return hidden
         layer = params[f"layer_{layer_idx}"]
         queries = self.project(layer, hidden)
         flat = queries.reshape((-1, self.key_dim))
         templates = self.retrieve(flat)
+        if bank_vectors is not None:
+            # The native index chooses IDs; gather differentiable CURRENT vectors.
+            keys, values = bank_vectors
+            templates = templates._replace(
+                keys=keys[templates.template_indices],
+                values=values[templates.template_indices],
+            )
         if (
             templates.keys.ndim != 3
             or templates.keys.shape[0] != flat.shape[0]
