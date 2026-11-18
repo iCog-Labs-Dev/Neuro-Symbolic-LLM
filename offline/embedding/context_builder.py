@@ -2,7 +2,7 @@
 
 Supported input contracts:
     - pattern-record-v1
-    - semantic-document-v1
+    - semantic-document-v1 / semantic-document-v2
 
 Source spans use half-open Unicode code-point offsets:
     source_text[start:end]
@@ -77,7 +77,10 @@ def load_semantic_documents(
                     f"Document line {line_number} must contain a JSON object"
                 )
 
-            if record.get("contract_version") != "semantic-document-v1":
+            if record.get("contract_version") not in {
+                "semantic-document-v1",
+                "semantic-document-v2",
+            }:
                 raise ValueError(
                     f"Document line {line_number}: "
                     "unsupported SemanticDocument contract version"

@@ -7,12 +7,77 @@ import pytest
 
 from offline.embedding.context_builder import (
     load_pattern_contexts,
+    load_semantic_documents,
     prepare_contexts,
 )
 from offline.embedding.template_embeddings import (
     create_random_projection,
     initialize_template_kv,
 )
+
+
+@pytest.mark.parametrize("contract", ["semantic-document-v1", "semantic-document-v2"])
+def test_projection_context_reader_preserves_versioned_source_text(tmp_path, contract):
+    path = tmp_path / "documents.jsonl"
+    text = "Nora did not repair the radio."
+    path.write_text(
+        json.dumps(
+            {
+                "contract_version": contract,
+                "corpus_id": "corpus",
+                "document_id": "doc",
+                "source_text": text,
+            }
+        )
+        + "\n"
+    )
+    assert load_semantic_documents(path) == {("corpus", "doc"): text}
+
+
+def test_projection_retrieval_reports_boundary_ties():
+    from offline.embedding.projection_training import retrieval_report
+
+    scores = np.array([[0.8, 0.8, 0.1], [0.9, 0.5, 0.1]])
+    targets = np.array([[False, True, False], [True, False, False]])
+    result = retrieval_report(scores, targets, top_k=1)
+    assert result["micro_precision"] == 0.5
+    assert result["tie_precision_lower"] == 0.5
+    assert result["tie_precision_upper"] == 1.0
+    with pytest.raises(ValueError):
+        retrieval_report(scores, np.zeros_like(targets), top_k=1)
+
+
+def test_learned_projection_preserves_scale_and_frozen_features():
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    from offline.embedding.projection_training import fit_projection
+
+    templates = np.eye(4, dtype=np.float32)
+    queries = np.repeat(templates, 2, axis=0)
+    positives = np.repeat(np.eye(4, dtype=bool), 2, axis=0)
+    original = templates.copy(), queries.copy()
+    initial = create_random_projection(4, 2, 42)
+    projection, report = fit_projection(
+        initial,
+        queries,
+        templates,
+        positives,
+        np.ones_like(positives),
+        templates,
+        np.eye(4, dtype=bool),
+        epochs=8,
+        batch_size=3,
+        learning_rate=0.03,
+    )
+    np.testing.assert_allclose(projection @ projection.T, np.eye(2), atol=2e-5)
+    np.testing.assert_array_equal(templates, original[0])
+    np.testing.assert_array_equal(queries, original[1])
+    assert report["best_epoch"] > 0
+    assert (
+        min(row["validation_loss"] for row in report["history"])
+        < report["history"][0]["validation_loss"]
+    )
+    assert not np.array_equal(projection, initial)
 
 
 class DeterministicEncoder:
