@@ -166,6 +166,7 @@ def measure_retrieval(
     native_library: Path | None = None,
     allow_source_change: bool = False,
     substrate: Any = None,
+    exact_control: bool = False,
 ) -> Path:
     from stages.stage_A.a4.benchmark import require_idle_gpu
 
@@ -211,6 +212,27 @@ def measure_retrieval(
             raise ValueError("Tokenizer requires a padding or EOS token")
         layers = replay.model.symbolic.layers
         retrieve = jax.jit(replay.retriever)
+        working_vectors = replay.model.bank_vectors(replay.params)
+        flat = None
+        if exact_control:
+            import faiss
+
+            keys = np.array(
+                (
+                    np.stack([r.key_vector for r in replay.bank.records])
+                    if working_vectors is None
+                    else np.asarray(working_vectors[0])
+                ),
+                dtype=np.float32,
+                order="C",
+                copy=True,
+            )
+            norms = np.linalg.norm(keys, axis=1, keepdims=True)
+            if not np.isfinite(keys).all() or np.any(norms <= 0):
+                raise ValueError("Exact control requires finite, nonzero bank keys")
+            keys /= norms
+            flat = faiss.IndexFlatIP(keys.shape[1])
+            flat.add(keys)
 
         @jax.jit
         def forward(symbolic, ids, mask, positions):
@@ -218,7 +240,7 @@ def measure_retrieval(
             clean, _ = continuous.clean_pass(ids)
             latents = continuous.predict_latents(replay.frozen, clean)
             result, states = replay.model.forward_with_states_at_latents(
-                replay.frozen, symbolic, ids, latents
+                replay.frozen, symbolic, ids, latents, bank_vectors=working_vectors
             )
             labels = jnp.where(mask, ids, -100)
             losses = jax.vmap(
@@ -244,6 +266,11 @@ def measure_retrieval(
                     "probes": str(probes_path),
                     "native_library": str(native_library),
                     "allow_source_change": allow_source_change,
+                    "projection_condition": (
+                        "Final saved bank held fixed for both head conditions"
+                        if working_vectors is not None
+                        else "Original fixed bank"
+                    ),
                 }
             )
             writer.write_json("status.json", {"stage": "A4", "status": "running"})
@@ -253,6 +280,7 @@ def measure_retrieval(
                     rankings: dict[int, list[list[str]]] = {
                         layer: [] for layer in layers
                     }
+                    exact_rankings = {layer: [] for layer in layers}
                     total_loss, total_tokens = 0.0, 0
                     print(
                         f"Evaluating {name} head: {len(probes)} reference probes.",
@@ -289,6 +317,19 @@ def measure_retrieval(
                         for layer in layers:
                             matches = jax.device_get(retrieve(queries[layer]))
                             indices = np.asarray(matches.template_indices)
+                            exact_indices = None
+                            if flat is not None:
+                                q = np.array(
+                                    jax.device_get(queries[layer]),
+                                    dtype=np.float32,
+                                    order="C",
+                                    copy=True,
+                                )
+                                q /= np.maximum(
+                                    np.linalg.norm(q, axis=1, keepdims=True),
+                                    np.finfo(np.float32).tiny,
+                                )
+                                _, exact_indices = flat.search(q, replay.config.top_m)
                             if (
                                 indices.shape != (batch_size, replay.config.top_m)
                                 or np.any(indices < 0)
@@ -303,6 +344,13 @@ def measure_retrieval(
                                     for index in indices[i]
                                 ]
                                 rankings[layer].append(names)
+                                exact_names = None
+                                if exact_indices is not None:
+                                    exact_names = [
+                                        replay.bank.records[int(j)].template_id
+                                        for j in exact_indices[i]
+                                    ]
+                                    exact_rankings[layer].append(exact_names)
                                 raw.append(
                                     {
                                         "condition": name,
@@ -311,6 +359,11 @@ def measure_retrieval(
                                         "document_id": p["document_id"],
                                         "retrieved_ids": names,
                                         "relevant_ids": p["relevant_ids"],
+                                        **(
+                                            {"exact_flat_ids": exact_names}
+                                            if exact_names is not None
+                                            else {}
+                                        ),
                                     }
                                 )
                     relevance = [p["relevant_ids"] for p in probes]
@@ -328,6 +381,24 @@ def measure_retrieval(
                             for layer in layers
                         ],
                     }
+                    if flat is not None:
+                        report["exact_flat_layers"] = [
+                            {
+                                "layer": layer,
+                                "scores": score_rankings(
+                                    exact_rankings[layer], relevance, cutoffs
+                                ),
+                            }
+                            for layer in layers
+                        ]
+                        for row in report["exact_flat_layers"]:
+                            scores = row["scores"][-1]
+                            print(
+                                f"Exact Flat control ({name}, layer {row['layer']}): "
+                                f"precision@{scores['top_k']}={100*scores['all_probe_micro_precision']:.4f}% "
+                                f"macro recall={100*scores['positive_only']['macro_recall']:.4f}%",
+                                flush=True,
+                            )
                     reports.append(report)
                     writer.log("retrieval_evaluation", **report)
                 summary = {
@@ -353,6 +424,10 @@ def measure_retrieval(
                     "training_updates_persisted": False,
                     "cutoffs": cutoffs,
                     "reports": reports,
+                    "exact_control": {
+                        "enabled": exact_control,
+                        "scope": "Exact cosine Flat rescoring of the same model queries; model attention and task CE still use the configured retriever; ties use FAISS ordering",
+                    },
                     "support_prior": score_support_prior(
                         replay.bank.patterns,
                         [p["relevant_ids"] for p in probes],

@@ -59,6 +59,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-every", type=int)
     parser.add_argument("--output-dir")
     parser.add_argument("--run-name")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=250,
+        help="Save a resumable checkpoint every N completed updates",
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help="Resume weights, optimizer and batch position into a NEW run directory",
+    )
     parser.add_argument("--layers", type=int, nargs="+")
     parser.add_argument("--no-jit", action="store_true")
     parser.add_argument("--mork-url", default="http://127.0.0.1:18000")
@@ -66,6 +77,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--retrieval-backend", choices=("native", "tcp"), default="native"
     )
     parser.add_argument("--native-library", type=Path)
+    parser.add_argument(
+        "--projection-artifacts",
+        type=Path,
+        help="Completed projection experiment directory (features.npz, projection.npz, result.json)",
+    )
+    parser.add_argument(
+        "--projection-initialization", choices=("random", "learned"), default="learned"
+    )
+    parser.add_argument(
+        "--train-bank-projection",
+        action="store_true",
+        help="Jointly update the shared bank projection and A4 weights",
+    )
     parser.add_argument("--retrieval-host", default="127.0.0.1")
     parser.add_argument("--retrieval-port", type=int, default=19091)
     parser.add_argument("--max-train-rows", type=int, default=20000)
@@ -78,6 +102,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--precision", choices=("default", "highest"), default="highest"
     )
     args = parser.parse_args(argv)
+    if args.train_bank_projection and args.projection_artifacts is None:
+        parser.error("--train-bank-projection requires --projection-artifacts")
+    if args.projection_artifacts is not None and args.retrieval_backend != "native":
+        parser.error("Projection experiments require native retrieval")
     if not args.skip_test and args.test_sources is None:
         parser.error("--test-sources is required unless --skip-test is selected")
     for name in (
@@ -85,6 +113,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "seq_len",
         "eval_batches",
         "log_every",
+        "checkpoint_every",
         "latency_every",
         "max_train_rows",
         "max_eval_rows",
@@ -149,7 +178,7 @@ def main(
     from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, load_config
     from stages.stage_A.a4.data import load_data
     from stages.stage_A.a4.model import A4Model
-    from stages.stage_A.a4.training import train
+    from stages.stage_A.a4.training import load_projection_artifacts, train
     from stages.stage_base import configure_logging, load_configs
     from symbolic_memory.bank import load_bank
     from symbolic_memory.jax_bridge import JaxRetriever
@@ -203,6 +232,11 @@ def main(
     )
     frozen_residual = restore_a3_weights(continuous, load_params(args.warm_start))
     data = load_data(args, substrate.tokenizer, bank, config.training)
+    features, projection = (None, None)
+    if args.projection_artifacts is not None:
+        features, projection = load_projection_artifacts(
+            args.projection_artifacts, bank, args.projection_initialization
+        )
     retriever: Retriever
     with ExitStack() as stack:
         if args.retrieval_backend == "native":
@@ -239,9 +273,12 @@ def main(
                 continuous.hidden_size, bank.vector_dim, continuous.layers, retriever
             ),
         )
-        with RunWriter(
-            config.training.output_dir, args.run_name or default_run_name("a4")
-        ) as writer:
+        run_name = args.run_name or default_run_name("a4")
+        if (Path(config.training.output_dir) / run_name).exists():
+            raise FileExistsError(
+                "Choose a fresh --run-name; existing A4 runs must not be overwritten"
+            )
+        with RunWriter(config.training.output_dir, run_name) as writer:
             writer.write_config(config.to_dict())
             writer.write_json("data.json", data.provenance)
             writer.write_json(
@@ -268,6 +305,7 @@ def main(
                             "stages/stage_A/a4/model.py",
                             "stages/stage_A/a4/objective.py",
                             "stages/stage_A/a4/training.py",
+                            "stages/stage_A/a4/checkpoint.py",
                             "stages/stage_A/a4/config.py",
                             "residual/symbolic_head/alignment.py",
                             "frozenllm/substrate/loader.py",
@@ -290,6 +328,20 @@ def main(
                     "warm_start_sha256": hashlib.sha256(
                         args.warm_start.read_bytes()
                     ).hexdigest(),
+                    "projection_artifacts_sha256": (
+                        {
+                            name: hashlib.sha256(
+                                (args.projection_artifacts / name).read_bytes()
+                            ).hexdigest()
+                            for name in (
+                                "features.npz",
+                                "projection.npz",
+                                "result.json",
+                            )
+                        }
+                        if args.projection_artifacts is not None
+                        else None
+                    ),
                     "residual_config_sha256": hashlib.sha256(
                         config.residual_config.read_bytes()
                     ).hexdigest(),
@@ -317,6 +369,11 @@ def main(
                     writer,
                     max_grad_norm=args.max_grad_norm,
                     latency_every=0 if args.skip_latency else args.latency_every,
+                    projection_features=features,
+                    initial_projection=projection,
+                    train_bank_projection=args.train_bank_projection,
+                    checkpoint_every=args.checkpoint_every,
+                    resume_checkpoint=args.resume_checkpoint,
                 )
                 writer.write_json("status.json", {"stage": "A4", "status": "completed"})
             except BaseException as error:

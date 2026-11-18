@@ -31,6 +31,18 @@ def test_standalone_run_loads_one_substrate(monkeypatch):
     model_loader = Mock(return_value=native)
     tokenizer_loader = Mock(return_value=tokenizer)
     constructor = Mock(return_value=existing)
+    calls = []
+    model_loader.side_effect = lambda *args, **kwargs: (calls.append("model"), native)[
+        1
+    ]
+    tokenizer_loader.side_effect = lambda *args, **kwargs: (
+        calls.append("tokenizer"),
+        tokenizer,
+    )[1]
+    constructor.side_effect = lambda *args, **kwargs: (
+        calls.append("substrate"),
+        existing,
+    )[1]
     dtype = object()
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float32=dtype))
     monkeypatch.setitem(
@@ -50,6 +62,7 @@ def test_standalone_run_loads_one_substrate(monkeypatch):
     )
     tokenizer_loader.assert_called_once_with("configured-model")
     constructor.assert_called_once_with(native, tokenizer=tokenizer)
+    assert calls == ["model", "tokenizer", "substrate"]
 
 
 def arguments(*extra):
@@ -162,3 +175,35 @@ def test_inspection_tools_are_outside_experiments():
         "analyze_a4_run",
     ):
         assert not (root / "experiments" / f"{name}.py").exists()
+
+
+def test_joint_projection_requires_artifacts():
+    with pytest.raises(SystemExit):
+        parse_args(arguments("--skip-test", "--train-bank-projection"))
+
+
+def test_checkpoint_interval_and_resume_option():
+    args = parse_args(
+        arguments(
+            "--skip-test",
+            "--checkpoint-every",
+            "100",
+            "--resume-checkpoint",
+            "prior/checkpoints/a4-latest.npz",
+        )
+    )
+    assert args.checkpoint_every == 100
+    assert args.resume_checkpoint == Path("prior/checkpoints/a4-latest.npz")
+    assert parse_args(arguments("--skip-test")).checkpoint_every == 250
+
+
+def test_checkpoint_interval_must_be_positive():
+    with pytest.raises(SystemExit):
+        parse_args(arguments("--skip-test", "--checkpoint-every", "0"))
+
+
+def test_projection_refresh_cannot_use_tcp():
+    with pytest.raises(SystemExit):
+        parse_args(
+            arguments("--skip-test", "--projection-artifacts", "projection-results")
+        )

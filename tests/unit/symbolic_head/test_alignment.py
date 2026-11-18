@@ -18,6 +18,23 @@ def inputs():
     )
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+def test_joint_key_gradient_is_opt_in_and_value_targets_remain_detached(grouped):
+    q, pred, keys, values, labels = inputs()
+    if grouped:
+        labels = labels[:, None]
+    fixed = jax.grad(lambda k: alignment_loss(q, pred, k, values, labels).key)(keys)
+    joint = jax.grad(
+        lambda k: alignment_loss(q, pred, k, values, labels, train_bank_keys=True).key
+    )(keys)
+    value = jax.grad(
+        lambda v: alignment_loss(q, pred, keys, v, labels, train_bank_keys=True).value
+    )(values)
+    np.testing.assert_array_equal(fixed, np.zeros_like(keys))
+    assert float(jnp.linalg.norm(joint)) > 0
+    np.testing.assert_array_equal(value, np.zeros_like(values))
+
+
 def test_losses_match_full_bank_equations_under_jit():
     q, pred, keys, values, labels = inputs()
     logits = np.asarray(q) @ np.asarray(keys).T

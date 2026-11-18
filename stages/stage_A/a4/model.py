@@ -23,6 +23,14 @@ class A4Model:
             raise ValueError("Symbolic layers must belong to the continuous stage")
         self.continuous = continuous
         self.symbolic = symbolic
+        self.bank_features: jax.Array | None = None
+
+    def bank_vectors(self, params):
+        """Recalculate experimental K=V from the current shared projection."""
+        if self.bank_features is None:
+            return None
+        vectors = self.bank_features @ params["projection"]["bank"]["P"].T
+        return vectors, vectors
 
     def forward_at_latents(
         self,
@@ -32,6 +40,7 @@ class A4Model:
         z_star: Mapping[int, jax.Array],
         *,
         symbolic_enabled: bool = True,
+        bank_vectors=None,
     ) -> ForwardResult:
         """Apply the residual and symbolic head at caller-supplied latents."""
 
@@ -41,6 +50,7 @@ class A4Model:
             input_ids,
             z_star,
             symbolic_enabled=symbolic_enabled,
+            bank_vectors=bank_vectors,
         )
         return result
 
@@ -52,6 +62,7 @@ class A4Model:
         z_star: Mapping[int, jax.Array],
         *,
         symbolic_enabled: bool = True,
+        bank_vectors=None,
     ) -> tuple[ForwardResult, dict[int, jax.Array]]:
         """Return logits and post-residual states at symbolic-head layers."""
         if not isinstance(symbolic_enabled, bool):
@@ -74,7 +85,9 @@ class A4Model:
             if layer in self.symbolic.layers:
                 states[layer] = adapted
             return (
-                self.symbolic.apply(symbolic_params, adapted, layer)
+                self.symbolic.apply(
+                    symbolic_params, adapted, layer, bank_vectors=bank_vectors
+                )
                 if symbolic_enabled
                 else adapted
             )

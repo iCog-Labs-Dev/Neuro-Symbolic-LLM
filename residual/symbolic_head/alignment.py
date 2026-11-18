@@ -61,14 +61,18 @@ def alignment_loss(
     bank_keys: jax.Array,
     bank_values: jax.Array,
     target_indices: jax.Array,
+    *,
+    train_bank_keys: bool = False,
 ) -> AlignmentLoss:
-    """Average alignment losses over labelled queries with fixed bank targets.
+    """Average alignment losses over labelled queries.
 
     One-dimensional targets retain the single-positive full-bank softmax loss.
     Two-dimensional targets are known-positive sets padded with -1: each positive
     competes against unlabelled bank entries, not other known positives. Scores
     are raw dot products without temperature scaling. Value loss sums squared
     errors over dimensions, then averages positives per query and queries.
+    Bank keys are fixed unless train_bank_keys is enabled for joint projection
+    training. Bank values remain detached supervision targets in both modes.
 
     Labels must be source-derived, not inferred from retrieval rank. Empty,
     duplicate or out-of-range target sets yield NaN under eager execution and
@@ -97,7 +101,9 @@ def alignment_loss(
     ):
         raise TypeError("Queries, predictions and bank vectors must be floating point")
 
-    keys = jax.lax.stop_gradient(bank_keys.astype(jnp.float32))
+    keys = bank_keys.astype(jnp.float32)
+    if not train_bank_keys:
+        keys = jax.lax.stop_gradient(keys)
     values = jax.lax.stop_gradient(bank_values.astype(jnp.float32))
     if target_indices.ndim == 2:
         return _positive_set_loss(

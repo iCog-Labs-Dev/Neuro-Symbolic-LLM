@@ -80,6 +80,10 @@ def measure_representation(
             )
         )
         model, config = replay.model, replay.config
+        if model.bank_features is not None:
+            raise ValueError(
+                "Representation diagnostics for dynamic projections require an explicit matched-bank protocol"
+            )
         tokenizer = model.continuous.sub.tokenizer
         probes = validate_probes(payload, replay, tokenizer)
         factors, support = select_factors(probes, maximum_factors=maximum_factors)

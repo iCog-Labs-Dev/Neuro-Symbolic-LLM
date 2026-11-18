@@ -46,6 +46,37 @@ def _distribution(
     }
 
 
+def summarize_projection_latency(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Separate dynamic-bank host-clock costs without claiming CUDA copy purity."""
+    if not rows:
+        raise ValueError("At least one projection latency sample is required")
+    steps = [_seconds(row, "step_seconds", positive=True) for row in rows]
+    components = (
+        "model_seconds",
+        "bank_projection_seconds",
+        "bank_to_cpu_wall_seconds",
+        "cpu_bank_refresh_wall_seconds",
+    )
+    for row in rows:
+        if sum(_seconds(row, key) for key in components) > row["step_seconds"] + 1e-9:
+            raise ValueError("Projection components exceed the complete step")
+    return {
+        "samples": len(rows),
+        "step_mean_ms": 1000 * fmean(steps),
+        "step_p95_ms": 1000 * _p95(steps),
+        "breakdown_mean_ms": {
+            key.removesuffix("_seconds"): 1000
+            * fmean(_seconds(row, key) for row in rows)
+            for key in components
+        },
+        "bank_to_cpu_wall_ratio_of_means_percent": 100
+        * fmean(row["bank_to_cpu_wall_seconds"] for row in rows)
+        / fmean(steps),
+        "scope": "Host-clock synchronized step including bank refresh in joint training. Bank-to-CPU is array materialization after GPU readiness, including host allocation/dispatch; CPU refresh includes validation, normalization, indexing and fingerprinting. Neither is a pure CUDA copy interval.",
+        "decides_five_percent_gate": False,
+    }
+
+
 def summarize_latency(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Summarize paired samples; bridge replay is not added model runtime."""
     if not rows:

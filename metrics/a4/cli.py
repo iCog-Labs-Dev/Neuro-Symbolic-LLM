@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from metrics.a4.console import print_representation, print_result, print_retrieval
-from metrics.a4.latency import summarize_latency, summarize_transfers
+from metrics.a4.latency import (
+    summarize_latency,
+    summarize_projection_latency,
+    summarize_transfers,
+)
 from metrics.a4.retrieval import retrieval_metrics
 
 
@@ -155,9 +159,17 @@ def inspect_latency(path: Path) -> dict[str, Any]:
     if modes - {"training", "deployment"}:
         raise ValueError("Unsupported latency measurement mode")
     reports = []
+    projected = payload.get("contract_version") == "a4-projection-latency-v1"
     for mode in sorted(modes):
         rows = [row for row in samples if row["mode"] == mode]
-        report = {"mode": mode, **summarize_latency(rows)}
+        report = {
+            "mode": mode,
+            **(
+                summarize_projection_latency(rows)
+                if projected
+                else summarize_latency(rows)
+            ),
+        }
         transfers_path = path.parent / f"cuda-transfers-{mode}.json"
         if transfers_path.is_file():
             transfers = _read(transfers_path)["samples"]
@@ -175,10 +187,18 @@ def inspect_latency(path: Path) -> dict[str, Any]:
                     raise ValueError(
                         "CUDA transfer denominator does not match primary sample"
                     )
-            report["cuda_transfers"] = {
+            transfer_report = {
                 **summarize_transfers(transfers),
                 "source": _source(transfers_path),
             }
+            if projected:
+                transfer_report.pop("transfer_only_mean_below_five_percent", None)
+                transfer_report["scope"] = (
+                    "Query/result CUDA events only; whole-bank transfer excluded. Not total communication or a five-percent qualification."
+                )
+            report["query_result_cuda_transfers" if projected else "cuda_transfers"] = (
+                transfer_report
+            )
         reports.append(report)
     return {
         "stage": "A4",
@@ -187,7 +207,11 @@ def inspect_latency(path: Path) -> dict[str, Any]:
         "checkpoint_sha256": payload["checkpoint_sha256"],
         "bank_snapshot": payload.get("bank_snapshot"),
         "bank_records": payload.get("bank_records"),
-        "scope": "Recomputed from recorded samples; not a new benchmark or an overall <5% qualification",
+        "scope": (
+            payload["scope"]
+            if projected
+            else "Recomputed from recorded samples; not a new benchmark or an overall <5% qualification"
+        ),
     }
 
 
@@ -286,6 +310,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     retrieval.add_argument("--output", type=Path)
     retrieval.add_argument("--native-library", type=Path)
     retrieval.add_argument("--allow-source-change", action="store_true")
+    retrieval.add_argument(
+        "--exact-control",
+        action="store_true",
+        help="Also score identical model queries with exhaustive cosine Flat search",
+    )
     representation = commands.add_parser(
         "measure-representation",
         help="Measure trained-head drift, usage and channel organization",
@@ -330,6 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     output=args.output,
                     native_library=args.native_library,
                     allow_source_change=args.allow_source_change,
+                    **({"exact_control": True} if args.exact_control else {}),
                 )
                 _print_evaluation(output)
                 return 0

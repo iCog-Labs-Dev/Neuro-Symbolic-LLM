@@ -62,6 +62,29 @@ def print_result(command: str, result: dict[str, Any]) -> None:
                 f"A4 {report['mode']} | samples={report['samples']} | "
                 f"mean step={report['step_mean_ms']:.3f} ms"
             )
+            if "breakdown_mean_ms" in report:
+                for name, label in (
+                    (
+                        "model",
+                        "Model forward/backward/update (forward only in deployment)",
+                    ),
+                    ("bank_projection", "Bank K/V recalculation"),
+                    ("bank_to_cpu_wall", "Ready bank -> CPU (host-clock completion)"),
+                    ("cpu_bank_refresh_wall", "CPU bank refresh, including FAISS"),
+                ):
+                    print(f"{label}: {report['breakdown_mean_ms'][name]:.3f} ms")
+                copies = report.get("query_result_cuda_transfers")
+                if copies:
+                    print(
+                        f"Query/result CUDA copies only: {copies['transfer_only_mean_ms']:.3f} ms | "
+                        f"mean share={copies['transfer_only_ratio_of_means_percent']:.2f}%"
+                    )
+                else:
+                    print("Query/result CUDA copy intervals: not recorded")
+                print(
+                    "Whole-bank pure CUDA copy interval: not measured; no <5% qualification"
+                )
+                continue
             for name, prefix in (
                 ("Full bridge", "full_round_trip"),
                 ("Bridge minus CPU search", "communication"),

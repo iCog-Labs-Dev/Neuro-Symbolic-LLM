@@ -11,6 +11,7 @@ import pytest
 
 from stages.stage_A.a4.benchmark import (
     _paired_samples,
+    _projection_samples,
     measure_latency,
     require_idle_gpu,
     training_state_comparison,
@@ -340,3 +341,139 @@ def test_capture_must_cover_all_attached_layers():
             lambda value: value,
             expected_calls=3,
         )
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_projection_samples_reset_bank_and_separate_profiled_pass(profile):
+    from metrics.a4.latency import summarize_projection_latency
+
+    class Retriever:
+        bank = "saved"
+        values = {"calls": 0, "d2h_gpu_seconds": 0.0, "h2d_gpu_seconds": 0.0}
+
+        @contextmanager
+        def transfer_timing(self):
+            yield
+
+        def transfer_stats(self):
+            return dict(self.values)
+
+    retriever = Retriever()
+    resets = []
+
+    def reset():
+        retriever.bank = "saved"
+        resets.append(True)
+
+    def invoke(mode, batch):
+        assert retriever.bank == "saved"
+        retriever.bank = "candidate"
+        retriever.values["calls"] += 1
+        retriever.values["d2h_gpu_seconds"] += 0.001
+        retriever.values["h2d_gpu_seconds"] += 0.002
+        return {
+            "model_seconds": 0.010,
+            "bank_projection_seconds": 0.002,
+            "bank_to_cpu_wall_seconds": 0.003,
+            "cpu_bank_refresh_wall_seconds": 0.004,
+        }
+
+    ticks = iter(index * 0.02 for index in range(8))
+    rows, transfers = _projection_samples(
+        "training",
+        invoke,
+        reset,
+        retriever,
+        [object()],
+        2,
+        1,
+        profile,
+        1,
+        clock=lambda: next(ticks),
+    )
+    assert len(rows) == 2 and len(transfers) == (2 if profile else 0)
+    assert len(resets) == (6 if profile else 4)
+    assert retriever.bank == "saved"
+    report = summarize_projection_latency(rows)
+    assert report["step_mean_ms"] == pytest.approx(20)
+    assert report["breakdown_mean_ms"]["bank_to_cpu_wall"] == pytest.approx(3)
+    assert report["bank_to_cpu_wall_ratio_of_means_percent"] == pytest.approx(15)
+    assert report["decides_five_percent_gate"] is False
+    for index, row in enumerate(transfers):
+        assert row["unprofiled_step_seconds"] == rows[index]["step_seconds"]
+        assert row["d2h_gpu_seconds"] == pytest.approx(0.001)
+
+
+def test_projection_latency_rejects_overlapping_or_invalid_intervals():
+    from metrics.a4.latency import summarize_projection_latency
+
+    row = {
+        "step_seconds": 0.01,
+        "model_seconds": 0.01,
+        "bank_projection_seconds": 0.002,
+        "bank_to_cpu_wall_seconds": 0.003,
+        "cpu_bank_refresh_wall_seconds": 0.004,
+    }
+    with pytest.raises(ValueError, match="exceed"):
+        summarize_projection_latency([row])
+    row["bank_to_cpu_wall_seconds"] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        summarize_projection_latency([row])
+
+
+def test_projection_latency_console_and_saved_report_keep_scopes_separate(
+    tmp_path, capsys
+):
+    from metrics.a4.cli import inspect_latency
+    from metrics.a4.console import print_result
+
+    row = {
+        "mode": "training",
+        "sample": 0,
+        "batch": 0,
+        "step_seconds": 0.02,
+        "model_seconds": 0.010,
+        "bank_projection_seconds": 0.002,
+        "bank_to_cpu_wall_seconds": 0.003,
+        "cpu_bank_refresh_wall_seconds": 0.004,
+    }
+    (tmp_path / "result.json").write_text(
+        json.dumps(
+            {
+                "contract_version": "a4-projection-latency-v1",
+                "status": "completed",
+                "checkpoint_sha256": "saved",
+                "samples": [row],
+                "scope": "No five-percent qualification",
+            }
+        )
+    )
+    (tmp_path / "cuda-transfers-training.json").write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "sample": 0,
+                        "batch": 0,
+                        "d2h_gpu_seconds": 0.001,
+                        "h2d_gpu_seconds": 0.002,
+                        "profiled_model_seconds": 0.021,
+                        "unprofiled_step_seconds": 0.02,
+                    }
+                ]
+            }
+        )
+    )
+    result = inspect_latency(tmp_path)
+    report = result["reports"][0]
+    assert "cuda_transfers" not in report
+    assert (
+        "transfer_only_mean_below_five_percent"
+        not in report["query_result_cuda_transfers"]
+    )
+    print_result("latency", result)
+    output = capsys.readouterr().out
+    assert (
+        "host-clock completion" in output and "Query/result CUDA copies only" in output
+    )
+    assert "no <5% qualification" in output

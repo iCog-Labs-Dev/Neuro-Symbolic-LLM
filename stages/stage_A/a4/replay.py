@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from experiments.run_stage_a4 import _resolve_substrate
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -68,6 +70,8 @@ def training_arguments(
         "patterns",
         "embeddings",
         "native_library",
+        "projection_artifacts",
+        "resume_checkpoint",
     ):
         if values.get(name) is not None:
             values[name] = (base / values[name]).resolve()
@@ -153,17 +157,18 @@ def checkpoint_replay(
     import optax
     import torch
 
-    from frozenllm.substrate import FrozenSubstrate
     from residual import ResidualAdapter
     from residual.symbolic_head.jax_head import SymbolicHead
     from stages.results import load_params
-    from stages.stage_A.A3_model import A3Config, A3Model
-    from stages.stage_A.a4.checkpoint import restore_a3_weights
+    from stages.stage_A.a4.checkpoint import A3Model, load_a3_config, restore_a3_weights
     from stages.stage_A.a4.config import load_config
     from stages.stage_A.a4.data import load_data
     from stages.stage_A.a4.model import A4Model
-    from stages.stage_A.a4.training import init_params, residual_fingerprint
-    from stages.stage_base import load_configs
+    from stages.stage_A.a4.training import (
+        init_params,
+        load_projection_artifacts,
+        residual_fingerprint,
+    )
     from symbolic_memory.bank import load_bank
     from symbolic_memory.native_bridge import NativeJaxRetriever
 
@@ -185,9 +190,8 @@ def checkpoint_replay(
         )
     if digest(config.residual_config) != meta["residual_config_sha256"]:
         raise ValueError("Inherited residual configuration changed")
-    inherited = load_configs(config.residual_config, A3Config)
-    if substrate is None:
-        substrate = FrozenSubstrate(config.training.model, dtype=torch.float32)
+    inherited = load_a3_config(config.residual_config)
+    substrate = _resolve_substrate(config.training.model, substrate)
     adapter = ResidualAdapter(inherited.adapter, substrate.architecture)
     continuous = A3Model(
         substrate,
@@ -200,6 +204,20 @@ def checkpoint_replay(
     )
     frozen = restore_a3_weights(continuous, load_params(run / "params/a3-frozen.npz"))
     data = load_data(original, substrate.tokenizer, bank, config.training)
+    features, initial_projection = None, None
+    projection_artifacts = getattr(original, "projection_artifacts", None)
+    if projection_artifacts is not None:
+        expected_artifacts = meta.get("projection_artifacts_sha256")
+        if not expected_artifacts or any(
+            digest(projection_artifacts / name) != expected_hash
+            for name, expected_hash in expected_artifacts.items()
+        ):
+            raise ValueError("Projection experiment artifacts changed")
+        features, initial_projection = load_projection_artifacts(
+            projection_artifacts,
+            bank,
+            getattr(original, "projection_initialization", "learned"),
+        )
     if _data_identity(data.provenance) != _data_identity(read_json(run / "data.json")):
         raise ValueError("Replay data differs from the completed training run")
     checkpoint = run / "checkpoints/a4-final.npz"
@@ -225,12 +243,15 @@ def checkpoint_replay(
                 ),
             )
             params: dict[str, Any] = {"symbolic": {}, "value": {}}
+            if features is not None:
+                model.bank_features = jnp.asarray(features)
+                params["projection"] = {}
             for name, weights in load_params(checkpoint).items():
                 group, layer = name.split(".", 1)
                 params[group][layer] = {
                     key: jnp.asarray(value) for key, value in weights.items()
                 }
-            expected = init_params(model, config.training.seed)
+            expected = init_params(model, config.training.seed, initial_projection)
             if jax.tree.structure(params) != jax.tree.structure(expected):
                 raise ValueError("Checkpoint parameter structure differs from A4")
             for actual, template in zip(
@@ -282,6 +303,10 @@ def checkpoint_replay(
                     "Checkpoint bank, frozen residual, update or training-state identity mismatch"
                 )
             state = jax.tree.unflatten(tree, saved)
+            if features is not None:
+                keys, values = (np.asarray(x) for x in model.bank_vectors(params))
+                retriever.refresh_vectors(keys, values)
+                retriever.info["no_gpu_bank_cache"] = False
             before = [
                 np.asarray(value).copy() for value in jax.tree.leaves((params, state))
             ]

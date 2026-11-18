@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -13,6 +13,7 @@ from typing import Any
 from metrics.a4.latency import (
     interval_breakdown,
     summarize_latency,
+    summarize_projection_latency,
     summarize_transfers,
 )
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE
@@ -170,6 +171,68 @@ def _transfer_samples(mode, invoke, retriever, batches, primary, warmups, layer_
     return rows
 
 
+def _projection_samples(
+    mode,
+    invoke,
+    reset,
+    retriever,
+    batches,
+    samples,
+    warmups,
+    profile_transfers,
+    layer_count,
+    *,
+    clock=time.perf_counter,
+):
+    """Repeat one checkpoint update; reset its working index outside each sample."""
+    print(f"Warming {mode} with the projected bank; not timed.", flush=True)
+    for index in range(max(warmups, len(batches))):
+        reset()
+        invoke(mode, batches[index % len(batches)])
+    primary, transfers = [], []
+    for profiled in (False, True) if profile_transfers else (False,):
+        print(
+            f"Measuring projected-bank {mode}: {samples} "
+            + ("CUDA-profiled samples." if profiled else "uninstrumented samples."),
+            flush=True,
+        )
+        with retriever.transfer_timing() if profiled else nullcontext():
+            for index in range(samples):
+                reset()
+                before = retriever.transfer_stats() if profiled else None
+                started = clock()
+                parts = invoke(mode, batches[index % len(batches)])
+                seconds = clock() - started
+                if not profiled:
+                    primary.append(
+                        {
+                            "mode": mode,
+                            "sample": index,
+                            "batch": index % len(batches),
+                            "step_seconds": seconds,
+                            **parts,
+                        }
+                    )
+                else:
+                    after = retriever.transfer_stats()
+                    if after["calls"] - before["calls"] != layer_count:
+                        raise RuntimeError("CUDA timing did not cover each head layer")
+                    transfers.append(
+                        {
+                            "sample": index,
+                            "batch": index % len(batches),
+                            "d2h_gpu_seconds": after["d2h_gpu_seconds"]
+                            - before["d2h_gpu_seconds"],
+                            "h2d_gpu_seconds": after["h2d_gpu_seconds"]
+                            - before["h2d_gpu_seconds"],
+                            "profiled_model_seconds": seconds,
+                            "unprofiled_step_seconds": primary[index]["step_seconds"],
+                        }
+                    )
+    reset()
+    return primary, transfers
+
+
 def measure_latency(
     run: Path,
     *,
@@ -218,6 +281,8 @@ def measure_latency(
             )
         )
         config = replay.config
+        dynamic = replay.model.bank_features is not None
+        joint = dynamic and getattr(replay.arguments, "train_bank_projection", False)
         state_comparison = training_state_comparison(
             replay.metadata,
             replay.result,
@@ -234,6 +299,7 @@ def measure_latency(
             jnp.asarray(np.stack([row.key_vector for row in replay.bank.records])),
             jnp.asarray(np.stack([row.val_vector for row in replay.bank.records])),
             config,
+            **({"train_bank_projection": True} if joint else {}),
         )
 
         @jax.jit
@@ -241,7 +307,11 @@ def measure_latency(
             clean, _ = replay.model.continuous.clean_pass(ids)
             latents = replay.model.continuous.predict_latents(replay.frozen, clean)
             forward = replay.model.forward_at_latents(
-                replay.frozen, params["symbolic"], ids, latents
+                replay.frozen,
+                params["symbolic"],
+                ids,
+                latents,
+                bank_vectors=replay.model.bank_vectors(params),
             )
             return replay.model.continuous.sub.compute_loss(
                 forward.logits, jnp.where(mask, ids, -100), losses=("CE",)
@@ -266,6 +336,46 @@ def measure_latency(
                 )
             )
         jax.block_until_ready((replay.params, replay.state, selected))
+
+        def refresh(candidate):
+            started = time.perf_counter()
+            vectors = replay.model.bank_vectors(candidate)
+            jax.block_until_ready(vectors)
+            computed = time.perf_counter()
+            keys, values = (np.asarray(value) for value in vectors)
+            copied = time.perf_counter()
+            replay.retriever.refresh_vectors(keys, values)
+            return {
+                "bank_projection_seconds": computed - started,
+                "bank_to_cpu_wall_seconds": copied - computed,
+                "cpu_bank_refresh_wall_seconds": time.perf_counter() - copied,
+            }
+
+        def projection_invoke(phase, batch):
+            ids, positions, targets, mask = batch
+            started = time.perf_counter()
+            value = (
+                step(replay.params, replay.state, ids, positions, targets, mask)
+                if phase == "training"
+                else deploy(replay.params, ids, mask)
+            )
+            jax.block_until_ready(value)
+            jax.effects_barrier()
+            model_seconds = time.perf_counter() - started
+            if (phase == "training" and not bool(value[-1])) or (
+                phase == "deployment" and not np.isfinite(float(value))
+            ):
+                raise FloatingPointError("Nonfinite projection checkpoint replay")
+            parts = (
+                refresh(value[0])
+                if phase == "training" and joint
+                else {
+                    "bank_projection_seconds": 0.0,
+                    "bank_to_cpu_wall_seconds": 0.0,
+                    "cpu_bank_refresh_wall_seconds": 0.0,
+                }
+            )
+            return {"model_seconds": model_seconds, **parts}
 
         def invoke(phase, batch):
             ids, positions, targets, mask = batch
@@ -299,6 +409,39 @@ def measure_latency(
             try:
                 reports, observations = [], []
                 for phase in ("training", "deployment") if mode == "both" else (mode,):
+                    if dynamic:
+                        rows, transfers = _projection_samples(
+                            phase,
+                            projection_invoke,
+                            lambda: refresh(replay.params),
+                            replay.retriever,
+                            selected,
+                            samples,
+                            warmups,
+                            profile_transfers,
+                            len(replay.model.symbolic.layers),
+                        )
+                        report = {"mode": phase, **summarize_projection_latency(rows)}
+                        if transfers:
+                            report["query_result_cuda_transfers"] = {
+                                **summarize_transfers(transfers),
+                                "scope": "Query/result CUDA events only; excludes whole-bank transfer and refresh. Not total communication or a five-percent qualification.",
+                                "does_not_decide_bridge_overhead_gate": True,
+                            }
+                            report["query_result_cuda_transfers"].pop(
+                                "transfer_only_mean_below_five_percent", None
+                            )
+                            writer.write_json(
+                                f"cuda-transfers-{phase}.json",
+                                {
+                                    "samples": transfers,
+                                    "report": report["query_result_cuda_transfers"],
+                                },
+                            )
+                        reports.append(report)
+                        observations.extend(rows)
+                        writer.log("latency", **report)
+                        continue
                     rows = _paired_samples(
                         phase,
                         invoke,
@@ -346,7 +489,9 @@ def measure_latency(
                     observations.extend(rows)
                     writer.log("latency", **report)
                 summary = {
-                    "contract_version": "a4-latency-v1",
+                    "contract_version": (
+                        "a4-projection-latency-v1" if dynamic else "a4-latency-v1"
+                    ),
                     "stage": "A4",
                     "status": "completed",
                     "run": str(run),
@@ -377,10 +522,16 @@ def measure_latency(
                     "compilation_and_warmups_excluded": True,
                     "parameters_and_optimizer_state_advanced": False,
                     "checkpoints_written": False,
+                    "working_bank_refreshed_between_samples": dynamic,
+                    "bank_projection_training": bool(joint),
                     "frozen_weights_verified_unchanged": True,
                     "reports": reports,
                     "samples": observations,
-                    "scope": "Fixed-checkpoint current-runtime measurement; training uses frozen A3 predictions. Shares of complete A4 training or deployment CE steps, not incremental head overhead or autoregressive generation latency. A different recorded training protocol is an explicit comparison, not historical-step replay.",
+                    "scope": (
+                        "Projection-aware checkpoint replay, not original-run historical timing. Each sample starts from the same saved weights, optimizer and projected index; training includes refresh only when joint projection was enabled. Deployment keeps the final bank fixed. Query/result CUDA events exclude whole-bank transfer; host bank-copy timing is not a pure CUDA interval. No five-percent qualification."
+                        if dynamic
+                        else "Fixed-checkpoint current-runtime measurement; training uses frozen A3 predictions. Shares of complete A4 training or deployment CE steps, not incremental head overhead or autoregressive generation latency. A different recorded training protocol is an explicit comparison, not historical-step replay."
+                    ),
                 }
                 runtime.close()
                 writer.write_json("result.json", summary)

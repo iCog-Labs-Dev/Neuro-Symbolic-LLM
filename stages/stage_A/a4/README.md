@@ -113,12 +113,32 @@ Console and `training.log` show epoch progress, total/task/weighted symbolic
 losses, task PPL and repeated column headings. `training.log_every` controls
 update frequency. Mean step time excludes the first update.
 
+Resumable checkpoints go to `checkpoints/a4-latest.npz` every 250 updates and
+at epoch end (`--checkpoint-every N`). Resume into a fresh run directory with
+`--resume-checkpoint PATH`, keeping inputs and settings unchanged. This restores
+weights, optimizer and batch position; `--epochs` remains the total target.
+
 Compiled native runs sample CUDA copy intervals every 100th optimizer update,
 excluding the first 10 updates and first use of each input shape. Configure with
 `--latency-every N` or disable with `--skip-latency`. Samples are saved in
 `metrics.jsonl`, with epoch summaries and an aggregate in `results.json`.
 Copy shares use the same instrumented update's elapsed time and exclude CPU
 search and host overhead. TCP and non-JIT runs do not provide these timings.
+
+### Projection experiments
+
+`python -m experiments.train_template_projection --help` describes standalone
+projection training; its queries are not A4 head queries. Pass the resulting
+directory to A4 with `--projection-artifacts PATH` and choose
+`--projection-initialization random|learned`. The projection stays fixed unless
+`--train-bank-projection` is set. Joint mode updates P and the head, recalculates
+bank K/V and refreshes the native CPU index after each optimizer update.
+Value-alignment targets remain detached.
+
+Projection experiments disable in-training copy sampling. Use `measure-latency`
+afterward for checkpoint replays that separate query/result CUDA events from
+host-clock whole-bank transfer and index refresh. Whole-bank timings are not
+copy-only measurements or a complete-bridge latency qualification.
 
 ## Run artifacts
 
@@ -168,6 +188,9 @@ with evidence visible in the causal window. Validation-probe evaluation checks
 source separation and compares trained/initial heads and a bank-support prior.
 It reports precision across all probes and recall on positive probes at available
 depths among 1, 4, 8 and 16, not parser accuracy or rule entailment.
+
+`--exact-control` also scores the same queries with exhaustive cosine search,
+separating index approximation from query quality; CE uses the configured retriever.
 
 For saved ranked IDs, `retrieval` accepts JSON with `label_kind`, `split` and
 `probes`; each probe contains `retrieved_ids` and `relevant_ids`.

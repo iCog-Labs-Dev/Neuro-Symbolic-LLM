@@ -75,6 +75,99 @@ def forbidden_retrieval(queries):
     raise AssertionError("Retrieval must not run in this disabled-head check")
 
 
+@pytest.mark.parametrize("with_projection", [False, True])
+def test_resume_checkpoint_restores_optimizer_and_projection(tmp_path, with_projection):
+    from stages.stage_A.a4.checkpoint import (
+        restore_training_checkpoint,
+        save_training_checkpoint,
+    )
+
+    params = {
+        "symbolic": {"layer_7": {"W_sym": jnp.ones((2, 2))}},
+        "value": {"layer_7": {"V_pred": jnp.zeros((2, 2))}},
+    }
+    if with_projection:
+        params["projection"] = {"bank": {"P": jnp.eye(2)}}
+    optimizer = optax.adam(0.01)
+    state = optimizer.init(params)
+    grads = jax.tree.map(jnp.ones_like, params)
+    changes, state = optimizer.update(grads, state, params)
+    params = optax.apply_updates(params, changes)
+    with RunWriter(tmp_path, "saved") as writer:
+        path = save_training_checkpoint(
+            writer,
+            "a4-latest",
+            params,
+            state,
+            resume_version=1,
+            resume_signature="same-inputs",
+            updates=1,
+            next_epoch=0,
+            next_batch=1,
+            initial_validation={"loss": 2.0, "ppl": math.exp(2)},
+        )
+    restored, restored_state, meta = restore_training_checkpoint(
+        path, params, optimizer, "same-inputs"
+    )
+    assert meta["updates"] == 1 and meta["next_batch"] == 1
+    for left, right in zip(
+        jax.tree.leaves((params, state)),
+        jax.tree.leaves((restored, restored_state)),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(left, right)
+    next_a, _ = optimizer.update(grads, state, params)
+    next_b, _ = optimizer.update(grads, restored_state, restored)
+    for left, right in zip(
+        jax.tree.leaves(next_a), jax.tree.leaves(next_b), strict=True
+    ):
+        np.testing.assert_array_equal(left, right)
+    with pytest.raises(ValueError, match="same data"):
+        restore_training_checkpoint(path, params, optimizer, "changed-inputs")
+
+
+@pytest.mark.parametrize("joint", [False, True])
+def test_projection_optimizer_updates_only_in_joint_mode(env, joint):
+    def retrieve(q):
+        ids = jnp.broadcast_to(jnp.asarray([0, 1], dtype=jnp.int32), (len(q), 2))
+        return RetrievedTemplates(
+            jnp.zeros((len(q), 2, 2)),
+            jnp.zeros((len(q), 2, 2)),
+            jnp.zeros((len(q), 2)),
+            ids,
+        )
+
+    model = A4Model(env.continuous, SymbolicHead(32, 2, (7,), retrieve))
+    model.bank_features = jnp.eye(32, dtype=jnp.float32)[:2]
+    projection = jnp.eye(32, dtype=jnp.float32)[:2]
+    params = init_params(model, 0, projection)
+    before = residual_fingerprint(model, env.params)
+    config = A4Config(
+        Path("unused"), TrainingConfig(batch_size=1, seq_len=5, jit=False)
+    )
+    optimizer = optax.adam(1e-3)
+    state = optimizer.init(params)
+    keys = model.bank_features @ projection.T
+    step = make_train_step(
+        model, env.params, optimizer, keys, keys, config, train_bank_projection=joint
+    )
+    for _ in range(2):
+        params, state, metrics, finite = step(
+            params, state, env.ids, jnp.asarray([[0, 2]]), jnp.asarray([0])
+        )
+        assert bool(finite)
+        assert float(metrics["gradient_norm"]) > 0
+    actual = np.asarray(params["projection"]["bank"]["P"])
+    if joint:
+        assert float(metrics["projection_grad_norm"]) > 0
+        assert not np.array_equal(actual, np.asarray(projection))
+    else:
+        assert float(metrics["projection_grad_norm"]) == 0
+        np.testing.assert_array_equal(actual, projection)
+    np.testing.assert_allclose(actual @ actual.T, np.eye(2), atol=3e-5)
+    assert residual_fingerprint(model, env.params) == before
+
+
 @pytest.fixture(scope="module")
 def env():
     sub = small_substrate()
@@ -711,6 +804,80 @@ def test_training_checkpoint_separates_frozen_and_trainable_weights(
         if row["event"] == "train":
             assert row["ppl"] == pytest.approx(math.exp(row["task"]))
             assert row["symbolic"] == pytest.approx(row["key"] + row["value"])
+
+
+def test_resumed_training_matches_uninterrupted_weights(run, tmp_path, monkeypatch):
+    from stages.stage_A.a4 import training as module
+
+    blocks = np.asarray([[1, 2, 3, 4, 5], [1, 5, 4, 3, 2]], dtype=np.int32)
+    data = A4Data(
+        blocks, blocks[:1], None, np.asarray([[3, 0], [3, 0]], dtype=np.int32), {}
+    )
+    with RunWriter(tmp_path, "complete") as writer:
+        train(
+            run.model,
+            run.frozen,
+            data,
+            run.bank,
+            run.config,
+            writer,
+            checkpoint_every=1,
+        )
+    original = module.make_train_step
+
+    def interrupted_step(*args, **kwargs):
+        numerical = original(*args, **kwargs)
+        calls = 0
+
+        def step(*inputs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("simulated interruption")
+            return numerical(*inputs)
+
+        return step
+
+    with monkeypatch.context() as context:
+        context.setattr(module, "make_train_step", interrupted_step)
+        with (
+            RunWriter(tmp_path, "interrupted") as writer,
+            pytest.raises(RuntimeError, match="simulated"),
+        ):
+            train(
+                run.model,
+                run.frozen,
+                data,
+                run.bank,
+                run.config,
+                writer,
+                checkpoint_every=1,
+            )
+    checkpoint = tmp_path / "interrupted/checkpoints/a4-latest.npz"
+    assert checkpoint.is_file()
+    with RunWriter(tmp_path, "resumed") as writer:
+        result = train(
+            run.model,
+            run.frozen,
+            data,
+            run.bank,
+            run.config,
+            writer,
+            checkpoint_every=1,
+            resume_checkpoint=checkpoint,
+        )
+    assert result["updates"] == 2
+    expected = load_params(tmp_path / "complete/checkpoints/a4-final.npz")
+    actual = load_params(tmp_path / "resumed/checkpoints/a4-final.npz")
+    for left, right in zip(
+        jax.tree.leaves(expected), jax.tree.leaves(actual), strict=True
+    ):
+        np.testing.assert_array_equal(left, right)
+    records = [
+        json.loads(row)
+        for row in (tmp_path / "resumed/metrics.jsonl").read_text().splitlines()
+    ]
+    assert [row["step"] for row in records if row["event"] == "train"] == [2]
 
 
 @pytest.mark.parametrize("latency_every", [0, 2])

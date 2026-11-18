@@ -30,6 +30,7 @@ def _task_terms_at_latents(
     *,
     symbolic_enabled: bool = True,
     token_mask: jax.Array | None = None,
+    bank_vectors=None,
 ) -> tuple[dict[str, jax.Array], dict[int, jax.Array]]:
     z_fixed = jax.tree.map(jax.lax.stop_gradient, z_star)
     continuous_fixed = jax.tree.map(jax.lax.stop_gradient, continuous_params)
@@ -39,6 +40,7 @@ def _task_terms_at_latents(
         input_ids,
         z_fixed,
         symbolic_enabled=symbolic_enabled,
+        bank_vectors=bank_vectors,
     )
     labels = input_ids
     if token_mask is not None:
@@ -63,6 +65,8 @@ def objective_at_latents(
     key_weight: float = 1.0,
     value_weight: float = 1.0,
     token_mask: jax.Array | None = None,
+    train_bank_keys: bool = False,
+    dynamic_bank: bool = False,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Compute CE and key/value alignment with fixed residual weights and latents.
 
@@ -98,6 +102,7 @@ def objective_at_latents(
         input_ids,
         z_star,
         token_mask=token_mask,
+        bank_vectors=(bank_keys, bank_values) if dynamic_bank else None,
     )
     key_loss = jnp.asarray(0.0, dtype=jnp.float32)
     value_loss = jnp.asarray(0.0, dtype=jnp.float32)
@@ -122,6 +127,7 @@ def objective_at_latents(
             bank_keys,
             bank_values,
             indices,
+            train_bank_keys=train_bank_keys,
         )
         key_loss = key_loss + jnp.where(jnp.all(valid), aligned.key, jnp.nan)
         value_loss = value_loss + jnp.where(jnp.all(valid), aligned.value, jnp.nan)
