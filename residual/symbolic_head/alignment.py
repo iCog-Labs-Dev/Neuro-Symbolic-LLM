@@ -117,7 +117,13 @@ def alignment_loss(
     return AlignmentLoss(key_loss + value_loss, key_loss, value_loss)
 
 
-def _positive_set_loss(queries, predicted_values, keys, values, targets):
+def _positive_set_loss(
+    queries: jax.Array,
+    predicted_values: jax.Array,
+    keys: jax.Array,
+    values: jax.Array,
+    targets: jax.Array,
+) -> AlignmentLoss:
     """Full-bank positive-versus-unlabelled ranking; not certified negatives."""
     present = targets >= 0
     safe = jnp.clip(targets, 0, keys.shape[0] - 1)

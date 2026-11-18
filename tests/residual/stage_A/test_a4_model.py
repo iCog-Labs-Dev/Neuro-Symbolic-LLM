@@ -225,7 +225,9 @@ def test_checkpoint_rejects_invalid_weights(env, invalid):
 
 
 def test_objective_rejects_invalid_label_shape_before_retrieval(env):
-    with pytest.raises(ValueError, match="position needs one integer target"):
+    with pytest.raises(
+        ValueError, match="position needs an integer target or target set"
+    ):
         objective_at_latents(
             env.a4,
             env.params,
