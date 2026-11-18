@@ -15,7 +15,7 @@ from stages.stage_A.a4.model import A4Model
 
 
 class AlignmentLabels(NamedTuple):
-    """One bank target per labelled [batch, token] position at a head layer."""
+    """One target or padded positive set per labelled [batch, token] position."""
 
     positions: jax.Array
     template_indices: jax.Array
@@ -83,11 +83,13 @@ def objective_at_latents(
             or positions.shape[1] != 2
             or positions.shape[0] == 0
             or not jnp.issubdtype(positions.dtype, jnp.integer)
-            or indices.shape != (positions.shape[0],)
+            or indices.ndim not in (1, 2)
+            or indices.shape[0] != positions.shape[0]
+            or (indices.ndim == 2 and indices.shape[1] == 0)
             or not jnp.issubdtype(indices.dtype, jnp.integer)
         ):
             raise ValueError(
-                "Each integer [count, 2] position needs one integer target"
+                "Each integer [count, 2] position needs an integer target or target set"
             )
     terms, states = _task_terms_at_latents(
         model,
