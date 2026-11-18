@@ -18,7 +18,6 @@ from benchmark.benchmark import (
     _read_json,
     _select_headline_cohort,
     _write_json,
-    fingerprint,
     measurement_reason,
     metric_values_for_record,
     resolve_report_dir,
@@ -119,12 +118,10 @@ def _combined_evidence_table(records: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _figure_links(folder: Path) -> list[str]:
-    # Link only the figures this version owns, not unrelated/stale PNGs.
+def _figure_notice() -> list[str]:
     return [
-        f"![{label}](figures/{key}.png)"
-        for label, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
-        if (folder / "figures" / f"{key}.png").is_file()
+        "Figures are stored separately in the [`figures/`](figures/) folder.",
+        "",
     ]
 
 
@@ -178,7 +175,7 @@ def report_manifest(
         "actual held-out loss changes for sampled rank channels.",
         "",
         *_combined_evidence_table(records),
-        *_figure_links(comparison),
+        *_figure_notice(),
     ]
     general = comparison / "stage_a_general_report.md"
     general.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -187,21 +184,14 @@ def report_manifest(
         folder = stage_root / method.upper()
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{method}_result_and_visualization.md"
-        selected = [row for row in records if row.get("method") == method]
         content = [
             f"# {method.upper()} Results",
             "",
             "Numeric comparisons and run evidence are consolidated in the "
             "[Stage A general report](../comparison/stage_a_general_report.md).",
             "",
-            *_figure_links(folder),
+            *_figure_notice(),
         ]
-        for row in selected:
-            relative = (
-                f"figures/validation_loss_heatmap_{fingerprint(row['run_id'])[:16]}.png"
-            )
-            if (folder / relative).is_file():
-                content.append(f"![Validation loss heatmap]({relative})")
         path.write_text("\n".join(content) + "\n", encoding="utf-8")
         reports[method] = path
     report = destination / "REPORT.md"
@@ -299,12 +289,7 @@ def _write_dashboard(
                 table_open = False
             image_match = re.fullmatch(r"!\[(.*?)\]\((.*?)\)", line.strip())
             if image_match:
-                alt, relative = image_match.groups()
-                source = (report.parent / relative).resolve()
-                url = source.relative_to(destination).as_posix()
-                blocks.append(
-                    f'<img loading="lazy" src="{html.escape(url, quote=True)}" alt="{html.escape(alt, quote=True)}">'
-                )
+                continue
             elif line.startswith("#"):
                 level = min(len(line) - len(line.lstrip("#")) + 1, 6)
                 blocks.append(

@@ -1033,8 +1033,10 @@ def test_empty_artifacts_generate_explicit_na_figures(tmp_path):
     for section in ("A1", "A2", "A3", "comparison"):
         folder = reports / "stage_A" / section
         assert len(list((folder / "figures").glob("*.png"))) == 13
-        assert "![" in next(folder.glob("*.md")).read_text()
-    assert "<img" in (reports / "index.html").read_text()
+        report = next(folder.glob("*.md")).read_text()
+        assert "Figures are stored separately" in report
+        assert "![" not in report
+    assert "<img" not in (reports / "index.html").read_text()
 
 
 def _audit_parameters():
