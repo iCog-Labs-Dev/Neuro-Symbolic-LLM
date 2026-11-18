@@ -55,7 +55,9 @@ def generate_visualizations(
             / "figures"
         )
         folder.mkdir(parents=True, exist_ok=True)
-        for label, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS:
+        for label, key, _ in (
+            INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
+        ):
             points = []
             if section == "comparison":
                 samples = _metric_samples(cohort, key) if cohort else {}
@@ -64,6 +66,16 @@ def generate_visualizations(
                     for method, values in samples.items()
                     if values
                 ]
+                a4_values = [
+                    value
+                    for row in records
+                    if row.get("method") == "a4"
+                    for value in metric_values_for_record(
+                        row, key, int(row.get("rank", 16))
+                    )
+                ]
+                if a4_values:
+                    points.append(("A4", fmean(a4_values)))
             else:
                 for row in records:
                     if row.get("method") != section:

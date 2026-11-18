@@ -7,7 +7,7 @@ import json
 import math
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -25,7 +25,9 @@ from benchmark.benchmark import (
     EXTERNAL_METRIC_SPECS,
     INTERNAL_METRIC_SPECS,
     MEASURED_METRICS,
+    REPORTED_METRICS,
     _filter_adapter_params,
+    _a4_symbolic_metrics,
     _load_deployed_metrics,
     _materialize,
     _metric_samples,
@@ -260,6 +262,39 @@ def test_expand_specs_and_make_manifest(tmp_path: Path) -> None:
     )
     assert len(manifest["runs"]) == 6
     assert (tmp_path / "manifest.json").is_file()
+
+
+def test_a4_command_uses_only_stage_a4_flags(tmp_path: Path) -> None:
+    inputs = {}
+    for name in (
+        "a4_train_sources",
+        "a4_validation_sources",
+        "a4_alignment_labels",
+        "a4_patterns",
+        "a4_embeddings",
+        "a4_test_sources",
+        "a4_native_library",
+    ):
+        path = tmp_path / name
+        path.write_text("input", encoding="utf-8")
+        inputs[name] = str(path)
+    (tmp_path / "a4_native_library.json").write_text("{}", encoding="utf-8")
+    spec = expand_specs(
+        tmp_path,
+        seeds=[0],
+        methods=["a4"],
+        k_values=[1],
+        a4_inputs=inputs,
+    )[0]
+    spec = replace(spec, a4_warm_start=str(tmp_path / "a3.npz"))
+    command = runner._command(spec, Path(spec.config))
+    assert str(runner.RUNNERS["a4"]) in command
+    assert "--runtime-config" not in command
+    assert "--training-mode" not in command
+    assert "--runtime-source" not in command
+    assert "--task-order" not in command
+    assert "--heldout-task" not in command
+    assert "--arm" not in command
 
 
 def test_real_default_configs_materialize(tmp_path: Path) -> None:
@@ -905,9 +940,9 @@ def test_report_exact_metrics_and_missing_evidence(tmp_path):
     _write_json(runs / "evaluation.json", {"records": []})
     path = report_manifest(runs, report_dir=reports)
     content = path.read_text()
-    assert len(MEASURED_METRICS) == 13
-    assert len(INTERNAL_METRIC_SPECS) == 5
-    assert len(EXTERNAL_METRIC_SPECS) == 8
+    assert len(MEASURED_METRICS) == len(INTERNAL_METRIC_SPECS) + len(EXTERNAL_METRIC_SPECS)
+    assert len(INTERNAL_METRIC_SPECS) == 16
+    assert len(EXTERNAL_METRIC_SPECS) == 24
     for label, _, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS:
         assert label in content
     assert "No evaluated runs" in content
@@ -962,12 +997,39 @@ def test_general_report_uses_methods_as_rows_and_one_evidence_table(tmp_path):
                 },
             }
         )
+    records.append(
+        {
+            "run_id": "a4",
+            "method": "a4",
+            "seed": 0,
+            "rank": 4,
+            "k": None,
+            "protocol": "a4",
+            "runtime_source": "stories",
+            "runtime_data_sha256": None,
+            "task_order": [],
+            "heldout_tasks": [],
+            "final_mean_loss": 2.5,
+            "deployed_evaluation": {
+                "a4": {
+                    "symbolic": {
+                        "a4_retrieval_macro_precision_at_8": 0.8,
+                        "a4_retrieval_macro_recall_at_8": 0.7,
+                        "residual_direction_redundancy": 0.12,
+                    }
+                }
+            },
+        }
+    )
     _write_json(runs / "manifest.json", {"runtime_source": "stories"})
     _write_json(runs / "evaluation.json", {"records": records})
     content = report_manifest(runs, report_rank=4, report_dir=reports).read_text()
     assert "Realized task order: rocstories task 1, 2, 3" in content
     assert "| Method | Residual compressibility |" in content
     assert "| A1 |" in content and "| A2 |" in content and "| A3 |" in content
+    assert "| Method | Retrieval macro precision @8 |" in content
+    assert "| A4 | 0.8 (n=1) |" in content
+    assert "inherited from frozen A3 residual" in content
     assert "paired delta" not in content.lower()
     assert "| Run | Metric | Value |" not in content
     assert "## Per-dataset token accuracy" not in content
@@ -977,6 +1039,39 @@ def test_general_report_uses_methods_as_rows_and_one_evidence_table(tmp_path):
         in content
     )
     assert "| a1 | A1 | 0 | 4 | None | rocstories | 0.3 (n=1) |" in content
+
+
+def test_a4_probe_metrics_and_frozen_a3_redundancy(tmp_path):
+    run_dir = tmp_path / "a4"
+    _write_json(
+        run_dir / "evaluation" / "representation" / "result.json",
+        {
+            "contract_version": "a4-representation-v1",
+            "reports": [
+                {
+                    "condition": "trained",
+                    "next_token_accuracy": 0.62,
+                    "kl_base_to_model": 0.14,
+                    "layers": [],
+                }
+            ],
+        },
+    )
+    (run_dir / "params").mkdir(parents=True)
+    np.savez(
+        run_dir / "params" / "a3-frozen.npz",
+        **{
+            "layer_0/A": np.eye(2, dtype=np.float32),
+            "layer_0/B": np.eye(2, dtype=np.float32),
+        },
+    )
+
+    values, reason, _ = _a4_symbolic_metrics(run_dir)
+
+    assert values["token_accuracy"] == pytest.approx(0.62)
+    assert values["domain_kl"] == pytest.approx(0.14)
+    assert values["residual_direction_redundancy"] == pytest.approx(0.0)
+    assert reason is None
 
 
 def test_effect_magnitudes_are_not_prediction_fidelity():
@@ -997,7 +1092,7 @@ def test_reevaluation_replaces_old_metric_catalog_without_editing_manifest(tmp_p
     _write_json(path, {"runs": [], "measured_metrics": ["invariant_redundancy"]})
     original = path.read_bytes()
     evaluation = evaluate_manifest(tmp_path)
-    assert evaluation["measured_metrics"] == list(MEASURED_METRICS)
+    assert evaluation["measured_metrics"] == list(REPORTED_METRICS)
     assert "residual_direction_redundancy" in evaluation["measured_metrics"]
     assert "invariant_redundancy" not in evaluation["measured_metrics"]
     assert path.read_bytes() == original
@@ -1032,7 +1127,10 @@ def test_empty_artifacts_generate_explicit_na_figures(tmp_path):
     assert sentinel.read_text() == "keep"
     for section in ("A1", "A2", "A3", "comparison"):
         folder = reports / "stage_A" / section
-        assert len(list((folder / "figures").glob("*.png"))) == 13
+        assert len(list((folder / "figures").glob("*.png"))) == (
+            len(INTERNAL_METRIC_SPECS)
+            + len(EXTERNAL_METRIC_SPECS)
+        )
         report = next(folder.glob("*.md")).read_text()
         assert "Figures are stored separately" in report
         assert "![" not in report

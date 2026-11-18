@@ -444,18 +444,28 @@ def evaluate_long_range(
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME_CONFIG = ROOT / "configs" / "runtime_datasets.yaml"
 BENCHMARK_RUNTIME_SOURCE = None
-METHODS = ("a1", "a2", "a3")
+METHODS = ("a1", "a2", "a3", "a4")
 BENCHMARK_LEARNING_RATE = 1.0e-3
 DEFAULT_CONFIGS = {
     "a1": ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml",
     "a2": ROOT / "configs" / "stage_A" / "a2_pc_inspired.yaml",
     "a3": ROOT / "configs" / "stage_A" / "a3_hybrid_pc.yaml",
+    "a4": ROOT / "configs" / "stage_A" / "a4_symbolic_head.yaml",
 }
 RUNNERS = {
     "a1": ROOT / "experiments" / "run_stage_a1.py",
     "a2": ROOT / "experiments" / "run_stage_a2.py",
     "a3": ROOT / "experiments" / "run_stage_a3.py",
+    "a4": ROOT / "experiments" / "run_stage_a4.py",
 }
+A4_INPUT_FIELDS = (
+    "a4_train_sources",
+    "a4_validation_sources",
+    "a4_alignment_labels",
+    "a4_patterns",
+    "a4_embeddings",
+    "a4_test_sources",
+)
 EXTERNAL_METRIC_SPECS = (
     ("Validation loss", "validation_loss", "lower"),
     ("Perplexity", "perplexity", "lower"),
@@ -465,6 +475,22 @@ EXTERNAL_METRIC_SPECS = (
     ("On-domain KL drift", "domain_kl", "lower"),
     ("Token accuracy", "token_accuracy", "higher"),
     ("Calibration ECE", "calibration", "lower"),
+    ("Retrieval macro precision @1", "a4_retrieval_macro_precision_at_1", "higher"),
+    ("Retrieval macro recall @1", "a4_retrieval_macro_recall_at_1", "higher"),
+    ("Retrieval micro precision @1", "a4_retrieval_micro_precision_at_1", "higher"),
+    ("Retrieval micro recall @1", "a4_retrieval_micro_recall_at_1", "higher"),
+    ("Retrieval macro precision @4", "a4_retrieval_macro_precision_at_4", "higher"),
+    ("Retrieval macro recall @4", "a4_retrieval_macro_recall_at_4", "higher"),
+    ("Retrieval micro precision @4", "a4_retrieval_micro_precision_at_4", "higher"),
+    ("Retrieval micro recall @4", "a4_retrieval_micro_recall_at_4", "higher"),
+    ("Retrieval macro precision @8", "a4_retrieval_macro_precision_at_8", "higher"),
+    ("Retrieval macro recall @8", "a4_retrieval_macro_recall_at_8", "higher"),
+    ("Retrieval micro precision @8", "a4_retrieval_micro_precision_at_8", "higher"),
+    ("Retrieval micro recall @8", "a4_retrieval_micro_recall_at_8", "higher"),
+    ("Retrieval macro precision @16", "a4_retrieval_macro_precision_at_16", "higher"),
+    ("Retrieval macro recall @16", "a4_retrieval_macro_recall_at_16", "higher"),
+    ("Retrieval micro precision @16", "a4_retrieval_micro_precision_at_16", "higher"),
+    ("Retrieval micro recall @16", "a4_retrieval_micro_recall_at_16", "higher"),
 )
 INTERNAL_METRIC_SPECS = (
     ("Residual compressibility", "residual_compressibility", "higher"),
@@ -472,11 +498,204 @@ INTERNAL_METRIC_SPECS = (
     ("Residual direction redundancy", "residual_direction_redundancy", "lower"),
     ("Ablation prediction MAE", "ablation_mae", "lower"),
     ("Ablation rank correlation (Spearman)", "ablation_spearman", "higher"),
+    ("Representation fracture", "a4_representation_fracture", "lower"),
+    ("Mean off-diagonal overlap", "a4_mean_off_diagonal_overlap", "lower"),
+    ("Bank-key mean absolute cosine", "a4_bank_key_mean_absolute_cosine", "lower"),
+    ("Query silhouette", "a4_query_silhouette", "higher"),
+    ("Capacity sensitivity Δ recall @8", "a4_capacity_sensitivity_delta_recall_at_8", "lower"),
+    ("Step mean (ms)", "a4_step_mean_ms", "lower"),
+    ("CPU index mean (ms)", "a4_cpu_index_mean_ms", "lower"),
+    ("Communication mean (ms)", "a4_communication_mean_ms", "lower"),
+    ("GPU↔CPU copy mean (ms)", "a4_transfer_only_mean_ms", "lower"),
+    ("Full bridge p95 (ms)", "a4_full_bridge_p95_ms", "lower"),
+    ("Communication p95 (ms)", "a4_communication_p95_ms", "lower"),
 )
 MEASURED_METRICS = tuple(
     key for _, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
 )
+REPORTED_METRICS = MEASURED_METRICS
 AUDIT_METRICS = ("ablation_mae", "ablation_spearman")
+
+
+def _mean_finite(values: list[Any]) -> float | None:
+    numeric = [
+        float(value)
+        for value in values
+        if isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ]
+    return float(np.mean(numeric)) if numeric else None
+
+
+def _a4_symbolic_metrics(
+    run_dir: Path, post_eval_dir: Path | None = None
+) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+    """Extract only recorded A4 retrieval, representation and latency evidence."""
+    roots = [run_dir]
+    if post_eval_dir is not None and post_eval_dir.is_dir():
+        roots.append(post_eval_dir)
+    result_files = sorted(
+        {
+            path
+            for root in roots
+            for path in root.rglob("result.json")
+            if path.is_file() and path.parent != run_dir
+        }
+    )
+    retrieval, representation, latency = [], [], []
+    frozen_redundancy_reason = None
+    for path in result_files:
+        try:
+            payload = _read_json(path)
+        except (OSError, ValueError, TypeError):
+            continue
+        contract = payload.get("contract_version")
+        if contract == "a4-retrieval-evaluation-v1":
+            retrieval.append(payload)
+        elif contract == "a4-representation-v1":
+            representation.append(payload)
+        elif contract == "a4-latency-v1":
+            latency.append(payload)
+    values: dict[str, list[Any]] = {}
+    detail: dict[str, list[Any]] = {}
+    for payload in retrieval:
+        for report in payload.get("reports", []):
+            for layer in report.get("layers", []):
+                for score in layer.get("scores", []):
+                    cutoff = score.get("top_k")
+                    if cutoff not in {1, 4, 8, 16}:
+                        continue
+                    positive = score.get("positive_only", {})
+                    for metric, field in (
+                        ("macro_precision", "macro_precision"),
+                        ("macro_recall", "macro_recall"),
+                        ("micro_precision", "micro_precision"),
+                        ("micro_recall", "micro_recall"),
+                    ):
+                        values.setdefault(
+                            f"a4_retrieval_{metric}_at_{cutoff}", []
+                        ).append(positive.get(field))
+                    if cutoff == 8:
+                        detail.setdefault("Retrieval hit rate @8", []).append(
+                            positive.get("hit_rate")
+                        )
+                        detail.setdefault("Retrieval MRR @8", []).append(
+                            positive.get("mean_reciprocal_rank")
+                        )
+    for payload in representation:
+        for report in payload.get("reports", []):
+            if report.get("condition") == "trained":
+                values.setdefault("token_accuracy", []).append(
+                    report.get("next_token_accuracy")
+                )
+                values.setdefault("domain_kl", []).append(
+                    report.get("kl_base_to_model")
+                )
+            for layer in report.get("layers", []):
+                organization = [
+                    value
+                    for value in [layer.get("factor_organization")]
+                    if isinstance(value, dict)
+                ]
+                for item in organization:
+                    values.setdefault("a4_representation_fracture", []).extend(
+                        item.get("fracture", [])
+                    )
+                    values.setdefault("a4_mean_off_diagonal_overlap", []).append(
+                        item.get("mean_off_diagonal_overlap")
+                    )
+                values.setdefault("a4_query_silhouette", []).append(
+                    layer.get("query_clusters", {}).get("silhouette")
+                )
+                for label, field in (
+                    ("Key NLL", "reference_pair_key_nll"),
+                    ("Value squared error", "reference_pair_value_squared_error"),
+                    ("Writeback norm ratio", "writeback_to_hidden_norm_mean"),
+                    ("Writeback nonzero fraction", "writeback_nonzero_fraction"),
+                ):
+                    detail.setdefault(label, []).append(layer.get(field))
+        geometry = payload.get("fixed_bank_geometry", {})
+        values.setdefault("a4_bank_key_mean_absolute_cosine", []).append(
+            geometry.get("mean_absolute_cosine")
+        )
+        capacity_recalls = []
+        for layer_payload in payload.get("capacity", {}).values():
+            agreement = layer_payload.get("ann_exact_id_agreement_at_8")
+            if agreement is not None:
+                detail.setdefault("HNSW-vs-exact agreement @8", []).append(agreement)
+            for control in layer_payload.get("controls", []):
+                for score in control.get("scores", []):
+                    if score.get("top_k") == 8:
+                        capacity_recalls.append(score.get("positive_macro_recall"))
+        finite_recalls = [
+            float(value)
+            for value in capacity_recalls
+            if isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        ]
+        if finite_recalls:
+            values.setdefault("a4_capacity_sensitivity_delta_recall_at_8", []).append(
+                max(finite_recalls) - min(finite_recalls)
+            )
+    frozen_path = run_dir / "params" / "a3-frozen.npz"
+    if frozen_path.is_file():
+        try:
+            from metrics.representation import residual_redundancy
+            from stages.results import load_params
+
+            frozen_params = _filter_adapter_params(load_params(frozen_path))
+            redundancy = []
+            for block in frozen_params.values():
+                if "A" in block and "B" in block:
+                    redundancy.append(
+                        {
+                            direction: float(value)
+                            for direction, value in residual_redundancy(
+                                np.asarray(block["A"]), np.asarray(block["B"])
+                            ).items()
+                        }
+                    )
+            if redundancy:
+                values.setdefault("residual_direction_redundancy", []).append(
+                    float(
+                        np.mean(
+                            [
+                                (item["read"] + item["write"]) / 2.0
+                                for item in redundancy
+                            ]
+                        )
+                    )
+                )
+        except (OSError, KeyError, ValueError, TypeError) as exc:
+            frozen_redundancy_reason = (
+                "Could not measure inherited frozen-A3 residual redundancy: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    for payload in latency:
+        for report in payload.get("reports", []):
+            for metric, field in (
+                ("a4_step_mean_ms", "step_mean_ms"),
+                ("a4_cpu_index_mean_ms", "cpu_index_mean_ms"),
+                ("a4_communication_mean_ms", "communication_mean_ms"),
+                ("a4_full_bridge_p95_ms", "full_round_trip_p95_ms"),
+                ("a4_communication_p95_ms", "communication_p95_ms"),
+            ):
+                values.setdefault(metric, []).append(report.get(field))
+            transfers = report.get("cuda_transfers", {})
+            values.setdefault("a4_transfer_only_mean_ms", []).append(
+                transfers.get("transfer_only_mean_ms")
+            )
+    extracted = {key: _mean_finite(items) for key, items in values.items()}
+    details = {key: _mean_finite(items) for key, items in detail.items()}
+    if not extracted:
+        return {}, (
+            "No completed metrics/a4 retrieval, representation, or latency "
+            "result.json artifact was found."
+            + (f" {frozen_redundancy_reason}" if frozen_redundancy_reason else "")
+        ), details
+    return extracted, frozen_redundancy_reason, details
 
 
 @dataclass(frozen=True)
@@ -495,6 +714,18 @@ class RunSpec:
     task_order: tuple[str, ...] = ()
     heldout_tasks: tuple[str, ...] = ()
     a2_arm: str | None = None
+    a4_warm_start: str | None = None
+    a4_train_sources: str | None = None
+    a4_validation_sources: str | None = None
+    a4_alignment_labels: str | None = None
+    a4_patterns: str | None = None
+    a4_embeddings: str | None = None
+    a4_test_sources: str | None = None
+    a4_retrieval_backend: str = "native"
+    a4_native_library: str | None = None
+    a4_mork_url: str = "http://127.0.0.1:18000"
+    a4_retrieval_host: str = "127.0.0.1"
+    a4_retrieval_port: int = 19091
 
 
 def _sanitize_value(value: Any) -> Any:
@@ -532,6 +763,40 @@ def _load_deployed_metrics(
     Heavy JAX/model imports are intentionally local so ``plan`` remains usable
     in lightweight environments.
     """
+    if run.get("method") == "a4":
+        validation = result.get("validation", {})
+        test = result.get("test", {})
+        symbolic, symbolic_reason, symbolic_detail = _a4_symbolic_metrics(
+            Path(run.get("run_dir", result.get("_run_dir", ""))),
+            Path(run["a4_post_eval_dir"])
+            if run.get("a4_post_eval_dir")
+            else None,
+        )
+        return {
+            "status": "measured",
+            "domains": {
+                "a4": {
+                    "status": "measured",
+                    "loss": test.get("loss") if test else None,
+                    "ppl": test.get("ppl") if test else None,
+                }
+            },
+            "representation": {
+                "reason": (
+                    "A4 symbolic diagnostics require separate metrics/a4 "
+                    "evaluation artifacts; training results contain CE/PPL only."
+                )
+            },
+            "a4": {
+                "validation": validation,
+                "test": test,
+                "training_step_mean_ms": result.get("training_step_mean_ms"),
+                "symbolic": symbolic,
+                "symbolic_detail": symbolic_detail,
+                "symbolic_reason": symbolic_reason,
+            },
+        }
+
     import jax
     import jax.numpy as jnp
 
@@ -1035,7 +1300,7 @@ def _set_epochs(config: dict[str, Any], epochs: int | None) -> None:
 
 
 def _set_protocol(config: dict[str, Any], protocol: str) -> None:
-    if protocol not in {"sequential", "joint", "heldout", "commutator"}:
+    if protocol not in {"sequential", "joint", "heldout", "commutator", "a4"}:
         raise ValueError(f"Unsupported protocol: {protocol!r}")
 
 
@@ -1086,6 +1351,7 @@ def expand_specs(
     heldout_tasks: list[str] | tuple[str, ...] | None = None,
     runtime_config: Path = DEFAULT_RUNTIME_CONFIG,
     runtime_source: str | None = None,
+    a4_inputs: Mapping[str, Any] | None = None,
 ) -> list[RunSpec]:
     runtime_config = Path(runtime_config).resolve()
     runtime_settings = yaml.safe_load(runtime_config.read_text(encoding="utf-8")) or {}
@@ -1101,6 +1367,30 @@ def expand_specs(
         raise ValueError(
             f"Unknown methods: {unknown}; choose from {sorted(DEFAULT_CONFIGS)}"
         )
+    a4_inputs = dict(a4_inputs or {})
+    if "a4" in methods:
+        missing = [
+            name
+            for name in A4_INPUT_FIELDS
+            if not isinstance(a4_inputs.get(name), str)
+            or not Path(a4_inputs[name]).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                "A4 requires existing input artifacts: " + ", ".join(missing)
+            )
+        if a4_inputs.get("a4_retrieval_backend", "native") == "native":
+            library = a4_inputs.get("a4_native_library")
+            if (
+                not isinstance(library, str)
+                or not Path(library).is_file()
+                or not Path(library)
+                .with_suffix(Path(library).suffix + ".json")
+                .is_file()
+            ):
+                raise ValueError(
+                    "A4 native retrieval requires a library and its .json manifest"
+                )
     if not k_values or any(k < 0 for k in k_values):
         raise ValueError("k_values must contain non-negative integers.")
     if len(set(k_values)) != len(k_values):
@@ -1143,6 +1433,25 @@ def expand_specs(
                             task_order=order,
                             heldout_tasks=heldout,
                             a2_arm="full" if method == "a2" else None,
+                            a4_train_sources=a4_inputs.get("a4_train_sources"),
+                            a4_validation_sources=a4_inputs.get("a4_validation_sources"),
+                            a4_alignment_labels=a4_inputs.get("a4_alignment_labels"),
+                            a4_patterns=a4_inputs.get("a4_patterns"),
+                            a4_embeddings=a4_inputs.get("a4_embeddings"),
+                            a4_test_sources=a4_inputs.get("a4_test_sources"),
+                            a4_retrieval_backend=a4_inputs.get(
+                                "a4_retrieval_backend", "native"
+                            ),
+                            a4_native_library=a4_inputs.get("a4_native_library"),
+                            a4_mork_url=a4_inputs.get(
+                                "a4_mork_url", "http://127.0.0.1:18000"
+                            ),
+                            a4_retrieval_host=a4_inputs.get(
+                                "a4_retrieval_host", "127.0.0.1"
+                            ),
+                            a4_retrieval_port=int(
+                                a4_inputs.get("a4_retrieval_port", 19091)
+                            ),
                         )
                     )
     return specs
@@ -1151,12 +1460,17 @@ def expand_specs(
 def _materialize(spec: RunSpec, root: Path, epochs: int | None) -> Path:
     source = Path(spec.config)
     config = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
-    _set_seed(config, spec.method, spec.seed)
-    _set_rank(config, spec.rank)
-    _set_shared_training(config)
-    _set_epochs(config, epochs)
-    _set_protocol(config, spec.protocol)
-    _set_method_variant(config, spec)
+    if spec.method == "a4":
+        # A4's runner accepts no benchmark seed/epoch override; preserve its
+        # strict configuration schema and record the requested condition only.
+        pass
+    else:
+        _set_seed(config, spec.method, spec.seed)
+        _set_rank(config, spec.rank)
+        _set_shared_training(config)
+        _set_epochs(config, epochs)
+        _set_protocol(config, spec.protocol)
+        _set_method_variant(config, spec)
     target = root / "configs" / f"{spec.run_id}.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
@@ -1219,6 +1533,7 @@ def make_manifest(
     profile: str = "custom",
     runtime_config: Path = DEFAULT_RUNTIME_CONFIG,
     runtime_source: str | None = None,
+    a4_inputs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     runtime_config = Path(runtime_config).resolve()
     runtime_settings = yaml.safe_load(runtime_config.read_text(encoding="utf-8")) or {}
@@ -1253,7 +1568,7 @@ def make_manifest(
                     expand_specs(
                         output_dir,
                         seeds=seeds,
-                        methods=methods,
+                        methods=[method for method in methods if method != "a4"],
                         k_values=k_values,
                         rank_values=rank_values,
                         epochs=epochs,
@@ -1264,6 +1579,23 @@ def make_manifest(
                         runtime_source=runtime_source,
                     )
                 )
+    if "a4" in methods:
+        specs.extend(
+            expand_specs(
+                output_dir,
+                seeds=seeds[:1],
+                methods=["a4"],
+                k_values=k_values,
+                rank_values=[(rank_values or [16])[0]],
+                epochs=epochs,
+                protocol="a4",
+                task_order=(),
+                heldout_tasks=(),
+                runtime_config=runtime_config,
+                runtime_source=runtime_source,
+                a4_inputs=a4_inputs,
+            )
+        )
     source = source_fingerprint(ROOT)
     run_rows = []
     for spec in specs:
@@ -1299,8 +1631,9 @@ def make_manifest(
         "domains": list(base_order),
         "runtime_config": str(runtime_config),
         "runtime_source": runtime_source,
+        "a4_inputs": dict(a4_inputs or {}),
         "source": source,
-        "measured_metrics": list(MEASURED_METRICS),
+        "measured_metrics": list(REPORTED_METRICS),
         "runs": run_rows,
     }
     _write_json(output_dir / "manifest.json", manifest)
@@ -1321,6 +1654,44 @@ def _update_manifest(path: Path, run_id: str, **fields: Any) -> None:
 def _command(
     spec: RunSpec, config: Path, runtime_config: Path | None = None
 ) -> list[str]:
+    if spec.method == "a4":
+        if not spec.a4_warm_start:
+            raise RuntimeError("A4 requires a completed A3 checkpoint as --warm-start")
+        command = [
+            sys.executable,
+            str(RUNNERS["a4"]),
+            "--config",
+            str(config),
+            "--output-dir",
+            spec.output_dir,
+            "--run-name",
+            spec.run_name,
+            "--warm-start",
+            str(spec.a4_warm_start),
+            "--train-sources",
+            str(spec.a4_train_sources),
+            "--validation-sources",
+            str(spec.a4_validation_sources),
+            "--alignment-labels",
+            str(spec.a4_alignment_labels),
+            "--patterns",
+            str(spec.a4_patterns),
+            "--embeddings",
+            str(spec.a4_embeddings),
+            "--test-sources",
+            str(spec.a4_test_sources),
+            "--retrieval-backend",
+            spec.a4_retrieval_backend,
+            "--mork-url",
+            spec.a4_mork_url,
+            "--retrieval-host",
+            spec.a4_retrieval_host,
+            "--retrieval-port",
+            str(spec.a4_retrieval_port),
+        ]
+        if spec.a4_retrieval_backend == "native":
+            command.extend(["--native-library", str(spec.a4_native_library)])
+        return command
     runtime_config = runtime_config or Path(spec.runtime_config)
     command = [
         sys.executable,
@@ -1347,8 +1718,127 @@ def _command(
     return command
 
 
+def _resolve_a4_warm_start(manifest: dict[str, Any], raw: dict[str, Any]) -> Path:
+    candidates = [
+        row
+        for row in manifest.get("runs", [])
+        if row.get("method") == "a3"
+        and int(row.get("seed", -1)) == int(raw.get("seed", -2))
+        and row.get("status") == "complete"
+        and row.get("run_dir")
+    ]
+    for row in reversed(candidates):
+        checkpoints = sorted(Path(row["run_dir"]).glob("params/task_*.npz"))
+        if checkpoints:
+            return checkpoints[-1]
+    raise RuntimeError(
+        f"{raw.get('run_id', 'A4')}: no completed A3 checkpoint for seed "
+        f"{raw.get('seed')}; train A3 before A4"
+    )
+
+
+def _run_a4_post_eval(
+    *,
+    output_dir: Path,
+    run_id: str,
+    run_dir: Path,
+    probes: Path,
+    native_library: Path | None,
+    skip_latency: bool,
+) -> Path:
+    """Run optional A4 diagnostics outside immutable A4 training artifacts."""
+    destination = output_dir / "a4_post_eval" / run_id
+    destination.mkdir(parents=True, exist_ok=True)
+    commands = [
+        (
+            "retrieval",
+            [
+                sys.executable,
+                "-m",
+                "metrics.a4",
+                "measure-retrieval",
+                str(run_dir),
+                "--probes",
+                str(probes),
+                "--output",
+                str(destination / "retrieval"),
+            ],
+        ),
+        (
+            "representation",
+            [
+                sys.executable,
+                "-m",
+                "metrics.a4",
+                "measure-representation",
+                str(run_dir),
+                "--probes",
+                str(probes),
+                "--output",
+                str(destination / "representation"),
+            ],
+        ),
+    ]
+    if not skip_latency:
+        commands.append(
+            (
+                "latency",
+                [
+                    sys.executable,
+                    "-m",
+                    "metrics.a4",
+                    "measure-latency",
+                    str(run_dir),
+                    "--output",
+                    str(destination / "latency"),
+                ],
+            )
+        )
+    for name, command in commands:
+        target = destination / name
+        result = target / "result.json"
+        if result.is_file():
+            try:
+                payload = _read_json(result)
+            except (OSError, ValueError, TypeError):
+                payload = {}
+            if payload.get("status") == "completed":
+                continue
+        if native_library is not None and name in {"retrieval", "representation"}:
+            command.extend(["--native-library", str(native_library)])
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            _write_json(
+                target / "failure.json",
+                {
+                    "status": "failed",
+                    "command": command,
+                    "returncode": completed.returncode,
+                    "reason": (
+                        completed.stderr.strip()
+                        or completed.stdout.strip()
+                        or "A4 post-hoc evaluation failed without output."
+                    ),
+                },
+            )
+    return destination
+
+
 def train_manifest(
-    output_dir: Path, *, resume: bool = True, epochs: int | None = None
+    output_dir: Path,
+    *,
+    resume: bool = True,
+    epochs: int | None = None,
+    a4_post_eval: bool = False,
+    a4_probes: Path | None = None,
+    a4_native_library: Path | None = None,
+    a4_skip_latency: bool = False,
 ) -> None:
     manifest_path = output_dir / "manifest.json"
     manifest = _read_json(manifest_path)
@@ -1379,6 +1869,18 @@ def train_manifest(
                 raw.get("requested_heldout_tasks", raw.get("heldout_tasks", ()))
             ),
             a2_arm=raw.get("a2_arm", "full" if raw["method"] == "a2" else None),
+            a4_warm_start=raw.get("a4_warm_start"),
+            a4_train_sources=raw.get("a4_train_sources"),
+            a4_validation_sources=raw.get("a4_validation_sources"),
+            a4_alignment_labels=raw.get("a4_alignment_labels"),
+            a4_patterns=raw.get("a4_patterns"),
+            a4_embeddings=raw.get("a4_embeddings"),
+            a4_test_sources=raw.get("a4_test_sources"),
+            a4_retrieval_backend=raw.get("a4_retrieval_backend", "native"),
+            a4_native_library=raw.get("a4_native_library"),
+            a4_mork_url=raw.get("a4_mork_url", "http://127.0.0.1:18000"),
+            a4_retrieval_host=raw.get("a4_retrieval_host", "127.0.0.1"),
+            a4_retrieval_port=int(raw.get("a4_retrieval_port", 19091)),
         )
         effective_epochs = epochs if epochs is not None else manifest.get("epochs")
         config = _materialize(
@@ -1412,6 +1914,24 @@ def train_manifest(
                     "requested runtime or training condition changed",
                 )
             if reusable:
+                if (
+                    a4_post_eval
+                    and spec.method == "a4"
+                    and a4_probes is not None
+                ):
+                    post_eval_dir = _run_a4_post_eval(
+                        output_dir=output_dir,
+                        run_id=spec.run_id,
+                        run_dir=previous_run,
+                        probes=a4_probes,
+                        native_library=a4_native_library,
+                        skip_latency=a4_skip_latency,
+                    )
+                    _update_manifest(
+                        manifest_path,
+                        spec.run_id,
+                        a4_post_eval_dir=str(post_eval_dir),
+                    )
                 _update_manifest(
                     manifest_path,
                     spec.run_id,
@@ -1425,6 +1945,14 @@ def train_manifest(
         attempts_root = Path(spec.output_dir)
         attempt_name = next_attempt_name(attempts_root)
         attempt_spec = replace(spec, run_name=attempt_name)
+        if spec.method == "a4":
+            warm_start = _resolve_a4_warm_start(manifest, raw)
+            attempt_spec = replace(attempt_spec, a4_warm_start=str(warm_start))
+            _update_manifest(
+                manifest_path,
+                spec.run_id,
+                a4_warm_start=str(warm_start),
+            )
         run_dir = attempts_root / attempt_name
         results = run_dir / "results.json"
         _update_manifest(
@@ -1490,16 +2018,20 @@ def train_manifest(
         shutil.copy2(config, provenance_dir / "materialized_stage.yaml")
         shutil.copy2(runtime_config, provenance_dir / "materialized_runtime.yaml")
         meta = _read_json(run_dir / "meta.json")
-        realized_order = meta.get("runtime_data", {}).get("task_order")
-        if not realized_order:
-            raise RuntimeError(
-                f"{spec.run_id}: meta.json has no runtime_data.task_order"
+        if spec.method == "a4":
+            realized_order = []
+            realized_id = spec.run_id + "-a4"
+        else:
+            realized_order = meta.get("runtime_data", {}).get("task_order")
+            if not realized_order:
+                raise RuntimeError(
+                    f"{spec.run_id}: meta.json has no runtime_data.task_order"
+                )
+            realized_id = spec.run_id + "-tasks-" + fingerprint(realized_order)[:12]
+            condition["task_order"] = list(realized_order)
+            condition["heldout_tasks"] = sorted(
+                meta["runtime_data"].get("heldout_tasks", spec.heldout_tasks)
             )
-        realized_id = spec.run_id + "-tasks-" + fingerprint(realized_order)[:12]
-        condition["task_order"] = list(realized_order)
-        condition["heldout_tasks"] = sorted(
-            meta["runtime_data"].get("heldout_tasks", spec.heldout_tasks)
-        )
         condition.pop("condition_sha256", None)
         condition["condition_sha256"] = fingerprint(condition)
         _update_manifest(
@@ -1537,6 +2069,24 @@ def train_manifest(
             run_dir=str(run_dir),
             finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
+        if (
+            a4_post_eval
+            and spec.method == "a4"
+            and a4_probes is not None
+        ):
+            post_eval_dir = _run_a4_post_eval(
+                output_dir=output_dir,
+                run_id=spec.run_id,
+                run_dir=run_dir,
+                probes=a4_probes,
+                native_library=a4_native_library,
+                skip_latency=a4_skip_latency,
+            )
+            _update_manifest(
+                manifest_path,
+                spec.run_id,
+                a4_post_eval_dir=str(post_eval_dir),
+            )
         completed_manifest = _read_json(manifest_path)
         for row in completed_manifest["runs"]:
             if row.get("planned_run_id") == spec.run_id:
@@ -1545,6 +2095,34 @@ def train_manifest(
 
 
 def _result_record(raw: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+    if run.get("method") == "a4":
+        validation = raw.get("validation", {})
+        test = raw.get("test", {})
+        return {
+            "run_id": run["run_id"],
+            "method": "a4",
+            "seed": run["seed"],
+            "k": None,
+            "rank": run.get("rank", 16),
+            "protocol": "a4",
+            "task_order": [],
+            "heldout_tasks": [],
+            "condition_sha256": run.get("condition_sha256"),
+            "domains": ["a4"],
+            "final_mean_loss": validation.get("loss"),
+            "final_mean_ppl": validation.get("ppl"),
+            "final_test_mean_loss": test.get("loss") if test else None,
+            "final_test_mean_ppl": test.get("ppl") if test else None,
+            "loss_matrix": [],
+            "perplexity_matrix": [],
+            "mean_forgetting": None,
+            "steps": raw.get("updates"),
+            "tokens": validation.get("tokens"),
+            "mean_step_time": raw.get("training_step_mean_ms"),
+            "params_unchanged": None,
+            "results": run.get("results"),
+            "heldout_transfer": None,
+        }
     test = raw.get("test", {})
     domains = raw.get("domains", [])
     losses = raw.get("loss", [])
@@ -1662,6 +2240,10 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                 "evaluation_output_dir": str(
                     output_dir / "evaluation_artifacts" / run["run_id"]
                 ),
+                "a4_post_eval_dir": run.get(
+                    "a4_post_eval_dir",
+                    str(output_dir / "a4_post_eval" / run.get("planned_run_id", run["run_id"])),
+                ),
             }
             deployed = _load_deployed_metrics(evaluation_run, raw_result)
             record["deployed_evaluation"] = deployed
@@ -1742,7 +2324,7 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
         "domains": manifest.get("domains", []),
         # A saved manifest may predate a metric replacement. Describe this
         # evaluation, without rewriting the immutable training plan.
-        "measured_metrics": list(MEASURED_METRICS),
+        "measured_metrics": list(REPORTED_METRICS),
         "evaluator_sha256": sha256_file(Path(__file__)),
         "config_fingerprints": fingerprints,
         "records": records,
@@ -1808,7 +2390,7 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
             if row.get("status") == "measured"
         ]
     else:
-        value = None
+        value = deployed.get("a4", {}).get("symbolic", {}).get(metric)
     return _numeric_values(value)
 
 
@@ -1827,6 +2409,13 @@ def measurement_reason(record: dict[str, Any], metric: str) -> str:
         return (
             "Requires a matched rank sweep with positive reference improvement: "
             + str(record.get("compressibility_status", "unavailable"))
+        )
+    if metric.startswith("a4_"):
+        return str(
+            record.get("deployed_evaluation", {})
+            .get("a4", {})
+            .get("symbolic_reason")
+            or "A4 symbolic measurement was not recorded."
         )
     return str(
         record.get("deployed_evaluation", {})
@@ -1955,7 +2544,7 @@ def _select_headline_cohort(
             for record in valid
             if _condition_key(record) == condition
         }
-        if set(METHODS) <= methods:
+        if {"a1", "a2", "a3"} <= methods:
             candidates.append(condition)
     if not candidates:
         return None
@@ -1981,8 +2570,9 @@ def _select_headline_cohort(
         heldout=heldout,
     )
     selected_k = selection["selected_k"]
+    comparison_methods = ("a1", "a2", "a3")
     method_records = {}
-    for method in METHODS:
+    for method in comparison_methods:
         rows = [
             record
             for record in valid
@@ -1991,13 +2581,13 @@ def _select_headline_cohort(
             and (method != "a3" or record.get("k") == selected_k)
         ]
         method_records[method] = tuple(rows)
-    seed_sets = [{int(row["seed"]) for row in method_records[m]} for m in METHODS]
+    seed_sets = [{int(row["seed"]) for row in method_records[m]} for m in comparison_methods]
     common = set.intersection(*seed_sets) if all(seed_sets) else set()
     matched = []
     for seed in sorted(common):
         fingerprints = {
             row.get("runtime_data_sha256")
-            for method in METHODS
+            for method in comparison_methods
             for row in method_records[method]
             if int(row["seed"]) == seed
         }
@@ -2023,7 +2613,7 @@ def _metric_samples(
     cohort: HeadlineCohort, metric: str
 ) -> dict[str, list[tuple[int, float]]]:
     by_seed: dict[str, dict[int, float]] = {}
-    for method in METHODS:
+    for method in ("a1", "a2", "a3"):
         samples = {}
         for record in cohort.records[method]:
             seed = int(record["seed"])
@@ -2033,7 +2623,8 @@ def _metric_samples(
             if values:
                 samples[seed] = float(np.mean(values))
         by_seed[method] = samples
-    seed_sets = [set(by_seed[method]) for method in METHODS]
+    by_seed["a4"] = {}
+    seed_sets = [set(by_seed[method]) for method in ("a1", "a2", "a3")]
     common = set.intersection(*seed_sets) if all(seed_sets) else set()
     return {
         method: [(seed, by_seed[method][seed]) for seed in sorted(common)]
@@ -2068,7 +2659,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
     parser.add_argument("--runtime-source")
+    parser.add_argument("--a4-train-sources", type=Path)
+    parser.add_argument("--a4-validation-sources", type=Path)
+    parser.add_argument("--a4-alignment-labels", type=Path)
+    parser.add_argument("--a4-patterns", type=Path)
+    parser.add_argument("--a4-embeddings", type=Path)
+    parser.add_argument("--a4-test-sources", type=Path)
+    parser.add_argument(
+        "--a4-retrieval-backend", choices=("native", "tcp"), default="native"
+    )
+    parser.add_argument("--a4-native-library", type=Path)
+    parser.add_argument("--a4-post-eval", action="store_true")
+    parser.add_argument("--a4-probes", type=Path)
+    parser.add_argument("--a4-skip-latency", action="store_true")
+    parser.add_argument("--a4-mork-url", default="http://127.0.0.1:18000")
+    parser.add_argument("--a4-retrieval-host", default="127.0.0.1")
+    parser.add_argument("--a4-retrieval-port", type=int, default=19091)
     args = parser.parse_args(argv)
+    if args.a4_post_eval:
+        if "a4" not in (args.methods or METHODS):
+            parser.error("--a4-post-eval requires a4 in --methods")
+        if args.a4_probes is None or not args.a4_probes.is_file():
+            parser.error("--a4-probes must be an existing path when --a4-post-eval is set")
     output_dir = args.output_dir.resolve()
     profiles = {
         "smoke": ([0], [16], [4], ["sequential"]),
@@ -2081,6 +2693,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     }
     seeds, ranks, ks, protocols = profiles[args.profile]
+    a4_inputs = {
+        "a4_train_sources": str(args.a4_train_sources)
+        if args.a4_train_sources
+        else None,
+        "a4_validation_sources": str(args.a4_validation_sources)
+        if args.a4_validation_sources
+        else None,
+        "a4_alignment_labels": str(args.a4_alignment_labels)
+        if args.a4_alignment_labels
+        else None,
+        "a4_patterns": str(args.a4_patterns) if args.a4_patterns else None,
+        "a4_embeddings": str(args.a4_embeddings) if args.a4_embeddings else None,
+        "a4_test_sources": str(args.a4_test_sources) if args.a4_test_sources else None,
+        "a4_retrieval_backend": args.a4_retrieval_backend,
+        "a4_native_library": (
+            str(args.a4_native_library) if args.a4_native_library else None
+        ),
+        "a4_mork_url": args.a4_mork_url,
+        "a4_retrieval_host": args.a4_retrieval_host,
+        "a4_retrieval_port": args.a4_retrieval_port,
+    }
     manifest_path = output_dir / "manifest.json"
     if args.command == "plan" or args.command == "run" and not manifest_path.is_file():
         manifest = make_manifest(
@@ -2096,6 +2729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile=args.profile,
             runtime_config=args.runtime_config,
             runtime_source=args.runtime_source,
+            a4_inputs=a4_inputs,
         )
         print(f"Planned {len(manifest['runs'])} runs: {manifest_path}", flush=True)
     elif args.command == "run":
@@ -2104,8 +2738,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             flush=True,
         )
     if args.command in {"run", "train"}:
-        train_manifest(output_dir, resume=not args.no_resume, epochs=args.epochs)
+        train_manifest(
+            output_dir,
+            resume=not args.no_resume,
+            epochs=args.epochs,
+            a4_post_eval=args.a4_post_eval,
+            a4_probes=args.a4_probes,
+            a4_native_library=args.a4_native_library,
+            a4_skip_latency=args.a4_skip_latency,
+        )
         print(f"Training complete: {output_dir}", flush=True)
+    if args.command == "eval" and args.a4_post_eval:
+        manifest = _read_json(manifest_path)
+        for row in manifest.get("runs", []):
+            if row.get("method") != "a4" or row.get("status") != "complete":
+                continue
+            run_dir = Path(row.get("run_dir", ""))
+            if run_dir.is_dir():
+                post_eval_dir = _run_a4_post_eval(
+                    output_dir=output_dir,
+                    run_id=row.get("planned_run_id", row.get("run_id", "a4")),
+                    run_dir=run_dir,
+                    probes=args.a4_probes,
+                    native_library=args.a4_native_library,
+                    skip_latency=args.a4_skip_latency,
+                )
+                _update_manifest(
+                    manifest_path,
+                    row.get("planned_run_id", row.get("run_id", "a4")),
+                    a4_post_eval_dir=str(post_eval_dir),
+                )
     if args.command in {"run", "eval"}:
         evaluation = evaluate_manifest(output_dir)
         print(

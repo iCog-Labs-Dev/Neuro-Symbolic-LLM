@@ -54,7 +54,7 @@ def _realized_task_orders(records: list[dict[str, Any]]) -> str:
     return "; ".join(_format_task_order(list(order)) for order in orders) or "N/A"
 
 
-def _comparison_table(cohort, specs) -> list[str]:
+def _comparison_table(cohort, specs, records: list[dict[str, Any]] | None = None) -> list[str]:
     labels = [label for label, _, _ in specs]
     lines = [
         f"| Method | {' | '.join(labels)} |",
@@ -68,11 +68,27 @@ def _comparison_table(cohort, specs) -> list[str]:
         )
         for _, key, _ in specs
     }
+    if records is not None:
+        for _, key, _ in specs:
+            metric_samples[key]["a4"] = [
+                (int(record.get("seed", 0)), value)
+                for record in records
+                if record.get("method") == "a4"
+                for value in metric_values_for_record(
+                    record, key, int(record.get("rank", 16))
+                )
+            ]
     for method in METHODS:
-        cells = [
-            _cell([value for _, value in metric_samples[key][method]])
-            for _, key, _ in specs
-        ]
+        cells = []
+        for _, key, _ in specs:
+            cell = _cell([value for _, value in metric_samples[key][method]])
+            if (
+                method == "a4"
+                and key == "residual_direction_redundancy"
+                and cell != "N/A"
+            ):
+                cell += " — inherited from frozen A3 residual"
+            cells.append(cell)
         lines.append(f"| {method.upper()} | {' | '.join(cells)} |")
     lines.append("")
     return lines
@@ -125,6 +141,30 @@ def _figure_notice() -> list[str]:
     ]
 
 
+def _a4_detail_table(records: list[dict[str, Any]]) -> list[str]:
+    rows = []
+    for record in records:
+        if record.get("method") != "a4":
+            continue
+        detail = record.get("deployed_evaluation", {}).get("a4", {}).get(
+            "symbolic_detail", {}
+        )
+        for label, value in detail.items():
+            rows.append(f"| {_safe_text(label)} | {_cell([float(value)])} |")
+    if not rows:
+        rows.append(
+            "| N/A | N/A — post-hoc A4 evaluation was not run or produced no result |"
+        )
+    return [
+        "## A4 Symbolic Stage Metrics",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        *rows,
+        "",
+    ]
+
+
 def report_manifest(
     output_dir: Path, report_rank: int = 16, report_dir: Path | str | None = None
 ) -> Path:
@@ -152,7 +192,7 @@ def report_manifest(
         "",
     ]
     if cohort is None or not cohort.matched_seeds:
-        lines += ["No complete matched A1/A2/A3 cohort is available.", ""]
+        lines += ["No complete matched A1/A2/A3 cohort is available; A4 is reported independently.", ""]
     else:
         lines += [
             f"Selected A3 K: {cohort.selected_k}. Selection rule: {cohort.selection['rule']}",
@@ -166,7 +206,7 @@ def report_manifest(
         lines += [
             f"## {category} Metrics",
             "",
-            *_comparison_table(cohort, specs),
+            *_comparison_table(cohort, specs, records),
         ]
     lines += [
         "Measurement notes: task-gradient conflict uses fixed task-specific training "
@@ -192,6 +232,8 @@ def report_manifest(
             "",
             *_figure_notice(),
         ]
+        if method == "a4":
+            content[4:4] = _a4_detail_table(records)
         path.write_text("\n".join(content) + "\n", encoding="utf-8")
         reports[method] = path
     report = destination / "REPORT.md"
@@ -205,7 +247,11 @@ def report_manifest(
         destination / "metrics.json",
         {
             "metrics": [
-                key for _, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
+                key
+                for _, key, _ in (
+                    INTERNAL_METRIC_SPECS
+                    + EXTERNAL_METRIC_SPECS
+                )
             ],
             "runs": [
                 {
@@ -225,7 +271,10 @@ def report_manifest(
                                 else measurement_reason(row, key)
                             ),
                         }
-                        for _, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
+                        for _, key, _ in (
+                            INTERNAL_METRIC_SPECS
+                            + EXTERNAL_METRIC_SPECS
+                        )
                     },
                 }
                 for row in records
@@ -302,8 +351,8 @@ def _write_dashboard(
         sections.append(f'<section id="{label.lower()}">{"".join(blocks)}</section>')
     banner = "Measured benchmark outputs. Missing measurements are shown as N/A."
     page = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-    page += "<title>A1 / A2 / A3 benchmark</title><style>body{margin:0;background:#f3f6fb;color:#142338;font:16px system-ui}header,main{max-width:1280px;margin:auto;padding:28px}header{background:#142338;color:white}nav{display:flex;gap:24px;flex-wrap:wrap}nav a{color:#b9d9ff}section{background:white;margin:24px 0;padding:24px;border-radius:12px}img{width:100%;height:auto;margin:16px 0}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #d9e2ee}th{background:#eaf1fb}code{overflow-wrap:anywhere}p{line-height:1.6;overflow-wrap:anywhere}</style>"
-    page += f'<header><h1>A1 / A2 / A3 benchmark</h1><p>{html.escape(banner)}</p><nav><a href="#comparison">Comparison</a><a href="#a1">A1</a><a href="#a2">A2</a><a href="#a3">A3</a></nav></header><main>{"".join(sections)}</main></html>'
+    page += "<title>A1 / A2 / A3 / A4 benchmark</title><style>body{margin:0;background:#f3f6fb;color:#142338;font:16px system-ui}header,main{max-width:1280px;margin:auto;padding:28px}header{background:#142338;color:white}nav{display:flex;gap:24px;flex-wrap:wrap}nav a{color:#b9d9ff}section{background:white;margin:24px 0;padding:24px;border-radius:12px}img{width:100%;height:auto;margin:16px 0}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:10px;border-bottom:1px solid #d9e2ee}th{background:#eaf1fb}code{overflow-wrap:anywhere}p{line-height:1.6;overflow-wrap:anywhere}</style>"
+    page += f'<header><h1>A1 / A2 / A3 / A4 benchmark</h1><p>{html.escape(banner)}</p><nav><a href="#comparison">Comparison</a><a href="#a1">A1</a><a href="#a2">A2</a><a href="#a3">A3</a><a href="#a4">A4</a></nav></header><main>{"".join(sections)}</main></html>'
     path = destination / "index.html"
     path.write_text(page, encoding="utf-8")
     return path

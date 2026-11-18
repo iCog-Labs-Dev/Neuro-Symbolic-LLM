@@ -43,7 +43,7 @@ replays the materialized runtime YAML and realized order. The `heldout` protocol
 requires explicit `--heldout-task`; `commutator` requires explicit `--task-order`.
 No names are guessed, including in stories mode.
 
-## Exactly 13 reported metrics
+## Shared metrics plus A4 symbolic metrics
 
 No benchmark scores are embedded here. Evidence descriptions below specify
 implemented measurements, not claims that a model run has succeeded.
@@ -63,12 +63,20 @@ implemented measurements, not claims that a model run has succeeded.
 | External | On-domain KL drift | Final checkpoint versus frozen base on loader-provided held-out test batches. |
 | External | Token accuracy | Correct next-token predictions using the shared masked-token formula on test batches. |
 | External | Calibration ECE | Shared calibration bins pooled over test batches within each dataset. |
+| Internal | Representation fracture | A4 representation diagnostic; A1-A3 are N/A. |
+| Internal | Mean off-diagonal overlap | A4 factor-organization diagnostic; A1-A3 are N/A. |
+| Internal | Bank-key mean absolute cosine | A4 fixed-bank geometry diagnostic; A1-A3 are N/A. |
+| Internal | Query silhouette | A4 query-cluster diagnostic; A1-A3 are N/A. |
+| Internal | Capacity sensitivity delta recall @8 | Range of implemented A4 capacity-control positive macro recall values at depth 8; N/A when controls are absent. |
+| Internal | A4 latency means and p95 | A4 latency contract values for step, CPU index, communication, transfer-only copy, full bridge p95, and communication p95. |
+| External | A4 retrieval precision and recall @1/@4/@8/@16 | A4 positive-only macro/micro precision and recall at the listed depths; A1-A3 are N/A. |
 
 Missing measurements are N/A with reasons. Checkpoint metrics are aggregated
 across dataset values in report tables. Token accuracy is a language-model measure,
 not classification or story-ending task accuracy. Reports also show the token
-accuracy breakdown for each dataset. Reports compare A1/A2/A3 only
-on matching conditions and data fingerprints. A3 K selection uses validation
+accuracy breakdown for each dataset. Reports compare A1/A2/A3 on matching conditions and data fingerprints, and
+include A4 as an independently reported fourth stage, with A4 symbolic metrics added
+as columns to the existing Internal and External tables. A3 K selection uses validation
 loss on common seeds/data across K; test values do not select K. Operational
 scores are excluded; `params_unchanged` remains a run-validity field.
 
@@ -128,6 +136,62 @@ Smoke and headline profiles have one rank (16), so compressibility is explicitly
 N/A. Pass `--ranks 4 16` or a wider sweep to measure it. The full profile uses
 ranks 1, 2, 4, 8, 16, 32, 64, but also requests named heldout and commutator
 protocols: supply their names or use `--protocols sequential joint`. Rank
+
+## A4 integration and metric evidence
+
+A4 is planned after A3 and is launched only through
+`experiments/run_stage_a4.py`. Its command receives only that runner's accepted
+artifact and retrieval options; it does not receive runtime-dataset, task-order,
+held-out-task, protocol, or A2-arm flags. A4 uses the completed same-seed A3
+`params/task_*.npz` checkpoint as its warm start. Because the A4 runner has no
+seed override, the benchmark plans one A4 run using the first selected seed.
+
+The shared metric inventory is:
+
+| Metric | A4 evidence | A1/A2/A3 |
+|---|---|---|
+| Validation loss, perplexity | `results.json` `validation.loss` / `validation.ppl` | Computed by the shared evaluator |
+| Held-out test loss, perplexity | `results.json` `test.loss` / `test.ppl` when `--test-sources` is supplied | Computed by the shared evaluator |
+| Validation-loss forgetting | N/A: A4 has no task sequence | Shared runner output |
+| On-domain KL drift, token accuracy | Measured from `metrics/a4` representation reports on source-disjoint probe windows (`kl_base_to_model`, `next_token_accuracy`) | Shared evaluator |
+| Calibration ECE | N/A: A4 representation probes do not emit calibration bins | Shared evaluator |
+| Residual compressibility, task-gradient conflict, ablation metrics | N/A: A4 has no shared A1-A3 task/rank sweep or ablation protocol | Shared evaluator |
+| Residual direction redundancy | Computed without a forward pass from `params/a3-frozen.npz`; labeled as inherited from the frozen A3 residual | Shared evaluator |
+
+A4-specific retrieval, representation, and latency measurements remain the
+real outputs of `metrics/a4` and are included as columns in the existing
+Internal/External comparison tables when their completed `result.json` artifacts
+are present. Other implemented values (hit rate, MRR, key alignment NLL, value
+squared error, writeback ratios, and ANN exact-ID agreement) appear only in the
+A4 stage-specific report. A1-A3 show N/A for A4-only metrics with explicit
+reasons. Values are aggregated only from recorded A4 result artifacts; they are
+not recomputed or approximated. Missing optional diagnostic artifacts render as
+N/A with their reason; no missing value is converted to `None`, `NaN`, or a
+fabricated aggregate.
+
+Example (replace paths with real, source-disjoint artifacts):
+
+```bash
+python -m benchmark.benchmark run --methods a1 a2 a3 a4 --seeds 0 \
+  --a4-train-sources path/to/train.jsonl \
+  --a4-validation-sources path/to/validation.jsonl \
+  --a4-alignment-labels path/to/alignment.json \
+  --a4-patterns path/to/patterns.json \
+  --a4-embeddings path/to/embeddings.npy \
+  --a4-test-sources path/to/test.jsonl \
+  --a4-native-library path/to/libmork_native.so \
+  --output-dir runs/benchmark-a4
+python -m benchmark.summary --output-dir runs/benchmark-a4 --report-dir docs/stage_A_results
+python -m benchmark.visualization --output-dir runs/benchmark-a4 --report-dir docs/stage_A_results
+```
+
+For post-run diagnostics, add `--a4-post-eval --a4-probes path/to/probes`.
+Optionally add `--a4-skip-latency` or `--a4-native-library PATH`. Diagnostics
+are written outside immutable A4 run directories under
+`<output-dir>/a4_post_eval/<run_id>/`; individual failures are recorded as N/A
+and do not fail the benchmark.
+
+To supply protocol names, use `--protocols sequential joint`. Rank
 comparisons match method, seed, K, protocol, realized order, held-out set and
 runtime data fingerprint.
 
