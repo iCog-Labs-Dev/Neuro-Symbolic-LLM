@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -316,21 +317,69 @@ def run_cli(
     command: list[str],
     *,
     accepted_returncodes: tuple[int, ...] = (0,),
+    progress_total: int | None = None,
 ) -> int:
-    """Run a project CLI and stream its output directly."""
+    """Run a project CLI and optionally display teacher extraction progress."""
 
     print("\n$ " + " ".join(command), flush=True)
 
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=False,
+    progress_pattern = re.compile(
+        r"Processed (\d+) records \| accepted=(\d+) rejected=(\d+)"
     )
 
-    if result.returncode not in accepted_returncodes:
-        raise RuntimeError(f"Command failed with exit code {result.returncode}.")
+    process = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
 
-    return result.returncode
+    assert process.stdout is not None
+    last_progress = None
+
+    for line in process.stdout:
+        match = progress_pattern.search(line)
+
+        if match is not None and progress_total is not None:
+            processed = int(match.group(1))
+            accepted = int(match.group(2))
+            rejected = int(match.group(3))
+            last_progress = (processed, accepted, rejected)
+
+            percentage = (
+                min(processed / progress_total * 100.0, 100.0)
+                if progress_total > 0
+                else 100.0
+            )
+
+            print(
+                f"\rTeacher extraction: {processed}/{progress_total} "
+                f"({percentage:.1f}%) | "
+                f"Accepted: {accepted} | Rejected: {rejected}",
+                end="\n" if processed >= progress_total else "",
+                flush=True,
+            )
+        else:
+            print(line, end="", flush=True)
+
+    returncode = process.wait()
+
+    if progress_total is not None and last_progress is not None:
+        processed, accepted, rejected = last_progress
+        if processed < progress_total and returncode in accepted_returncodes:
+            percentage = processed / progress_total * 100.0 if progress_total else 100.0
+            print(
+                f"\nTeacher extraction last reported: {processed}/{progress_total} "
+                f"({percentage:.1f}%) | Accepted: {accepted} | Rejected: {rejected}",
+                flush=True,
+            )
+
+    if returncode not in accepted_returncodes:
+        raise RuntimeError(f"Command failed with exit code {returncode}.")
+
+    return returncode
 
 
 def semantic_command(args: argparse.Namespace) -> list[str]:
@@ -441,7 +490,13 @@ def prepare_dataset(
     config_id = dataset_config_fingerprint(config, source)
     previous = load_manifest(manifest_path)
 
-    config_matches = previous is None or previous.get("config_fingerprint") == config_id
+    # Without a manifest, the existing dataset cannot be proven compatible.
+    config_matches = (
+        previous is not None
+        and previous.get("config_fingerprint") == config_id
+        and previous.get("source_sha256") == file_sha256(prepared_path)
+        and previous.get("records") == existing_count
+    )
 
     if (
         not args.force
@@ -648,20 +703,39 @@ def validate_teacher_artifacts(
         return False, set()
 
 
+def fingerprint_files(paths: list[Path]) -> dict[str, str]:
+    """Hash existing files using repository-relative names."""
+    return {
+        str(path.relative_to(REPO_ROOT)): file_sha256(path)
+        for path in sorted(set(paths))
+        if path.is_file()
+    }
+
+
+def files_under(directory: Path, suffixes: tuple[str, ...]) -> list[Path]:
+    """Return source/config files under a directory in stable order."""
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in suffixes
+    )
+
+
 def teacher_fingerprint(args: argparse.Namespace) -> str:
+    """Invalidate teacher results when parser code/configuration changes."""
     paths = [
         resolve_path(args.model_config),
-        REPO_ROOT / "parser/semantic/catalog_prompt.py",
+        resolve_path(args.ontology_bundle),
+        *files_under(REPO_ROOT / "parser/semantic", (".py", ".yaml", ".yml")),
+        *files_under(REPO_ROOT / "parser/ontology", (".py", ".yaml", ".yml")),
         REPO_ROOT / "configs/parser_config/general_prompt.yaml",
         REPO_ROOT / "configs/parser_config/discourse_prompt.yaml",
         REPO_ROOT / "configs/parser_config/parser_prompt.yaml",
-        *sorted((REPO_ROOT / "parser/ontology").rglob("*.yaml")),
     ]
-
-    values = {str(path.relative_to(REPO_ROOT)): file_sha256(path) for path in paths}
-
+    values = fingerprint_files(paths)
     values["profile"] = args.profile
-
     return fingerprint(values)
 
 
@@ -821,6 +895,240 @@ def merge_teacher_artifacts(
 # ---------------------------------------------------------------------
 
 
+def interrupted_teacher_checkpoint_matches(
+    run_dir: Path,
+    prepared_path: Path,
+) -> bool:
+    """Check whether an interrupted teacher export can be resumed safely."""
+
+    checkpoint = run_dir / "documents.jsonl.checkpoint.json"
+
+    if not checkpoint.is_file():
+        return False
+
+    try:
+        state = load_manifest(checkpoint)
+
+        if state is None:
+            return False
+
+        identity = state.get("identity", {})
+
+        expected_outputs = {
+            name: str(output.resolve())
+            for name, output in teacher_paths(run_dir).items()
+        }
+
+        if identity.get("source_sha256") != file_sha256(prepared_path):
+            return False
+
+        if identity.get("source_path") != str(prepared_path.resolve()):
+            return False
+
+        if identity.get("outputs") != expected_outputs:
+            return False
+
+        if state.get("complete") is not False:
+            return False
+
+        for field in ("line_number", "accepted", "rejected"):
+            value = state.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                return False
+
+        expected_files = set(expected_outputs)
+        if set(state.get("files", {})) != expected_files:
+            return False
+
+        for name in expected_files:
+            partial = run_dir / (teacher_paths(run_dir)[name].name + ".partial")
+
+            if not partial.is_file():
+                return False
+
+        return True
+
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def restore_verified_teacher_from_recovery(
+    args: argparse.Namespace,
+    source_name: str,
+    prepared_path: Path,
+    output_dir: Path,
+) -> bool:
+    """Restore the newest complete teacher extraction matching the current contract."""
+    from parser.ontology.catalog import load_manifest_catalog
+    from parser.semantic.catalog_prompt import (
+        _discourse_catalog_guide,
+        _load_prompt_config,
+        _prompt_fingerprint,
+        build_catalog_document_prompt,
+        build_router_prompt,
+    )
+    from parser.semantic.model_config import load_model_profile
+    from parser.semantic.semantic_parser import PARSER_VERSION
+
+    run_dir = output_dir / "parser_e2e"
+    recovery_root = output_dir / "recovery"
+
+    _, source_index = load_source_records(prepared_path, source_name)
+    expected_keys = set(source_index)
+
+    if not expected_keys:
+        raise ValueError("No source records available for teacher recovery.")
+
+    profile = load_model_profile(
+        resolve_path(args.model_config),
+        profile_name=args.profile,
+    )
+    catalog, _ = load_manifest_catalog(resolve_path(args.ontology_bundle))
+
+    router_version = build_router_prompt("compatibility check").version
+    general_version = build_catalog_document_prompt(
+        "compatibility check",
+        catalog=catalog,
+    ).version
+
+    discourse_version, discourse_template = _load_prompt_config(
+        REPO_ROOT / "configs/parser_config/discourse_prompt.yaml",
+        "discourse",
+    )
+
+    discourse_guidance = discourse_template.replace(
+        "{discourse_catalog_guide}",
+        _discourse_catalog_guide(catalog),
+    ).strip()
+
+    discourse_version = (
+        f"{discourse_version}+sha256." f"{_prompt_fingerprint(discourse_guidance)}"
+    )
+
+    accepted_prompt_versions = {
+        f"{router_version}|{general_version}",
+        f"{router_version}|{general_version}|{discourse_version}",
+    }
+
+    expected_ontology_versions = list(catalog.versions)
+
+    def is_compatible(candidate: Path) -> bool:
+        valid, keys = validate_teacher_artifacts(candidate, source_name)
+
+        if not valid or keys != expected_keys:
+            return False
+
+        observed = set()
+
+        try:
+            for record in read_jsonl(candidate / "documents.jsonl"):
+                result = SemanticParseResult.model_validate(record)
+                document = result.document
+                key = (document.corpus_id, document.document_id)
+
+                if key not in source_index or key in observed:
+                    return False
+
+                _, _, expected_text, expected_context = source_record(
+                    source_index[key],
+                    jsonl=True,
+                    corpus_id=source_name,
+                )
+
+                if document.source_text != expected_text:
+                    return False
+
+                provenance = record.get("provenance", {})
+
+                if (
+                    provenance.get("provider") != profile.provider
+                    or provenance.get("model") != profile.model
+                    or provenance.get("parser_version") != PARSER_VERSION
+                    or provenance.get("prompt_version") not in accepted_prompt_versions
+                    or provenance.get("ontology_versions") != expected_ontology_versions
+                ):
+                    return False
+
+                observed.add(key)
+
+            for record in read_jsonl(candidate / "rejected.jsonl"):
+                raw_line = record.get("raw_line")
+
+                if not isinstance(raw_line, str):
+                    return False
+
+                key = source_identity(raw_line, source_name)
+
+                if key not in source_index or key in observed:
+                    return False
+
+                observed.add(key)
+
+            return observed == expected_keys
+
+        except (OSError, ValueError, KeyError, TypeError, ValidationError):
+            return False
+
+    candidates = [run_dir]
+
+    if recovery_root.is_dir():
+        candidates.extend(recovery_root.glob("*/parser_e2e"))
+
+    candidates = sorted(
+        {candidate for candidate in candidates if candidate.is_dir()},
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+
+    selected = next(
+        (candidate for candidate in candidates if is_compatible(candidate)),
+        None,
+    )
+
+    if selected is None:
+        return False
+
+    print(f"Verified teacher extraction: {selected}", flush=True)
+
+    if selected != run_dir:
+        if run_dir.exists():
+            archive_paths(
+                [run_dir],
+                "interrupted-run-before-teacher-restore",
+                recovery_root,
+            )
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        for _, destination in teacher_paths(run_dir).items():
+            shutil.copy2(selected / destination.name, destination)
+
+    valid, restored_keys = validate_teacher_artifacts(
+        run_dir,
+        source_name,
+    )
+
+    if not valid or restored_keys != expected_keys:
+        raise RuntimeError("Restored teacher artifacts failed validation.")
+
+    write_teacher_manifest(
+        output_dir / "teacher_manifest.json",
+        run_dir,
+        source_index,
+        teacher_fingerprint(args),
+    )
+
+    print(
+        f"Reusing teacher extraction: "
+        f"{count_jsonl(run_dir / 'documents.jsonl')} accepted, "
+        f"{count_jsonl(run_dir / 'rejected.jsonl')} rejected, "
+        f"{len(restored_keys)} total.",
+        flush=True,
+    )
+
+    return True
+
+
 def prepare_teacher(
     args: argparse.Namespace,
     source_name: str,
@@ -846,6 +1154,32 @@ def prepare_teacher(
     expected_fingerprint = teacher_fingerprint(args)
     current_source_fingerprints = source_fingerprints(current_index)
     previous = load_manifest(manifest_path)
+
+    # Recover complete, provenance-compatible teacher artifacts from
+    # previous runs before declaring the existing extraction incompatible.
+    if not args.force and restore_verified_teacher_from_recovery(
+        args,
+        source_name,
+        prepared_path,
+        output_dir,
+    ):
+        return None, True
+
+    # Resume an interrupted teacher export before considering archival.
+    if (
+        run_dir.exists()
+        and not args.force
+        and interrupted_teacher_checkpoint_matches(
+            run_dir,
+            prepared_path,
+        )
+    ):
+        print(
+            "Found compatible interrupted teacher extraction. "
+            "Resuming from its existing checkpoint.",
+            flush=True,
+        )
+        return prepared_path, True
 
     if run_dir.exists() and not args.force:
         valid, old_keys = validate_teacher_artifacts(
@@ -1126,6 +1460,14 @@ def student_training_fingerprint(
                 REPO_ROOT / "parser/student/student_prompt.py"
             ),
             "ontology_sha256": file_sha256(resolve_path(args.ontology_bundle)),
+            "student_code": fingerprint_files(
+                files_under(REPO_ROOT / "parser/student", (".py",))
+                + [
+                    REPO_ROOT / "parser/semantic/semantic_parser.py",
+                    REPO_ROOT / "parser/semantic/schema.py",
+                    REPO_ROOT / "parser/semantic/catalog_document_export.py",
+                ]
+            ),
         }
     )
 
@@ -1223,15 +1565,24 @@ def run_semantic_e2e(
             recovery_root,
         )
 
-    run_cli(
+    e2e_returncode = run_cli(
         e2e_command(
             args,
             run_dir,
             input_path=input_path,
             resume=resume,
             skip_training=compatible_student,
-        )
+        ),
+        accepted_returncodes=(0, 2),
+        progress_total=(count_jsonl(input_path) if input_path is not None else None),
     )
+
+    if e2e_returncode == 2:
+        print(
+            "WARNING: E2E completed, but some held-out test predictions "
+            "were invalid. Continuing with validated artifacts.",
+            flush=True,
+        )
 
     if not validate_teacher_artifacts(
         run_dir,
@@ -1261,6 +1612,58 @@ def run_semantic_e2e(
 # ---------------------------------------------------------------------
 # Stage 6: Full-dataset student inference
 # ---------------------------------------------------------------------
+
+
+def validate_inference_coverage(
+    parsed_path: Path,
+    rejected_path: Path,
+    expected_keys: set[tuple[str, str]],
+) -> tuple[int, int]:
+    """Require each source record to be accepted or rejected exactly once."""
+    if not valid_semantic_jsonl(parsed_path, allow_empty=True):
+        raise RuntimeError(f"Invalid student semantic output: {parsed_path}")
+    if not valid_jsonl(rejected_path, allow_empty=True):
+        raise RuntimeError(f"Invalid student rejection output: {rejected_path}")
+
+    observed: set[tuple[str, str]] = set()
+    accepted = 0
+    rejected = 0
+
+    for record in read_jsonl(parsed_path):
+        result = SemanticParseResult.model_validate(record)
+        key = (result.document.corpus_id, result.document.document_id)
+        if key in observed:
+            raise RuntimeError(f"Duplicate student inference result: {key}")
+        observed.add(key)
+        accepted += 1
+
+    for record in read_jsonl(rejected_path):
+        corpus_id = record.get("corpus_id")
+        document_id = record.get("document_id")
+        if not isinstance(corpus_id, str) or not isinstance(document_id, str):
+            raise RuntimeError("Student rejection missing corpus_id/document_id.")
+        key = (corpus_id, document_id)
+        if key in observed:
+            raise RuntimeError(
+                f"Record appears in accepted and rejected outputs: {key}"
+            )
+        observed.add(key)
+        rejected += 1
+
+    missing = expected_keys - observed
+    unexpected = observed - expected_keys
+    if missing or unexpected:
+        details = {
+            "missing_count": len(missing),
+            "unexpected_count": len(unexpected),
+            "missing_examples": sorted(missing)[:5],
+            "unexpected_examples": sorted(unexpected)[:5],
+        }
+        raise RuntimeError(
+            "Student inference coverage failed: "
+            + json.dumps(details, ensure_ascii=False)
+        )
+    return accepted, rejected
 
 
 def infer_records(
@@ -1355,7 +1758,6 @@ def run_student_inference(
     current_keys = set(source_index)
     current_source_fingerprints = source_fingerprints(source_index)
     model_hash = checkpoint_fingerprint(model_dir)
-
     previous = load_manifest(manifest_path)
 
     outputs_valid = valid_semantic_jsonl(parsed_path, allow_empty=True) and valid_jsonl(
@@ -1385,9 +1787,12 @@ def run_student_inference(
         and previous.get("parsed_sha256") == file_sha256(parsed_path)
         and previous.get("rejected_sha256") == file_sha256(rejected_path)
     ):
+        accepted, rejected = validate_inference_coverage(
+            parsed_path, rejected_path, current_keys
+        )
         print(
             f"Reusing completed student inference: "
-            f"{count_jsonl(parsed_path)} results",
+            f"{accepted} accepted | {rejected} rejected",
             flush=True,
         )
         return parsed_path
@@ -1422,6 +1827,23 @@ def run_student_inference(
         old_rejected = []
 
     if not new_keys:
+        accepted, rejected = validate_inference_coverage(
+            parsed_path, rejected_path, current_keys
+        )
+        write_manifest(
+            manifest_path,
+            {
+                "source_keys": sorted([list(key) for key in current_keys]),
+                "source_fingerprints": current_source_fingerprints,
+                "prepared_sha256": file_sha256(prepared_path),
+                "model_fingerprint": model_hash,
+                "parsed_sha256": file_sha256(parsed_path),
+                "rejected_sha256": file_sha256(rejected_path),
+                "accepted": accepted,
+                "rejected": rejected,
+                "updated_at": timestamp(),
+            },
+        )
         return parsed_path
 
     from parser.semantic.semantic_parser import DistilledSemanticParser
@@ -1466,8 +1888,9 @@ def run_student_inference(
             old_rejected + read_jsonl(new_rejected_path),
         )
 
-    if not valid_semantic_jsonl(parsed_path, allow_empty=True):
-        raise RuntimeError("Student inference produced invalid semantic documents.")
+    accepted, rejected = validate_inference_coverage(
+        parsed_path, rejected_path, current_keys
+    )
 
     write_manifest(
         manifest_path,
@@ -1478,8 +1901,8 @@ def run_student_inference(
             "model_fingerprint": model_hash,
             "parsed_sha256": file_sha256(parsed_path),
             "rejected_sha256": file_sha256(rejected_path),
-            "accepted": count_jsonl(parsed_path),
-            "rejected": count_jsonl(rejected_path),
+            "accepted": accepted,
+            "rejected": rejected,
             "updated_at": timestamp(),
         },
     )
@@ -1652,6 +2075,65 @@ def run_adapter(
 # ---------------------------------------------------------------------
 
 
+def directory_size(path: Path) -> int:
+    """Return total size in bytes for a file or directory tree."""
+    if path.is_file():
+        return path.stat().st_size
+    if not path.is_dir():
+        return 0
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+
+def format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def storage_artifacts(
+    prepared_path: Path,
+    output_dir: Path,
+    run_dir: Path,
+    parsed_path: Path,
+) -> dict[str, dict[str, Any]]:
+    paths = {
+        "prepared_dataset": prepared_path,
+        "teacher_documents": run_dir / "documents.jsonl",
+        "teacher_rejected": run_dir / "rejected.jsonl",
+        "student_pairs": run_dir / "pairs.jsonl",
+        "train_split": run_dir / "splits" / "train.jsonl",
+        "validation_split": run_dir / "splits" / "validation.jsonl",
+        "test_split": run_dir / "splits" / "test.jsonl",
+        "student_checkpoint": run_dir / "student",
+        "student_inference": parsed_path,
+        "student_rejections": output_dir / "parser_rejected.jsonl",
+        "miner_documents": output_dir / "miner_documents.jsonl",
+        "adapter_rejections": output_dir / "adapter_rejected.jsonl",
+        "recovery_archive": output_dir / "recovery",
+    }
+    return {
+        name: {
+            "path": str(path),
+            "exists": path.exists(),
+            "size_bytes": directory_size(path),
+        }
+        for name, path in paths.items()
+    }
+
+
+def print_storage_report(artifacts: dict[str, dict[str, Any]]) -> None:
+    print("\nPersistent offline artifacts:")
+    for name, details in artifacts.items():
+        status = "present" if details["exists"] else "not present"
+        print(
+            f"  {name}: {status} | {format_bytes(details['size_bytes'])} "
+            f"| {details['path']}"
+        )
+
+
 def write_summary(
     output_dir: Path,
     source_name: str,
@@ -1661,10 +2143,12 @@ def write_summary(
     adapter_accepted: int,
     adapter_rejected: int,
 ) -> dict[str, Any]:
+    artifacts = storage_artifacts(prepared_path, output_dir, run_dir, parsed_path)
     summary = {
         "source": source_name,
         "pipeline": "offline_teacher_student_to_miner_adapter",
         "updated_at": timestamp(),
+        "storage": artifacts,
         "paths": {
             "prepared_dataset": str(prepared_path),
             "teacher_documents": str(run_dir / "documents.jsonl"),
@@ -1762,8 +2246,14 @@ def run_source(
     if args.skip_parsing:
         parsed_path = output_dir / "parsed_documents.jsonl"
 
-        if not valid_semantic_jsonl(parsed_path):
+        if not valid_semantic_jsonl(parsed_path, allow_empty=True):
             raise FileNotFoundError(f"Completed inference not found: {parsed_path}")
+        _, source_index = load_source_records(prepared_path, source_name)
+        validate_inference_coverage(
+            parsed_path,
+            output_dir / "parser_rejected.jsonl",
+            set(source_index),
+        )
     else:
         parsed_path = run_student_inference(
             args,
@@ -1793,6 +2283,7 @@ def run_source(
 
     print(f"\nCompleted dataset: {source_name}")
     print(json.dumps(summary["counts"], indent=2))
+    print_storage_report(summary["storage"])
 
     return {
         "source": source_name,
@@ -1983,6 +2474,21 @@ def main() -> int:
         print(f"{name}: {value}")
 
     print(f"Summary: {summary_path}")
+    print("\nPersistent storage locations:")
+    print(f"  Prepared datasets: {resolve_path(args.data_dir)}")
+    print(f"  Symbolic outputs:  {output_root}")
+    for source in sources:
+        dataset_output = output_root / source["name"]
+        print(f"\n  Dataset: {source['name']}")
+        print(f"    Total output size: {format_bytes(directory_size(dataset_output))}")
+        print(f"    Details: {dataset_output / 'summary.json'}")
+    print(
+        f"\nTotal prepared-dataset size: "
+        f"{format_bytes(directory_size(resolve_path(args.data_dir)))}"
+    )
+    print(
+        f"Total symbolic-output size: " f"{format_bytes(directory_size(output_root))}"
+    )
 
     return 0
 

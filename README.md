@@ -91,13 +91,39 @@ Run commands from the repository root after activating the environment.
 
 ### 1. Offline Preparation — A4 Symbolic Pipeline
 
-Run the end-to-end offline preparation workflow:
+### 1. Offline Preparation
+
+Run the offline dataset preparation, teacher extraction, student training, inference, and miner adaptation:
 
 ```bash
-bash scripts/run_offline_pipeline.sh
+./scripts/run_offline.sh
 ```
 
+The pipeline uses `configs/offline_data.yaml` and stores outputs under `data/symbolic/<dataset-name>/`.
+
+The student-generated semantic results are saved as `parsed_documents.jsonl`.
+
 For pipeline configuration, model setup, and detailed execution instructions, see the [Semantic Parser documentation](parser/README.md).
+
+### 2. Run the Symbolic Miner
+
+After offline preparation, run the miner using the student-generated semantic results:
+
+```bash
+export PETTA_ROOT=/path/to/PeTTa
+export MINER_ROOT=/path/to/hybrid-miner/hyperon-miner
+
+python -m symbolic_pipeline.miner_runner \
+    --input data/symbolic/<dataset-name>/parsed_documents.jsonl \
+    --output-dir data/symbolic/<dataset-name>/miner_run_001 \
+    --petta-root "$PETTA_ROOT" \
+    --miner-root "$MINER_ROOT"
+```
+
+The miner performs semantic document export, PeTTa emission, admission, pattern mining, exact-match recovery, and candidate construction.
+
+See [Symbolic Pipeline documentation](symbolic_pipeline/README.md) for details.
+
 
 ### 2. Stage A Experiments
 
