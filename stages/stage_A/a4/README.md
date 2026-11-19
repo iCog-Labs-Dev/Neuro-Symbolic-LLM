@@ -204,6 +204,10 @@ shared Stage A residual/continual-learning evaluations.
 
 ### Latency
 
+Standalone search-effort and transport comparisons are documented in
+[benchmarks](benchmarks/README.md). They do not run training or replace the
+complete-model latency measurement below.
+
 Run in Linux CUDA/JAX with recorded inputs, the native library and MORK available,
 without competing GPU workloads. Defaults are 100 paired samples, 10 batches
 and 10 warmups in training and deployment modes; compilation/warmups are excluded.
