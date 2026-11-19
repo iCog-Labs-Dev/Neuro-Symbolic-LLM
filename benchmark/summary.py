@@ -18,7 +18,6 @@ from benchmark.benchmark import (
     _read_json,
     _select_headline_cohort,
     _write_json,
-    fingerprint,
     measurement_reason,
     metric_values_for_record,
     resolve_report_dir,
@@ -29,80 +28,100 @@ def _cell(values: list[float]) -> str:
     return f"{fmean(values):.6g} (n={len(values)})" if values else "N/A"
 
 
-def _tables(records: list[dict[str, Any]]) -> list[str]:
-    lines = [
-        "## Run conditions",
-        "",
-        "| Run | Protocol | Seed | Rank | K | Realized task order | Held-out tasks |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    for record in records:
-        lines.append(
-            f"| {record['run_id']} | {record.get('protocol', 'N/A')} | {record.get('seed', 'N/A')} | {record.get('rank', 'N/A')} | {record.get('k', 'N/A')} | {' → '.join(record.get('task_order', []))} | {', '.join(record.get('heldout_tasks', []))} |"
-        )
-    lines += [
-        "",
-        "Measurement notes: task-gradient conflict uses fixed task-specific training "
-        "batches as a diagnostic at the final checkpoint. Residual direction "
-        "redundancy averages read/write direction overlap across layers. Ablation "
-        "fidelity compares quadratic gate-gradient/empirical-Fisher predictions "
-        "against actual held-out loss changes for sampled rank channels; paired "
-        "values and sample counts are saved in evaluation.json. Old evaluations "
-        "must be recomputed to obtain these measurements.",
-        "",
-    ]
-    for category, specs in (
-        ("Internal", INTERNAL_METRIC_SPECS),
-        ("External", EXTERNAL_METRIC_SPECS),
-    ):
-        lines += [
-            f"## {category} Metrics",
-            "",
-            "| Run | Metric | Value | Missing measurement reason |",
-            "|---|---|---|---|",
-        ]
-        for record in records:
-            for label, key, _ in specs:
-                values = metric_values_for_record(
-                    record, key, int(record.get("rank", 16))
-                )
-                reason = "" if values else measurement_reason(record, key)
-                lines.append(
-                    f"| {record['run_id']} | {label} | {_cell(values)} | {reason.replace('|', '/')} |"
-                )
-        if not records:
-            for label, _, _ in specs:
-                lines.append(f"| N/A | {label} | N/A | No evaluated runs |")
-        lines.append("")
-    lines += [
-        "## Per-dataset token accuracy",
-        "",
-        "Next-token prediction accuracy on loader-provided test splits. Stories training tasks share one dataset-level test split; this is not labeled task accuracy.",
-        "",
-        "| Run | Dataset/test split | Token accuracy |",
-        "|---|---|---|",
-    ]
-    for record in records:
-        for task, measurement in (
-            record.get("deployed_evaluation", {}).get("domains", {}).items()
-        ):
-            value = measurement.get("token_accuracy")
-            cell = (
-                _cell([value])
-                if value is not None and measurement.get("status") == "measured"
-                else "N/A"
+def _safe_text(value: Any) -> str:
+    return str(value).replace("|", "/").replace("\n", " ")
+
+
+def _format_task_order(order: list[str]) -> str:
+    matches = [re.fullmatch(r"(.+)_task_(\d+)", name) for name in order]
+    if matches and all(matches):
+        prefixes = {match.group(1) for match in matches if match is not None}
+        if len(prefixes) == 1:
+            prefix = next(iter(prefixes)).replace("_", " ")
+            indices = ", ".join(
+                match.group(2) for match in matches if match is not None
             )
-            lines.append(f"| {record['run_id']} | {task} | {cell} |")
+            return f"{prefix} task {indices}"
+    return ", ".join(name.replace("_", " ") for name in order) or "N/A"
+
+
+def _realized_task_orders(records: list[dict[str, Any]]) -> str:
+    orders: list[tuple[str, ...]] = []
+    for record in records:
+        order = tuple(str(name) for name in record.get("task_order", []))
+        if order and order not in orders:
+            orders.append(order)
+    return "; ".join(_format_task_order(list(order)) for order in orders) or "N/A"
+
+
+def _comparison_table(cohort, specs) -> list[str]:
+    labels = [label for label, _, _ in specs]
+    lines = [
+        f"| Method | {' | '.join(labels)} |",
+        f"|---|{'---:|' * len(labels)}",
+    ]
+    metric_samples = {
+        key: (
+            _metric_samples(cohort, key)
+            if cohort
+            else {method: [] for method in METHODS}
+        )
+        for _, key, _ in specs
+    }
+    for method in METHODS:
+        cells = [
+            _cell([value for _, value in metric_samples[key][method]])
+            for _, key, _ in specs
+        ]
+        lines.append(f"| {method.upper()} | {' | '.join(cells)} |")
     lines.append("")
     return lines
 
 
-def _figure_links(folder: Path) -> list[str]:
-    # Link only the figures this version owns, not unrelated/stale PNGs.
+def _combined_evidence_table(records: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "## Run evidence, dataset token accuracy, and N/A reasons",
+        "",
+        "Next-token accuracy is measured on loader-provided test splits; it is not labeled task accuracy.",
+        "",
+        "| Run | Method | Seed | Rank | K | Dataset/test split | Token accuracy | N/A metrics and reasons |",
+        "|---|---|---:|---:|---:|---|---:|---|",
+    ]
+    specs = INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
+    for record in records:
+        missing = []
+        for label, key, _ in specs:
+            values = metric_values_for_record(record, key, int(record.get("rank", 16)))
+            if not values:
+                reason = measurement_reason(record, key)
+                missing.append(f"{label}: {reason}")
+        reason_cell = _safe_text("; ".join(missing) if missing else "None")
+        domains = record.get("deployed_evaluation", {}).get("domains", {})
+        rows = list(domains.items()) if domains else [("N/A", {})]
+        for dataset, measurement in rows:
+            value = measurement.get("token_accuracy")
+            accuracy = (
+                _cell([float(value)])
+                if value is not None and measurement.get("status") == "measured"
+                else "N/A"
+            )
+            lines.append(
+                f"| {_safe_text(record.get('run_id', 'N/A'))} | "
+                f"{_safe_text(str(record.get('method', 'N/A')).upper())} | "
+                f"{record.get('seed', 'N/A')} | {record.get('rank', 'N/A')} | "
+                f"{record.get('k', 'N/A')} | {_safe_text(dataset)} | {accuracy} | "
+                f"{reason_cell} |"
+            )
+    if not records:
+        lines.append("| N/A | N/A | N/A | N/A | N/A | N/A | N/A | No evaluated runs |")
+    lines.append("")
+    return lines
+
+
+def _figure_notice() -> list[str]:
     return [
-        f"![{label}](figures/{key}.png)"
-        for label, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
-        if (folder / "figures" / f"{key}.png").is_file()
+        "Figures are stored separately in the [`figures/`](figures/) folder.",
+        "",
     ]
 
 
@@ -127,7 +146,7 @@ def report_manifest(
         "# Stage A General Report",
         "",
         f"Runtime source: {manifest.get('runtime_source', 'unknown')}",
-        f"Realized task orders: {[r.get('task_order', []) for r in records]}",
+        f"Realized task order: {_realized_task_orders(records)}",
         "",
         "Only measured values are reported; missing evidence is N/A.",
         "",
@@ -147,36 +166,16 @@ def report_manifest(
         lines += [
             f"## {category} Metrics",
             "",
-            "| Metric | A1 | A2 | A3 | A2-A1 paired delta | A3-A1 paired delta |",
-            "|---|---|---|---|---|---|",
+            *_comparison_table(cohort, specs),
         ]
-        for label, key, _ in specs:
-            samples = (
-                _metric_samples(cohort, key)
-                if cohort
-                else {method: [] for method in METHODS}
-            )
-            columns = [
-                _cell([value for _, value in samples[method]]) for method in METHODS
-            ]
-            base = dict(samples["a1"])
-            columns += [
-                _cell(
-                    [
-                        value - base[seed]
-                        for seed, value in samples[method]
-                        if seed in base
-                    ]
-                )
-                for method in ("a2", "a3")
-            ]
-            lines.append(f"| {label} | " + " | ".join(columns) + " |")
-        lines.append("")
     lines += [
-        "## Per-run evidence and N/A reasons",
+        "Measurement notes: task-gradient conflict uses fixed task-specific training "
+        "batches at the final checkpoint. Residual direction redundancy averages "
+        "read/write overlap across layers. Ablation fidelity compares predicted and "
+        "actual held-out loss changes for sampled rank channels.",
         "",
-        *_tables(records),
-        *_figure_links(comparison),
+        *_combined_evidence_table(records),
+        *_figure_notice(),
     ]
     general = comparison / "stage_a_general_report.md"
     general.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -185,19 +184,14 @@ def report_manifest(
         folder = stage_root / method.upper()
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{method}_result_and_visualization.md"
-        selected = [row for row in records if row.get("method") == method]
         content = [
             f"# {method.upper()} Results",
             "",
-            *_tables(selected),
-            *_figure_links(folder),
+            "Numeric comparisons and run evidence are consolidated in the "
+            "[Stage A general report](../comparison/stage_a_general_report.md).",
+            "",
+            *_figure_notice(),
         ]
-        for row in selected:
-            relative = (
-                f"figures/validation_loss_heatmap_{fingerprint(row['run_id'])[:16]}.png"
-            )
-            if (folder / relative).is_file():
-                content.append(f"![Validation loss heatmap]({relative})")
         path.write_text("\n".join(content) + "\n", encoding="utf-8")
         reports[method] = path
     report = destination / "REPORT.md"
@@ -295,12 +289,7 @@ def _write_dashboard(
                 table_open = False
             image_match = re.fullmatch(r"!\[(.*?)\]\((.*?)\)", line.strip())
             if image_match:
-                alt, relative = image_match.groups()
-                source = (report.parent / relative).resolve()
-                url = source.relative_to(destination).as_posix()
-                blocks.append(
-                    f'<img loading="lazy" src="{html.escape(url, quote=True)}" alt="{html.escape(alt, quote=True)}">'
-                )
+                continue
             elif line.startswith("#"):
                 level = min(len(line) - len(line.lstrip("#")) + 1, 6)
                 blocks.append(
