@@ -187,7 +187,16 @@ def checkpoint_replay(
     if digest(config.residual_config) != meta["residual_config_sha256"]:
         raise ValueError("Inherited residual configuration changed")
     inherited = load_residual_config(config.residual_config)
-    substrate = _resolve_substrate(config.training.model, substrate)
+    pair = meta.get("a3_pairing")
+    substrate = _resolve_substrate(
+        config.training.model,
+        substrate,
+        revision=pair["frozen"]["revision"] if pair else None,
+    )
+    if pair and substrate.pairing_identity() != pair["frozen"]:
+        raise ValueError(
+            "Replay frozen model revision or tokenizer differs from the paired A3 run"
+        )
     adapter = ResidualAdapter(inherited.adapter, substrate.architecture)
     continuous = A3Model(
         substrate,

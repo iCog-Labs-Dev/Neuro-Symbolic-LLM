@@ -60,5 +60,5 @@ def load_torchax_model(
     return model, params
 
 
-def load_tokenizer(model_id: str) -> Any:
-    return AutoTokenizer.from_pretrained(model_id)
+def load_tokenizer(model_id: str, revision: str | None = None) -> Any:
+    return AutoTokenizer.from_pretrained(model_id, revision=revision)

@@ -8,8 +8,10 @@ logits and intermediate states.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Literal, overload
 
 import jax
@@ -77,6 +79,7 @@ class FrozenSubstrate:
         dtype: torch.dtype | str | None = None,
         attn_implementation: str | None = "eager",
         torch_dtype: torch.dtype | str | None = None,
+        revision: str | None = None,
     ) -> None:
         if model_id_or_model is None:
             raise TypeError(
@@ -98,13 +101,17 @@ class FrozenSubstrate:
             effective_dtype = dtype or torch_dtype or torch.float32
             model, params = load_torchax_model(
                 model_id_or_model,
+                revision=revision,
                 dtype=effective_dtype,
                 attn_implementation=attn_implementation,
             )
             config = config or getattr(model, "config", None)
             if self._tokenizer is None:
                 try:
-                    self._tokenizer = load_tokenizer(model_id_or_model)
+                    self._tokenizer = load_tokenizer(
+                        model_id_or_model,
+                        getattr(config, "_commit_hash", None) or revision,
+                    )
                 except Exception:
                     self._tokenizer = None
         elif isinstance(model_id_or_model, torch.nn.Module):
@@ -165,6 +172,33 @@ class FrozenSubstrate:
     @property
     def tokenizer(self) -> Any:
         return self._tokenizer
+
+    def pairing_identity(self) -> dict[str, Any]:
+        """Identify the loaded model snapshot, architecture and tokenizer."""
+        revision = getattr(self._model.config, "_commit_hash", None)
+        tokenizer = self.tokenizer
+        if not revision or not getattr(tokenizer, "is_fast", False):
+            raise ValueError(
+                "A3/A4 pairing requires a resolved model revision and fast tokenizer"
+            )
+        backend = json.loads(tokenizer.backend_tokenizer.to_str())
+        backend.pop("padding", None)
+        backend.pop("truncation", None)
+        tokenizer_config = {
+            "backend": backend,
+            "class": type(tokenizer).__name__,
+            "special_tokens": tokenizer.special_tokens_map,
+            "padding_side": tokenizer.padding_side,
+            "truncation_side": tokenizer.truncation_side,
+            "model_max_length": tokenizer.model_max_length,
+        }
+        return {
+            "revision": revision,
+            "architecture": asdict(self.architecture),
+            "tokenizer_sha256": hashlib.sha256(
+                json.dumps(tokenizer_config, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+        }
 
     def tokenize(
         self,

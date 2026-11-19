@@ -1,5 +1,7 @@
 """Stage A4 command-line validation."""
 
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -104,6 +106,141 @@ def test_effective_seed_and_epochs_round_trip(tmp_path):
     recorded.write_text(yaml.safe_dump(config.to_dict()))
     restored = load_config(recorded, recorded=True)
     assert restored == config
+
+
+def test_benchmark_requires_explicit_warm_start(tmp_path, capsys):
+    pair = tmp_path / "pair.json"
+    pair.write_text("{}")
+    with pytest.raises(SystemExit):
+        parse_args(arguments("--benchmark-pair", str(pair)))
+    assert "requires --warm-start" in capsys.readouterr().err
+
+
+def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    from experiments import run_stage_a4 as runner
+    from runtime import data_loader
+    from stages.stage_A import a3
+    from stages.stage_A.a4 import checkpoint, model, training
+    from stages.stage_A.a4.config import load_config
+    from symbolic_memory import bank, jax_bridge, service, storage
+
+    config = load_config(DEFAULT_CONFIG)
+    artifacts = ("a3.npz", "patterns.jsonl", "embeddings.jsonl")
+    warm_start, patterns, embeddings = (tmp_path / path for path in artifacts)
+    for path in (warm_start, patterns, embeddings):
+        path.write_text(path.name)
+    identity = {
+        "revision": "commit",
+        "architecture": {"hidden_size": 4},
+        "tokenizer_sha256": "tokens",
+    }
+    common = {
+        key: getattr(config.training, key)
+        for key in ("model", "seed", "seq_len", "batch_size", "eval_batches")
+    }
+    common.update(
+        rank=16,
+        training_mode="sequential",
+        runtime_config_sha256=hashlib.sha256(
+            DEFAULT_RUNTIME_CONFIG.read_bytes()
+        ).hexdigest(),
+    )
+    pair = {
+        "run_id": "matched-a3",
+        "checkpoint": str(warm_start),
+        "common": common,
+        "checkpoint_sha256": hashlib.sha256(warm_start.read_bytes()).hexdigest(),
+        "residual_config_sha256": hashlib.sha256(
+            config.residual_config.read_bytes()
+        ).hexdigest(),
+        "common_sha256": "common-fingerprint",
+        "frozen": identity,
+        "layers": [0],
+        "task_order": ["stories"],
+        "runtime_data_sha256": "runtime-sha",
+    }
+    pair_path = tmp_path / "pair.json"
+    pair_path.write_text(json.dumps(pair))
+    frozen = Mock()
+    frozen.pairing_identity.return_value = identity
+    resolve = Mock(return_value=frozen)
+    monkeypatch.setattr(runner, "_resolve_substrate", resolve)
+    monkeypatch.setattr(
+        "residual.ResidualAdapter",
+        Mock(return_value=SimpleNamespace(layers=[0], scale=1.0)),
+    )
+    monkeypatch.setattr(
+        a3, "A3Model", Mock(return_value=SimpleNamespace(layers=(0,), hidden_size=4))
+    )
+    monkeypatch.setattr(checkpoint, "restore_a3_weights", Mock(return_value=None))
+    monkeypatch.setattr("stages.results.load_params", Mock(return_value={}))
+    monkeypatch.setattr(
+        data_loader,
+        "load_runtime_data",
+        Mock(
+            return_value=SimpleNamespace(
+                tasks=(None,), task_order=("stories",), metadata={}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        data_loader, "runtime_pairing_fingerprint", Mock(return_value="runtime-sha")
+    )
+    monkeypatch.setattr(
+        bank,
+        "load_bank",
+        Mock(
+            return_value=SimpleNamespace(
+                records=[SimpleNamespace(template_id="id")] * config.minimum_templates,
+                vector_dim=4,
+                input_snapshot_sha256="bank",
+            )
+        ),
+    )
+    store = SimpleNamespace(check_bank=lambda _: {"matches": True})
+    monkeypatch.setattr(
+        storage, "MorkTemplateStore", Mock(return_value=nullcontext(store))
+    )
+    monkeypatch.setattr(
+        service,
+        "RetrievalClient",
+        Mock(return_value=nullcontext(SimpleNamespace(info={}))),
+    )
+    monkeypatch.setattr(jax_bridge, "JaxRetriever", Mock())
+    monkeypatch.setattr(model, "A4Model", Mock())
+    train = Mock(return_value={"seed": config.training.seed, "updates": 0})
+    monkeypatch.setattr(training, "train_sequential", train)
+    argv = [
+        "--benchmark-pair",
+        str(pair_path),
+        "--warm-start",
+        str(warm_start),
+        "--patterns",
+        str(patterns),
+        "--embeddings",
+        str(embeddings),
+        "--retrieval-backend",
+        "tcp",
+        "--output-dir",
+        str(tmp_path),
+        "--run-name",
+        "paired",
+    ]
+
+    frozen.pairing_identity.return_value = {**identity, "tokenizer_sha256": "other"}
+    with pytest.raises(ValueError, match="tokenizer differ"):
+        runner.main(argv)
+    train.assert_not_called()
+
+    frozen.pairing_identity.return_value = identity
+    assert runner.main(argv) == 0
+    resolve.assert_called_with(common["model"], None, revision="commit")
+    train.assert_called_once()
+    out = tmp_path / "paired"
+    assert json.loads((out / "meta.json").read_text())["a3_pairing"] == pair
+    assert json.loads((out / "results.json").read_text())["a3_pairing"] == pair
 
 
 def test_accepts_checkpoint_and_bank_overrides():

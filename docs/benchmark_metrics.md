@@ -139,11 +139,19 @@ protocols: supply their names or use `--protocols sequential joint`. Rank
 
 ## A4 integration and metric evidence
 
-The benchmark launches A4 through `experiments/run_stage_a4.py` for each
-requested seed and rank. Each condition uses the final checkpoint and effective
-configuration of the first completed A3 run in manifest order with the same
-seed and rank. All alignment arms for a given seed and rank use that same
-checkpoint and the same source, label and bank artifacts.
+The benchmark launches A4 for every requested seed and rank. It requires a
+unique completed A3 run with the same shared configuration, including the model,
+adapter layer selection, sequence and batch sizes, evaluation budget, runtime
+dataset splits and task order. Current A4 protocols use a sequential A3
+reference. Joint A3 runs are ineligible. If multiple A3 training K values
+qualify, set `--a4-a3-k` to select one or set `a4_a3_run_id` on an individual
+manifest row. Each A4 result records the exact A3 run ID, checkpoint path and
+hash, shared-condition fingerprint, realized task order, and model revision
+and tokenizer identity.
+
+Aligned benchmark inputs must belong to the corresponding configured runtime
+splits. Aligned training and evaluation still use the prepared JSONL artifacts.
+Standalone exploratory A4 keeps the latest-checkpoint fallback.
 
 - **Standalone aligned** is the benchmark default. It uses source JSONL and a
   bank-matched alignment artifact. The default `full` arm applies both

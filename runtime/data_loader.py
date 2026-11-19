@@ -8,6 +8,7 @@ Supported modes:
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -163,6 +164,38 @@ def array_fingerprint(value: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def runtime_pairing_fingerprint(data: RuntimeData) -> str:
+    """Identify the realized task order and token blocks in all splits."""
+    payload = {
+        "metadata": data.metadata,
+        "train": {
+            task.name: array_fingerprint(task.train_blocks) for task in data.tasks
+        },
+        "validation": {
+            task.name: [array_fingerprint(batch) for batch in task.eval_set]
+            for task in data.tasks
+        },
+        "test": {
+            name: array_fingerprint(blocks) for name, blocks in data.test_blocks.items()
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _check_split_sources(
+    remaining: dict[str, set[str]] | None,
+    train: list[str],
+    validation: list[str],
+    test: list[str],
+) -> None:
+    if remaining is not None:
+        remaining["train"].difference_update(train)
+        remaining["validation"].difference_update(validation)
+        remaining["test"].difference_update(test)
+
+
 # ---------------------------------------------------------------------
 # Tokenization
 # ---------------------------------------------------------------------
@@ -265,6 +298,8 @@ def build_separate_tasks(
     batch_size: int,
     eval_batches: int,
     default_epochs: int = 3,
+    remaining_sources: dict[str, set[str]] | None = None,
+    heldout_tasks: tuple[str, ...] = (),
 ) -> tuple[tuple[Domain, ...], dict[str, np.ndarray], dict[str, Any]]:
     """Build one sequential task for every configured dataset."""
 
@@ -305,6 +340,9 @@ def build_separate_tasks(
                 item["test_split"],
             )
             progress.update(1)
+
+            if name not in heldout_tasks:
+                _check_split_sources(remaining_sources, train_texts, validation_texts, test_texts)
 
             separator = get_separator(
                 tokenizer,
@@ -421,6 +459,7 @@ def build_story_tasks(
     seed: int,
     default_epochs: int,
     max_tasks: int | None = None,
+    remaining_sources: dict[str, set[str]] | None = None,
 ) -> tuple[tuple[Domain, ...], dict[str, np.ndarray], dict[str, Any]]:
     """Build sequential story tasks with optional max_tasks limit.
 
@@ -464,6 +503,8 @@ def build_story_tasks(
         item,
         item["test_split"],
     )
+
+    _check_split_sources(remaining_sources, train_stories, validation_stories, test_stories)
 
     separator = get_separator(
         tokenizer,
@@ -659,6 +700,7 @@ def load_runtime_data(
     eval_batches: int = 8,
     default_epochs: int = 3,
     epochs_override: int | None = None,
+    source_texts: dict[str, set[str]] | None = None,
 ) -> RuntimeData:
     """Prepare runtime datasets for sequential training."""
 
@@ -693,6 +735,11 @@ def load_runtime_data(
     if eval_batches < 1:
         raise ValueError("eval_batches must be >= 1.")
 
+    remaining_sources = (
+        {name: set(texts) for name, texts in source_texts.items()}
+        if source_texts is not None
+        else None
+    )
     if mode == "separate":
         tasks, test_blocks, preprocessing_stats = build_separate_tasks(
             datasets_config,
@@ -701,6 +748,8 @@ def load_runtime_data(
             batch_size=batch_size,
             eval_batches=eval_batches,
             default_epochs=default_epochs,
+            remaining_sources=remaining_sources,
+            heldout_tasks=heldout_tasks,
         )
 
     elif mode == "stories":
@@ -722,10 +771,18 @@ def load_runtime_data(
             seed=seed,
             default_epochs=default_epochs,
             max_tasks=runtime_config.get("max_tasks"),
+            remaining_sources=remaining_sources,
         )
 
     else:
         raise ValueError(f"Unsupported runtime mode: {mode!r}")
+
+    if remaining_sources is not None:
+        for split, texts in remaining_sources.items():
+            if texts:
+                raise ValueError(
+                    f"Aligned {split} sources include {len(texts)} documents outside the runtime split"
+                )
 
     if epochs_override is not None:
         if epochs_override < 0:

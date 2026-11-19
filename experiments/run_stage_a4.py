@@ -62,6 +62,7 @@ def find_latest_a3_checkpoint(runs_dir: Path = DEFAULT_RUNS_DIR) -> Path:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--benchmark-pair", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--data-mode",
         choices=("runtime", "aligned"),
@@ -144,6 +145,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--precision", choices=("default", "highest"), default="highest"
     )
     args = parser.parse_args(argv)
+    if args.benchmark_pair is not None and (
+        args.warm_start is None
+        or not args.benchmark_pair.is_file()
+        or not args.runtime_config.is_file()
+    ):
+        parser.error("A benchmark pair requires --warm-start, pairing metadata and runtime YAML")
     if args.data_mode == "aligned":
         required_sources = (
             "train_sources",
@@ -232,10 +239,15 @@ def _apply_training_overrides(config: A4Config, args: argparse.Namespace) -> A4C
 
 
 def _resolve_substrate(
-    model_id: str, substrate: FrozenSubstrate | None
+    model_id: str, substrate: FrozenSubstrate | None, *, revision: str | None = None
 ) -> FrozenSubstrate:
     if substrate is not None:
         return substrate
+    if revision is not None:
+        from frozenllm.substrate import FrozenSubstrate
+
+        return FrozenSubstrate(model_id, revision=revision)
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -248,6 +260,20 @@ def _resolve_substrate(
     from frozenllm.substrate import FrozenSubstrate
 
     return FrozenSubstrate(model, tokenizer=tokenizer)
+
+
+def _aligned_source_texts(args: argparse.Namespace) -> dict[str, set[str]]:
+    sources: dict[str, set[str]] = {"train": set(), "validation": set(), "test": set()}
+    for split, texts in sources.items():
+        path = getattr(args, f"{split}_sources")
+        if path is not None and (split != "test" or not args.skip_test):
+            with path.open(encoding="utf-8-sig") as stream:
+                texts.update(
+                    json.loads(line)["source_text"].strip()
+                    for line in stream
+                    if line.strip()
+                )
+    return sources
 
 
 def main(
@@ -269,7 +295,7 @@ def main(
 
     from residual import ResidualAdapter
     from residual.symbolic_head.jax_head import Retriever, SymbolicHead
-    from runtime.data_loader import load_runtime_data
+    from runtime.data_loader import load_runtime_data, runtime_pairing_fingerprint
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
     from stages.stage_A.a3 import A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
@@ -317,8 +343,43 @@ def main(
             raise ValueError(
                 "Inherited residual configuration differs from the A3 warm start"
             )
+    pair = (
+        json.loads(args.benchmark_pair.read_text(encoding="utf-8"))
+        if args.benchmark_pair
+        else None
+    )
+    checkpoint_sha256 = hashlib.sha256(warm_start.read_bytes()).hexdigest()
+    residual_config_sha256 = hashlib.sha256(
+        config.residual_config.read_bytes()
+    ).hexdigest()
+    if pair is not None:
+        common = pair["common"]
+        if (
+            pair["checkpoint"] != str(warm_start)
+            or pair["checkpoint_sha256"] != checkpoint_sha256
+            or pair["residual_config_sha256"] != residual_config_sha256
+            or common["runtime_config_sha256"]
+            != hashlib.sha256(args.runtime_config.read_bytes()).hexdigest()
+            or common["training_mode"] != "sequential"
+            or inherited.adapter.rank != common["rank"]
+            or (
+                args.data_mode == "runtime"
+                and config.training.test_batches != common["eval_batches"]
+            )
+            or any(
+                getattr(config.training, key) != common[key]
+                for key in ("model", "seed", "seq_len", "batch_size", "eval_batches")
+            )
+        ):
+            raise ValueError(
+                "A4 shared configuration or checkpoint differs from its A3 pair"
+            )
     substrate_reused = substrate is not None
-    substrate = _resolve_substrate(config.training.model, substrate)
+    substrate = _resolve_substrate(
+        config.training.model,
+        substrate,
+        revision=pair["frozen"]["revision"] if pair is not None else None,
+    )
     adapter = ResidualAdapter(inherited.adapter, substrate.architecture)
     continuous = A3Model(
         substrate,
@@ -329,9 +390,17 @@ def main(
         activation=inherited.adapter.activation,
         config=inherited.objective,
     )
-    frozen_residual = restore_a3_weights(continuous, load_params(args.warm_start))
-    if args.data_mode == "runtime":
-        data = load_runtime_data(
+    if pair is not None and (
+        list(continuous.layers) != pair["layers"]
+        or substrate.pairing_identity() != pair["frozen"]
+    ):
+        raise ValueError(
+            "A4 residual layers, frozen model revision or tokenizer differ from its A3 pair"
+        )
+    frozen_residual = restore_a3_weights(continuous, load_params(warm_start))
+    runtime_data = None
+    if args.data_mode == "runtime" or pair is not None:
+        runtime_data = load_runtime_data(
             args.runtime_config,
             substrate.tokenizer,
             sequence_length=config.training.seq_len,
@@ -340,7 +409,21 @@ def main(
             default_epochs=config.training.epochs,
             epochs_override=args.epochs,
             training_mode="sequential",
+            source_texts=_aligned_source_texts(args)
+            if args.data_mode == "aligned"
+            else None,
         )
+        if pair is not None and (
+            list(runtime_data.task_order) != pair["task_order"]
+            or runtime_pairing_fingerprint(runtime_data) != pair["runtime_data_sha256"]
+        ):
+            raise ValueError(
+                "A4 runtime dataset, splits or task order differ from its A3 pair"
+            )
+
+    if args.data_mode == "runtime":
+        assert runtime_data is not None
+        data = runtime_data
 
         # Runtime-only training uses next-token CE.
         # The template bank remains active for retrieval.
@@ -457,12 +540,9 @@ def main(
                     "retrieval_backend": args.retrieval_backend,
                     "retrieval": backend,
                     "warm_start": str(args.warm_start),
-                    "warm_start_sha256": hashlib.sha256(
-                        args.warm_start.read_bytes()
-                    ).hexdigest(),
-                    "residual_config_sha256": hashlib.sha256(
-                        config.residual_config.read_bytes()
-                    ).hexdigest(),
+                    "warm_start_sha256": checkpoint_sha256,
+                    "residual_config_sha256": residual_config_sha256,
+                    **({"a3_pairing": pair} if pair is not None else {}),
                     "native_library_sha256": (
                         hashlib.sha256(args.native_library.read_bytes()).hexdigest()
                         if args.retrieval_backend == "native"
@@ -479,7 +559,7 @@ def main(
             logger.addHandler(training_log)
             try:
                 if args.data_mode == "runtime":
-                    train_sequential(
+                    results = train_sequential(
                         model,
                         frozen_residual,
                         data,
@@ -489,7 +569,7 @@ def main(
                         max_grad_norm=args.max_grad_norm,
                     )
                 else:
-                    train(
+                    results = train(
                         model,
                         frozen_residual,
                         data,
@@ -501,6 +581,8 @@ def main(
                             0 if args.skip_latency else args.latency_every
                         ),
                     )
+                if pair is not None:
+                    writer.write_json("results.json", {**results, "a3_pairing": pair})
                 writer.write_json("status.json", {"stage": "A4", "status": "completed"})
             except BaseException as error:
                 writer.write_json(

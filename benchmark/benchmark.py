@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile
 
 import numpy as np
 import yaml
@@ -726,6 +727,8 @@ class RunSpec:
     a4_arm: str | None = None
     a4_epochs: int | None = None
     a4_warm_start: str | None = None
+    a4_pairing: dict[str, Any] | None = None
+    a3_record_pairing: bool = False
     a4_train_sources: str | None = None
     a4_validation_sources: str | None = None
     a4_alignment_labels: str | None = None
@@ -1576,6 +1579,7 @@ def _condition(
             "a4_residual_config_sha256": sha256_file(
                 yaml.safe_load(config.read_text(encoding="utf-8"))["residual_config"]
             ),
+            "a4_pairing": spec.a4_pairing,
             "a4_warm_start_sha256": (
                 sha256_file(spec.a4_warm_start) if spec.a4_warm_start else None
             ),
@@ -1596,6 +1600,41 @@ def _condition(
         source_sha256=source_sha256,
         a4_condition=a4_condition,
     )
+
+
+def _a3_a4_common(
+    spec: RunSpec, stage_path: Path, runtime_path: Path
+) -> dict[str, Any]:
+    """Describe the shared condition independently of the A3 objective and A4 head."""
+    shared = yaml.safe_load(
+        (ROOT / "configs/training.yaml").read_text(encoding="utf-8")
+    )
+    stage = yaml.safe_load(stage_path.read_text(encoding="utf-8"))
+    if spec.method == "a4":
+        stage = yaml.safe_load(
+            Path(stage["residual_config"]).read_text(encoding="utf-8")
+        )
+    training = {**shared.get("training", {}), **stage.get("training", {})}
+    adapter = {**shared["model"], **stage.get("adapter", {})}
+    runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))["runtime"]
+    return {
+        "seed": spec.seed,
+        "rank": spec.rank,
+        "model": training.get("model", shared["model"]["name"]),
+        "seq_len": training.get("seq_len", shared["model"]["seq_len"]),
+        "batch_size": training.get("batch_size", shared["model"]["batch_size"]),
+        "eval_batches": training.get(
+            "eval_batches", shared["evaluation"]["validation_batches"]
+        ),
+        "layer_selection": {
+            key: adapter.get(key) for key in ("layers", "late_start", "late_end")
+        },
+        "runtime_config_sha256": sha256_file(runtime_path),
+        "runtime_source": runtime["source"],
+        "training_mode": runtime["training_mode"],
+        "task_order": runtime.get("task_order") or [],
+        "heldout_tasks": sorted(runtime.get("heldout_tasks") or []),
+    }
 
 
 def make_manifest(
@@ -1621,6 +1660,9 @@ def make_manifest(
     if not runtime_source:
         raise ValueError("Specify runtime.source in YAML or --runtime-source")
     selected_protocols = tuple(protocols or (protocol,))
+    a4_a3_k = (a4_inputs or {}).get("a4_a3_k")
+    if a4_a3_k is not None and a4_a3_k not in k_values:
+        raise ValueError("--a4-a3-k must be one of the planned A3 K values")
     if len(set(selected_protocols)) != len(selected_protocols):
         raise ValueError("protocols must be unique")
     specs = []
@@ -1670,8 +1712,8 @@ def make_manifest(
                 rank_values=rank_values,
                 epochs=epochs,
                 protocol="sequential" if runtime_a4 else "a4",
-                task_order=base_order if runtime_a4 else (),
-                heldout_tasks=heldout_tasks if runtime_a4 else (),
+                task_order=base_order,
+                heldout_tasks=heldout_tasks,
                 runtime_config=runtime_config,
                 runtime_source=runtime_source,
                 a4_inputs=a4_inputs,
@@ -1685,9 +1727,16 @@ def make_manifest(
         condition = _condition(
             spec, config, materialized_runtime, epochs, str(source["source_sha256"])
         )
+        common = (
+            _a3_a4_common(spec, config, materialized_runtime)
+            if "a4" in methods and spec.method in {"a3", "a4"}
+            else None
+        )
         run_rows.append(
             {
                 **asdict(spec),
+                **({"a3_a4_common": common} if common is not None else {}),
+                **({"a4_a3_k": a4_a3_k} if spec.method == "a4" else {}),
                 "status": "pending",
                 "requested_task_order": list(spec.task_order),
                 "requested_heldout_tasks": list(spec.heldout_tasks),
@@ -1770,11 +1819,11 @@ def _command(
         ]
         if spec.a4_epochs is not None:
             command.extend(["--epochs", str(spec.a4_epochs)])
-        if spec.a4_data_mode == "runtime":
-            command.extend(
-                ["--runtime-config", str(runtime_config or spec.runtime_config)]
-            )
-        elif spec.a4_data_mode == "aligned":
+        if spec.a4_pairing is not None:
+            command.extend(["--benchmark-pair", str(config.with_suffix(".a3-pair.json"))])
+        if spec.a4_pairing is not None or spec.a4_data_mode == "runtime":
+            command.extend(["--runtime-config", str(runtime_config or spec.runtime_config)])
+        if spec.a4_data_mode == "aligned":
             for field in A4_ALIGNED_FIELDS:
                 value = getattr(spec, field)
                 if value is None:
@@ -1782,7 +1831,7 @@ def _command(
                 command.extend(
                     ["--" + field.removeprefix("a4_").replace("_", "-"), value]
                 )
-        else:
+        elif spec.a4_data_mode != "runtime":
             raise ValueError(f"Unknown A4 data mode: {spec.a4_data_mode}")
         if spec.a4_retrieval_backend == "native":
             command.extend(["--native-library", str(spec.a4_native_library)])
@@ -1802,6 +1851,8 @@ def _command(
         "--training-mode",
         "joint" if spec.protocol == "joint" else "sequential",
     ]
+    if spec.a3_record_pairing:
+        command.append("--record-a4-pairing")
     if spec.runtime_source:
         command.extend(["--runtime-source", spec.runtime_source])
     if spec.task_order:
@@ -1813,34 +1864,162 @@ def _command(
     return command
 
 
-def _resolve_a4_warm_start(manifest: dict[str, Any], raw: dict[str, Any]) -> Path:
-    candidates = [
-        row
-        for row in manifest.get("runs", [])
-        if row.get("method") == "a3"
-        and row.get("seed") == raw.get("seed")
-        and row.get("rank", 16) == raw.get("rank", 16)
-        and row.get("status") == "complete"
-        and row.get("run_dir")
-    ]
-    for row in candidates:
+def _valid_a3_checkpoint(path: Path, layers: list[int], hidden: int, rank: int) -> bool:
+    expected = {
+        f"params/layer_{layer}/{name}": shape
+        for layer in layers
+        for name, shape in (("A", (hidden, rank)), ("B", (rank, hidden)))
+    }
+    if not expected or hidden < 1 or len(set(layers)) != len(layers):
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            if set(expected) != {
+                key for key in archive.files if key.startswith("params/")
+            }:
+                return False
+            for key, shape in expected.items():
+                value = archive[key]
+                if (
+                    value.shape != shape
+                    or not np.issubdtype(value.dtype, np.floating)
+                    or not np.isfinite(value).all()
+                ):
+                    return False
+    except (OSError, ValueError, EOFError, BadZipFile):
+        return False
+    return True
+
+
+def _resolve_a4_warm_start(
+    manifest: dict[str, Any], raw: dict[str, Any]
+) -> dict[str, Any]:
+    run_id = raw["run_id"]
+    common = raw.get("a3_a4_common")
+    if not common:
+        raise RuntimeError(
+            f"{run_id}: missing A3/A4 shared condition; replan the benchmark"
+        )
+    matches = []
+    rejected = []
+    for row in manifest["runs"]:
+        if row.get("method") != "a3" or (row.get("seed"), row.get("rank")) != (
+            common["seed"],
+            common["rank"],
+        ):
+            continue
+        candidate = row["run_id"]
+        if raw.get("a4_a3_run_id") not in (None, candidate, row.get("planned_run_id")):
+            continue
+        if raw.get("a4_a3_k") not in (None, row.get("k")):
+            continue
+        expected = row.get("a3_a4_common") or {}
+        different = [key for key in common if expected.get(key) != common[key]]
+        if different:
+            rejected.append(
+                f"{candidate}: differing shared settings ({', '.join(different)})"
+            )
+            continue
+        if row.get("status") != "complete" or not all(
+            row.get(key) for key in ("run_dir", "condition_sha256", "config_sha")
+        ):
+            rejected.append(f"{candidate}: incomplete run or missing provenance")
+            continue
         directory = Path(row["run_dir"])
         checkpoint = directory / "checkpoints/a3hybrid_final.npz"
-        if not checkpoint.is_file() or not (directory / "config.yaml").is_file():
+        if not checkpoint.is_file():
+            rejected.append(f"{candidate}: missing final checkpoint")
             continue
-        if row.get("condition_sha256") and row.get("config_sha"):
-            valid, _ = validate_complete_attempt(
-                directory,
-                condition_sha256=row["condition_sha256"],
-                config_sha256=row["config_sha"],
+        valid, reason = validate_complete_attempt(
+            directory,
+            condition_sha256=row["condition_sha256"],
+            config_sha256=row["config_sha"],
+        )
+        if not valid:
+            rejected.append(f"{candidate}: {reason}")
+            continue
+        config_path = directory / "config.yaml"
+        try:
+            meta = _read_json(directory / "meta.json")
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            training, adapter = config["training"], config["adapter"]
+        except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
+            rejected.append(f"{candidate}: invalid recorded configuration or metadata")
+            continue
+        runtime = meta.get("runtime_data", {})
+        pairing = meta.get("a4_pairing", {})
+        frozen = pairing.get("frozen", {})
+        layers = meta.get("adapted_layers") or []
+        order = runtime.get("task_order")
+        requested_order = [
+            name for name in common["task_order"] if name not in common["heldout_tasks"]
+        ]
+        if (
+            meta.get("stage") != "A3"
+            or meta.get("model") != common["model"]
+            or any(
+                training.get(key) != common[key]
+                for key in ("model", "seed", "seq_len", "batch_size", "eval_batches")
             )
-            if not valid:
-                continue
-        return checkpoint.resolve()
-    raise RuntimeError(
-        f"{raw.get('run_id', 'A4')}: no completed A3 checkpoint for seed "
-        f"{raw.get('seed')} and rank {raw.get('rank', 16)}; train A3 before A4"
-    )
+            or adapter.get("rank") != common["rank"]
+            or any(
+                adapter.get(key) != value
+                for key, value in common["layer_selection"].items()
+            )
+            or sha256_file(directory / "provenance/materialized_runtime.yaml")
+            != common["runtime_config_sha256"]
+            or runtime.get("mode") != common["runtime_source"]
+            or runtime.get("training_mode") != common["training_mode"]
+            or runtime.get("sequence_length") != common["seq_len"]
+            or runtime.get("batch_size") != common["batch_size"]
+            or sorted(runtime.get("heldout_tasks", [])) != common["heldout_tasks"]
+            or not order
+            or order != row.get("task_order")
+            or (requested_order and order != requested_order)
+            or not frozen.get("revision")
+            or not frozen.get("tokenizer_sha256")
+            or not pairing.get("runtime_sha256")
+            or pairing.get("evaluation_split") != "test"
+        ):
+            rejected.append(
+                f"{candidate}: incompatible or missing realized configuration"
+            )
+            continue
+        if not _valid_a3_checkpoint(
+            checkpoint,
+            layers,
+            frozen.get("architecture", {}).get("hidden_size", 0),
+            common["rank"],
+        ):
+            rejected.append(f"{candidate}: invalid final checkpoint parameters")
+            continue
+        matches.append(
+            {
+                "run_id": candidate,
+                "condition_sha256": row["condition_sha256"],
+                "checkpoint": str(checkpoint.resolve()),
+                "checkpoint_sha256": sha256_file(checkpoint),
+                "residual_config_sha256": sha256_file(config_path),
+                "common": common,
+                "common_sha256": fingerprint(common),
+                "runtime_data_sha256": pairing["runtime_sha256"],
+                "task_order": order,
+                "layers": layers,
+                "frozen": frozen,
+            }
+        )
+    if len(matches) > 1:
+        ids = ", ".join(match["run_id"] for match in matches)
+        raise RuntimeError(
+            f"{run_id}: ambiguous compatible A3 runs ({ids}); select --a4-a3-k or set a4_a3_run_id in the manifest"
+        )
+    if not matches:
+        details = (
+            "; ".join(rejected)
+            or "no A3 run has the requested seed, rank and selection"
+        )
+        raise RuntimeError(f"{run_id}: no compatible completed A3 run: {details}")
+    return matches[0]
 
 
 def _run_a4_post_eval(
@@ -1975,6 +2154,7 @@ def train_manifest(
                 raw.get("requested_heldout_tasks", raw.get("heldout_tasks", ()))
             ),
             a2_arm=raw.get("a2_arm", "full" if raw["method"] == "a2" else None),
+            a3_record_pairing=raw["method"] == "a3" and bool(raw.get("a3_a4_common")),
             a4_data_mode=raw.get("a4_data_mode", "aligned"),
             a4_arm=raw.get("a4_arm", "full"),
             a4_train_sources=raw.get("a4_train_sources"),
@@ -1991,8 +2171,10 @@ def train_manifest(
         )
         effective_epochs = epochs if epochs is not None else manifest.get("epochs")
         if spec.method == "a4":
-            warm_start = _resolve_a4_warm_start(_read_json(manifest_path), raw)
-            spec = replace(spec, a4_warm_start=str(warm_start), a4_epochs=effective_epochs)
+            pairing = _resolve_a4_warm_start(_read_json(manifest_path), raw)
+            spec = replace(
+                spec, a4_warm_start=pairing["checkpoint"], a4_pairing=pairing, a4_epochs=effective_epochs
+            )
         config = _materialize(
             spec,
             config_root,
@@ -2083,6 +2265,8 @@ def train_manifest(
             f"Training {run_index}/{len(manifest['runs'])}: {spec.run_id}\nLog: {log_path}",
             flush=True,
         )
+        if spec.a4_pairing is not None:
+            _write_json(config.with_suffix(".a3-pair.json"), spec.a4_pairing)
         with log_path.open("w", encoding="utf-8") as log:
             completed = subprocess.run(
                 _command(attempt_spec, config, runtime_config),
@@ -2132,7 +2316,9 @@ def train_manifest(
             expected_mode = "standalone_aligned" if spec.a4_data_mode == "aligned" else "runtime_sequential"
             result = _read_json(results)
             if (
-                meta.get("seed") != spec.seed
+                meta.get("a3_pairing") != spec.a4_pairing
+                or result.get("a3_pairing") != spec.a4_pairing
+                or meta.get("seed") != spec.seed
                 or meta.get("rank") != spec.rank
                 or meta.get("warm_start_sha256") != condition["a4_warm_start_sha256"]
                 or meta.get("residual_config_sha256") != condition["a4_residual_config_sha256"]
@@ -2274,6 +2460,7 @@ def _result_record(raw: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
             "task_epochs": raw.get("task_epochs", {}),
             "checkpoints": raw.get("checkpoints", []),
             "frozen_a3_baseline": raw.get("frozen_a3_baseline", {}),
+            "a3_pairing": raw.get("a3_pairing"),
             "steps": raw.get("updates"),
             "tokens": sum(row.get("tokens", 0) for row in validation.values()) or None,
             "mean_step_time": raw.get("training_step_mean_ms"),
@@ -2837,6 +3024,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--runtime-source")
     parser.add_argument("--a4-data-mode", choices=("aligned", "runtime"), default="aligned")
     parser.add_argument("--a4-arms", choices=tuple(A4_ARM_CONFIGS), nargs="+")
+    parser.add_argument("--a4-a3-k", type=int, help="Select the paired A3 training K.")
     parser.add_argument("--a4-train-sources", type=Path)
     parser.add_argument("--a4-validation-sources", type=Path)
     parser.add_argument("--a4-alignment-labels", type=Path)
@@ -2874,6 +3062,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     a4_inputs = {
         "a4_data_mode": args.a4_data_mode,
         "a4_arms": args.a4_arms,
+        "a4_a3_k": args.a4_a3_k,
         "a4_train_sources": str(args.a4_train_sources)
         if args.a4_train_sources
         else None,

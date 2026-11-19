@@ -380,28 +380,6 @@ def test_runtime_a4_command_and_result(tmp_path):
     assert record["mean_forgetting"] is None
 
 
-def test_a4_resolves_checkpoint_with_matching_seed_and_rank(tmp_path):
-    rows = []
-    for seed, rank in ((8, 16), (9, 4), (8, 4)):
-        path = tmp_path / f"{seed}-{rank}"
-        (path / "checkpoints").mkdir(parents=True)
-        (path / "config.yaml").touch()
-        (path / "checkpoints/a3hybrid_final.npz").touch()
-        rows.append(
-            {
-                "method": "a3",
-                "seed": seed,
-                "rank": rank,
-                "status": "complete",
-                "run_dir": str(path),
-            }
-        )
-    resolved = runner._resolve_a4_warm_start({"runs": rows}, {"seed": 8, "rank": 4})
-    assert resolved == tmp_path / "8-4/checkpoints/a3hybrid_final.npz"
-    with pytest.raises(RuntimeError, match="seed 8 and rank 32"):
-        runner._resolve_a4_warm_start({"runs": rows}, {"seed": 8, "rank": 32})
-
-
 @pytest.mark.parametrize("mode", ["aligned", "runtime"])
 def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mode):
     from experiments.run_stage_a4 import _apply_training_overrides, parse_args
@@ -431,6 +409,12 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
     calls = []
     a3_checkpoints = {}
 
+    frozen = {
+        "revision": "immutable-commit",
+        "architecture": {"hidden_size": 8},
+        "tokenizer_sha256": "tokenizer-hash",
+    }
+
     def launch(command, **kwargs):
         flags = command[2:]
 
@@ -448,11 +432,38 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
         checkpoints = folder / "checkpoints"
         checkpoints.mkdir()
         if stage == "run_stage_a3":
-            (folder / "config.yaml").write_bytes(config.read_bytes())
-            seed = yaml.safe_load(config.read_text())["training"]["seed"]
+            assert "--record-a4-pairing" in flags
+            effective = yaml.safe_load(config.read_text())
+            effective["training"].update(
+                model="gpt2", seq_len=128, batch_size=8, eval_batches=8
+            )
+            (folder / "config.yaml").write_text(yaml.safe_dump(effective))
+            seed = effective["training"]["seed"]
             checkpoint = checkpoints / "a3hybrid_final.npz"
-            checkpoint.write_bytes(f"A3 at seed {seed}".encode())
+            np.savez(
+                checkpoint,
+                **{
+                    "params/layer_0/A": np.full((8, 4), seed, dtype=np.float32),
+                    "params/layer_0/B": np.zeros((4, 8), dtype=np.float32),
+                },
+            )
             a3_checkpoints[seed] = checkpoint
+            meta.update(
+                stage="A3",
+                model="gpt2",
+                adapted_layers=[0],
+                a4_pairing={
+                    "frozen": frozen,
+                    "runtime_sha256": "data-sha",
+                    "evaluation_split": "test",
+                },
+            )
+            meta["runtime_data"].update(
+                mode="stories",
+                training_mode="sequential",
+                sequence_length=128,
+                batch_size=8,
+            )
         else:
             args = parse_args(flags)
             effective = _apply_training_overrides(load_config(config), args)
@@ -463,7 +474,11 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
             assert effective.training.epochs == 2
             (folder / "config.yaml").write_text(yaml.safe_dump(effective.to_dict()))
             (checkpoints / "a4-final.npz").touch()
+            pair = json.loads(args.benchmark_pair.read_text())
+            assert pair["task_order"] == order
+            assert args.runtime_config.is_file()
             meta.update(
+                a3_pairing=pair,
                 seed=effective.training.seed,
                 rank=args.rank,
                 warm_start_sha256=sha256_file(checkpoint),
@@ -474,6 +489,7 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
                 if mode == "aligned"
                 else "runtime_sequential",
                 "seed": effective.training.seed,
+                "a3_pairing": pair,
                 "task_order": order if mode == "runtime" else [],
                 "checkpoints": ["checkpoints/a4-final.npz"],
             }
@@ -494,6 +510,53 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
     assert a4_rows[0]["a4_warm_start_sha256"] != a4_rows[1]["a4_warm_start_sha256"]
     runner.train_manifest(output)
     assert len(calls) == 4
+
+    a4 = a4_rows[0]
+    a3 = manifest["runs"][0]
+    pair = a4["a4_pairing"]
+    assert pair["run_id"] == a3["run_id"]
+    assert pair["checkpoint"] == str(a3_checkpoints[7])
+    assert pair["checkpoint_sha256"] == sha256_file(a3_checkpoints[7])
+    assert pair["common_sha256"] == runner.fingerprint(a4["a3_a4_common"])
+    assert pair["frozen"] == frozen
+    result = json.loads(Path(a4["results"]).read_text())
+    assert result["a3_pairing"] == pair
+    assert runner._result_record(result, a4)["a3_pairing"] == pair
+
+    for key, incompatible in (
+        ("runtime_config_sha256", "different-split"),
+        ("task_order", ["second", "first"]),
+        ("training_mode", "joint"),
+        ("model", "different-model"),
+        ("seq_len", 256),
+        ("layer_selection", {"layers": [2]}),
+    ):
+        wrong = {**a3, "a3_a4_common": {**a3["a3_a4_common"], key: incompatible}}
+        assert runner._resolve_a4_warm_start({"runs": [wrong, a3]}, a4) == pair
+        with pytest.raises(RuntimeError, match=key):
+            runner._resolve_a4_warm_start({"runs": [wrong]}, a4)
+
+    for wrong in ({**a3, "rank": 16}, {**a3, "seed": 19}):
+        with pytest.raises(RuntimeError, match="requested seed, rank"):
+            runner._resolve_a4_warm_start({"runs": [wrong]}, a4)
+    with pytest.raises(RuntimeError, match="incomplete run"):
+        runner._resolve_a4_warm_start({"runs": [{**a3, "status": "running"}]}, a4)
+    alternate = {**a3, "run_id": "another-a3", "planned_run_id": "another-plan", "k": 2}
+    with pytest.raises(RuntimeError, match="ambiguous compatible A3 runs"):
+        runner._resolve_a4_warm_start({"runs": [a3, alternate]}, a4)
+    assert (
+        runner._resolve_a4_warm_start(
+            {"runs": [alternate, a3]}, {**a4, "a4_a3_run_id": a3["run_id"]}
+        )
+        == pair
+    )
+    assert (
+        runner._resolve_a4_warm_start({"runs": [alternate, a3]}, {**a4, "a4_a3_k": 1})
+        == pair
+    )
+    a3_checkpoints[7].unlink()
+    with pytest.raises(RuntimeError, match="missing final checkpoint"):
+        runner._resolve_a4_warm_start({"runs": [a3]}, a4)
 
 
 def test_real_default_configs_materialize(tmp_path: Path) -> None:
@@ -802,6 +865,41 @@ def test_runtime_data_applies_task_order_heldout_and_joint_protocols(
     assert sequential.training_tasks is sequential.tasks
     assert sequential.task_order == ("first", "second")
     assert [task.epochs for task in sequential.tasks] == [1, 1]
+
+
+def test_runtime_pairing_checks_split_membership_and_realized_blocks(
+    tmp_path, monkeypatch, data_loader
+):
+    config = tmp_path / "runtime.yaml"
+    config.write_text(
+        "runtime: {source: separate}\n"
+        "datasets:\n"
+        "  - {name: example, type: separate, dataset: example, train_split: train, "
+        "validation_split: validation, test_split: test, separator: ' '}\n"
+    )
+    texts = {"train": ["11 12"], "validation": ["23 24"], "test": ["35 36"]}
+    monkeypatch.setattr(data_loader, "load_split_texts", lambda _, split: texts[split])
+
+    def tokenize(text, **_):
+        return {"input_ids": [[int(token) for token in text.split()]]}
+
+    def load(sources=None):
+        return data_loader.load_runtime_data(
+            config,
+            tokenize,
+            sequence_length=2,
+            batch_size=1,
+            eval_batches=1,
+            source_texts=sources,
+        )
+
+    source_files = {split: set(records) for split, records in texts.items()}
+    original = data_loader.runtime_pairing_fingerprint(load(source_files))
+    assert original == data_loader.runtime_pairing_fingerprint(load())
+    with pytest.raises(ValueError, match="outside the runtime split"):
+        load({**source_files, "validation": {"11 12"}})
+    texts["validation"] = ["24 25"]
+    assert original != data_loader.runtime_pairing_fingerprint(load())
 
 
 def _condition(**overrides):

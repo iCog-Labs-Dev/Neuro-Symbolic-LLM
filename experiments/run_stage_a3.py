@@ -27,7 +27,7 @@ import optax  # noqa: E402
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
-from runtime.data_loader import load_runtime_data  # noqa: E402
+from runtime.data_loader import load_runtime_data, runtime_pairing_fingerprint  # noqa: E402
 from stages.results import (  # noqa: E402
     RunWriter,
     default_run_name,
@@ -62,6 +62,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--model", type=str, default=None)
+    parser.add_argument(
+        "--record-a4-pairing", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument("--rank", type=int, default=None)
 
     parser.add_argument(
@@ -110,7 +113,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--training-mode", choices=("sequential", "joint"), default="sequential"
     )
     parser.add_argument("--task-order", nargs="+", default=None)
-    parser.add_argument("--heldout-task", action="append", default=[])
+    parser.add_argument("--heldout-task", action="append")
 
     return parser.parse_args(argv)
 
@@ -347,6 +350,17 @@ def run_one(
                 "epochs": {domain.name: domain.epochs for domain in domains},
                 "jit": train_cfg.jit,
                 "runtime_data": runtime_data.metadata,
+                **(
+                    {
+                        "a4_pairing": {
+                            "frozen": substrate.pairing_identity(),
+                            "runtime_sha256": runtime_pairing_fingerprint(runtime_data),
+                            "evaluation_split": args.split,
+                        }
+                    }
+                    if args.record_a4_pairing
+                    else {}
+                ),
             },
         )
 
