@@ -117,6 +117,7 @@ include = [
 "parser.ontology" = ["*.yaml", "bundles/*.yaml"]
 "configs.parser_config" = ["*.yaml", "*.jsonl"]
 "symbolic_memory" = ["native/*.cc"]
+"stages.stage_A.a4.benchmarks" = ["*.cc", "README.md"]
 
 # ── Black ──────────────────────────────────────────────────────────────────
 [tool.black]
