@@ -321,7 +321,7 @@ def test_multilayer_value_loss_reaches_only_upstream_symbolic_heads(
         jax.random.PRNGKey(19), (256, 32)
     )
     value = {f"layer_{layer}": aligned_env.value["layer_7"] for layer in head.layers}
-    labels = {layer: aligned_env.labels[7] for layer in head.layers}
+    labels = dict.fromkeys(head.layers, aligned_env.labels[7])
 
     def value_loss(candidate):
         _, terms = objective_at_latents(

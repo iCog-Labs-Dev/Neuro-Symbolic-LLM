@@ -63,6 +63,10 @@ dependencies = [
 gpu = [
     "jax[cuda12]>=0.4.30",
 ]
+visualization = [
+    "matplotlib>=3.8",
+    "pandas>=2.0",
+]
 hyperon = [
     "hyperon>=0.2.0",
 ]
@@ -109,6 +113,9 @@ include = [
     "losses*",
     "stages*",
     "metrics*",
+    "benchmark*",
+    "runtime*",
+    "training*",
     "experiments*",
     "scripts*",
 ]
@@ -170,6 +177,9 @@ known-first-party = [
 
 # ── Mypy ───────────────────────────────────────────────────────────────────
 [tool.mypy]
+# Resolve the benchmark package relative to the repository root.
+namespace_packages = true
+explicit_package_bases = true
 python_version = "3.12"
 warn_return_any = true
 warn_unused_ignores = true
