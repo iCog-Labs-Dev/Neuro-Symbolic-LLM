@@ -1008,9 +1008,7 @@ def test_summary_has_no_plotting_dependency():
 
     tree = ast.parse(Path(summary.__file__).read_text())
     imports = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
+        node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)
     ]
     assert all(
         "matplotlib" not in ast.unparse(node)

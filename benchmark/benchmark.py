@@ -104,7 +104,7 @@ def effective_condition(
     a2_arm: str | None,
     stage_config_sha256: str,
     runtime_config_sha256: str,
-    runtime_source: str,
+    runtime_source: str | None,
     epochs: int | None,
     source_sha256: str,
 ) -> dict[str, Any]:

@@ -221,7 +221,8 @@ def test_parser_runs_without_hybrid_miner() -> None:
     A fresh interpreter blocks every hybrid_miner import, imports each parser
     module, and loads the catalog the way the command line does.
     """
-    script = textwrap.dedent("""
+    script = textwrap.dedent(
+        """
         import argparse
         import importlib
         import pkgutil
@@ -240,7 +241,8 @@ def test_parser_runs_without_hybrid_miner() -> None:
             argparse.Namespace(ontology_modules=None, ontology_bundle=None)
         )
         assert "LocatedIn" in catalog.relations
-        """)
+        """
+    )
     subprocess.run(
         [sys.executable, "-c", script],
         check=True,
