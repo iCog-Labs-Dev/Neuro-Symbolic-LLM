@@ -56,7 +56,7 @@ def objective_at_latents(
     value_params: Mapping[str, Mapping[str, jax.Array]],
     input_ids: jax.Array,
     z_star: Mapping[int, jax.Array],
-    labels: Mapping[int, AlignmentLabels],
+    labels: Mapping[int, AlignmentLabels] | None,
     bank_keys: jax.Array,
     bank_values: jax.Array,
     *,
@@ -64,31 +64,68 @@ def objective_at_latents(
     value_weight: float = 1.0,
     token_mask: jax.Array | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Compute CE and key/value alignment with fixed residual weights and latents.
+    """Compute A4 loss using frozen A3 latents.
 
-    Every symbolic layer requires labelled token positions. Invalid dynamic
-    positions yield NaN, which the optimizer step rejects.
+    Runtime-only mode:
+        CE loss with symbolic retrieval and writeback.
+
+    Alignment-supervised mode:
+        CE + weighted key and value alignment losses.
+
+    Retrieval always uses the symbolic head's existing
+    precomputed template bank.
     """
+
     if any(
-        not math.isfinite(weight) or weight < 0 for weight in (key_weight, value_weight)
+        not math.isfinite(weight) or weight < 0
+        for weight in (key_weight, value_weight)
     ):
-        raise ValueError("Alignment weights must be finite and nonnegative")
-    if set(labels) != set(model.symbolic.layers) or set(value_params) != {
+        raise ValueError(
+            "Alignment weights must be finite and nonnegative"
+        )
+
+    expected_layers = set(model.symbolic.layers)
+    expected_values = {
         f"layer_{layer}" for layer in model.symbolic.layers
-    }:
-        raise ValueError("Labels and value parameters must cover every symbolic layer")
-    for positions, indices in labels.values():
-        if (
-            positions.ndim != 2
-            or positions.shape[1] != 2
-            or positions.shape[0] == 0
-            or not jnp.issubdtype(positions.dtype, jnp.integer)
-            or indices.shape != (positions.shape[0],)
-            or not jnp.issubdtype(indices.dtype, jnp.integer)
-        ):
+    }
+
+    if set(value_params) != expected_values:
+        raise ValueError(
+            "Value parameters must cover every symbolic layer"
+        )
+
+    # Runtime-only training does not require alignment labels.
+    alignment_enabled = key_weight > 0 or value_weight > 0
+
+    if alignment_enabled:
+        if labels is None or set(labels) != expected_layers:
             raise ValueError(
-                "Each integer [count, 2] position needs one integer target"
+                "Alignment labels are required when key/value "
+                "alignment weights are nonzero"
             )
+
+        for positions, indices in labels.values():
+            if (
+                positions.ndim != 2
+                or positions.shape[1] != 2
+                or positions.shape[0] == 0
+                or not jnp.issubdtype(
+                    positions.dtype, jnp.integer
+                )
+                or indices.shape != (positions.shape[0],)
+                or not jnp.issubdtype(
+                    indices.dtype, jnp.integer
+                )
+            ):
+                raise ValueError(
+                    "Each labelled position requires one "
+                    "integer template index"
+                )
+
+    # Forward pass:
+    # Frozen GPT-2 + frozen A3 + trainable A4 symbolic head.
+    # The symbolic head performs query projection,
+    # retrieval and writeback inside the model forward pass.
     terms, states = _task_terms_at_latents(
         model,
         continuous_params,
@@ -97,33 +134,64 @@ def objective_at_latents(
         z_star,
         token_mask=token_mask,
     )
+
     key_loss = jnp.asarray(0.0, dtype=jnp.float32)
     value_loss = jnp.asarray(0.0, dtype=jnp.float32)
-    predictor = ValuePredictor(model.symbolic.hidden_size, model.symbolic.key_dim)
-    for layer in model.symbolic.layers:
-        positions, indices = labels[layer]
-        valid = (
-            (positions[:, 0] >= 0)
-            & (positions[:, 0] < input_ids.shape[0])
-            & (positions[:, 1] >= 0)
-            & (positions[:, 1] < input_ids.shape[1])
+
+    if alignment_enabled:
+        predictor = ValuePredictor(
+            model.symbolic.hidden_size,
+            model.symbolic.key_dim,
         )
-        batch = jnp.clip(positions[:, 0], 0, input_ids.shape[0] - 1)
-        token = jnp.clip(positions[:, 1], 0, input_ids.shape[1] - 1)
-        if token_mask is not None:
-            valid = valid & token_mask[batch, token]
-        hidden = states[layer][batch, token]
-        name = f"layer_{layer}"
-        aligned = alignment_loss(
-            model.symbolic.project(symbolic_params[name], hidden),
-            predictor.apply(value_params[name], hidden),
-            bank_keys,
-            bank_values,
-            indices,
-        )
-        key_loss = key_loss + jnp.where(jnp.all(valid), aligned.key, jnp.nan)
-        value_loss = value_loss + jnp.where(jnp.all(valid), aligned.value, jnp.nan)
-    total = terms["total"] + key_weight * key_loss + value_weight * value_loss
+
+        for layer in model.symbolic.layers:
+            positions, indices = labels[layer]
+
+            valid = (
+                (positions[:, 0] >= 0)
+                & (positions[:, 0] < input_ids.shape[0])
+                & (positions[:, 1] >= 0)
+                & (positions[:, 1] < input_ids.shape[1])
+            )
+
+            batch = jnp.clip(
+                positions[:, 0], 0, input_ids.shape[0] - 1
+            )
+            token = jnp.clip(
+                positions[:, 1], 0, input_ids.shape[1] - 1
+            )
+
+            if token_mask is not None:
+                valid = valid & token_mask[batch, token]
+
+            hidden = states[layer][batch, token]
+            name = f"layer_{layer}"
+
+            aligned = alignment_loss(
+                model.symbolic.project(
+                    symbolic_params[name], hidden
+                ),
+                predictor.apply(
+                    value_params[name], hidden
+                ),
+                bank_keys,
+                bank_values,
+                indices,
+            )
+
+            key_loss = key_loss + jnp.where(
+                jnp.all(valid), aligned.key, jnp.nan
+            )
+            value_loss = value_loss + jnp.where(
+                jnp.all(valid), aligned.value, jnp.nan
+            )
+
+    total = (
+        terms["total"]
+        + key_weight * key_loss
+        + value_weight * value_loss
+    )
+
     return total, {
         **terms,
         "total": total,

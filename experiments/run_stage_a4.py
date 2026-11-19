@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import math
 import os
@@ -23,20 +24,82 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_CONFIG = REPO_ROOT / "configs/stage_A/a4_symbolic_head.yaml"
+DEFAULT_RUNTIME_CONFIG = REPO_ROOT / "configs/runtime_datasets.yaml"
+
+# Temporary synthetic bank for A4 integration testing.
+# Replace with the real miner-generated bank for production.
+DEFAULT_BANK_DIR = REPO_ROOT / "data/a4_test_bank"
+DEFAULT_PATTERNS = DEFAULT_BANK_DIR / "patterns.jsonl"
+DEFAULT_EMBEDDINGS = DEFAULT_BANK_DIR / "embeddings.jsonl"
+
+DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
+
+
+def find_latest_a3_checkpoint(runs_dir: Path = DEFAULT_RUNS_DIR) -> Path:
+    """Find the latest completed A3 checkpoint."""
+    valid = []
+    for checkpoint in runs_dir.glob("a3hybrid-*/checkpoints/a3hybrid_final.npz"):
+        if not checkpoint.is_file():
+            continue
+        meta_path = checkpoint.parents[1] / "meta.json"
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(metadata, dict) and metadata.get("stage") == "A3":
+            valid.append(checkpoint)
+
+    if not valid:
+        raise FileNotFoundError(
+            f"No valid A3 checkpoint found under {runs_dir}. "
+            "Run A3 training first or provide --warm-start."
+        )
+
+    return max(valid, key=lambda path: path.stat().st_mtime_ns)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--data-mode",
+        choices=("runtime", "aligned"),
+        default="runtime",
+        help="Runtime sequential datasets or legacy aligned source data.",
+    )
+
+    parser.add_argument(
+        "--runtime-config",
+        type=Path,
+        default=DEFAULT_RUNTIME_CONFIG,
+        help="Shared runtime dataset configuration.",
+    )
+
+    parser.add_argument(
+        "--warm-start",
+        type=Path,
+        default=None,
+        help="A3 checkpoint. Defaults to the latest completed A3 checkpoint.",
+    )
+    parser.add_argument(
+        "--patterns",
+        type=Path,
+        default=DEFAULT_PATTERNS,
+        help="Symbolic pattern bank JSONL.",
+    )
+    parser.add_argument(
+        "--embeddings",
+        type=Path,
+        default=DEFAULT_EMBEDDINGS,
+        help="Template key/value embedding JSONL.",
+    )
+
     for name in (
-        "warm-start",
         "train-sources",
         "validation-sources",
         "alignment-labels",
-        "patterns",
-        "embeddings",
     ):
-        parser.add_argument(f"--{name}", type=Path, required=True)
+        parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--test-sources", type=Path)
     parser.add_argument("--skip-test", action="store_true")
     parser.add_argument(
@@ -78,8 +141,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--precision", choices=("default", "highest"), default="highest"
     )
     args = parser.parse_args(argv)
-    if not args.skip_test and args.test_sources is None:
-        parser.error("--test-sources is required unless --skip-test is selected")
+    if args.data_mode == "aligned":
+        required_sources = (
+            "train_sources",
+            "validation_sources",
+            "alignment_labels",
+        )
+
+        for name in required_sources:
+            if getattr(args, name) is None:
+                parser.error(
+                    f"--{name.replace('_', '-')} is required "
+                    "in aligned mode"
+                )
+
+        if not args.skip_test and args.test_sources is None:
+            parser.error(
+                "--test-sources is required unless --skip-test "
+                "is selected"
+            )
+    else:
+        if not args.runtime_config.is_file():
+            parser.error(
+                f"Runtime dataset config not found: {args.runtime_config}"
+            )
     for name in (
         "batch_size",
         "seq_len",
@@ -138,18 +223,29 @@ def main(
     argv: Sequence[str] | None = None, *, substrate: FrozenSubstrate | None = None
 ) -> int:
     args = parse_args(argv)
+    if args.warm_start is None:
+        args.warm_start = find_latest_a3_checkpoint()
+
+    if not args.warm_start.is_file():
+        raise FileNotFoundError(f"A3 checkpoint not found: {args.warm_start}")
+    if not args.patterns.is_file():
+        raise FileNotFoundError(f"Pattern bank not found: {args.patterns}")
+    if not args.embeddings.is_file():
+        raise FileNotFoundError(f"Embedding bank not found: {args.embeddings}")
+
     import jax
     import torch
 
     from residual import ResidualAdapter
     from residual.symbolic_head.jax_head import Retriever, SymbolicHead
+    from runtime.data_loader import load_runtime_data
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
     from stages.stage_A.a3 import A3HybridConfig, A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
     from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, load_config
     from stages.stage_A.a4.data import load_data
     from stages.stage_A.a4.model import A4Model
-    from stages.stage_A.a4.training import train
+    from stages.stage_A.a4.training import train, train_sequential
     from stages.stage_base import configure_logging, load_configs
     from symbolic_memory.bank import load_bank
     from symbolic_memory.jax_bridge import JaxRetriever
@@ -157,6 +253,11 @@ def main(
     from symbolic_memory.storage import MorkTemplateStore
 
     configure_logging(level=logging.INFO)
+    log = logging.getLogger("stage_a4")
+    log.info("A3 checkpoint: %s", args.warm_start)
+    log.info("Pattern bank: %s", args.patterns)
+    log.info("Embedding bank: %s", args.embeddings)
+
     config = load_config(args.config)
     overrides = {
         name: getattr(args, name)
@@ -202,7 +303,36 @@ def main(
         config=inherited.objective,
     )
     frozen_residual = restore_a3_weights(continuous, load_params(args.warm_start))
-    data = load_data(args, substrate.tokenizer, bank, config.training)
+    if args.data_mode == "runtime":
+        data = load_runtime_data(
+            args.runtime_config,
+            substrate.tokenizer,
+            sequence_length=config.training.seq_len,
+            batch_size=config.training.batch_size,
+            eval_batches=config.training.eval_batches,
+            default_epochs=config.training.epochs,
+        )
+
+        # Runtime-only training uses next-token CE.
+        # The template bank remains active for retrieval.
+        config = replace(
+            config,
+            key_weight=0.0,
+            value_weight=0.0,
+        )
+
+        logging.getLogger("stage_a4").info(
+            "Loaded %d runtime tasks: %s",
+            len(data.tasks),
+            ", ".join(data.task_order),
+        )
+    else:
+        data = load_data(
+            args,
+            substrate.tokenizer,
+            bank,
+            config.training,
+        )
     retriever: Retriever
     with ExitStack() as stack:
         if args.retrieval_backend == "native":
@@ -243,7 +373,12 @@ def main(
             config.training.output_dir, args.run_name or default_run_name("a4")
         ) as writer:
             writer.write_config(config.to_dict())
-            writer.write_json("data.json", data.provenance)
+            writer.write_json(
+                "data.json",
+                data.metadata
+                if args.data_mode == "runtime"
+                else data.provenance,
+            )
             writer.write_json(
                 "meta.json",
                 {
@@ -308,16 +443,29 @@ def main(
             training_log.setFormatter(logging.Formatter("%(message)s"))
             logger.addHandler(training_log)
             try:
-                train(
-                    model,
-                    frozen_residual,
-                    data,
-                    bank,
-                    config,
-                    writer,
-                    max_grad_norm=args.max_grad_norm,
-                    latency_every=0 if args.skip_latency else args.latency_every,
-                )
+                if args.data_mode == "runtime":
+                    train_sequential(
+                        model,
+                        frozen_residual,
+                        data,
+                        bank,
+                        config,
+                        writer,
+                        max_grad_norm=args.max_grad_norm,
+                    )
+                else:
+                    train(
+                        model,
+                        frozen_residual,
+                        data,
+                        bank,
+                        config,
+                        writer,
+                        max_grad_norm=args.max_grad_norm,
+                        latency_every=(
+                            0 if args.skip_latency else args.latency_every
+                        ),
+                    )
                 writer.write_json("status.json", {"stage": "A4", "status": "completed"})
             except BaseException as error:
                 writer.write_json(

@@ -1,5 +1,6 @@
 """Stage A4 command-line validation."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +11,11 @@ import pytest
 
 from experiments.run_stage_a4 import (
     DEFAULT_CONFIG,
+    DEFAULT_EMBEDDINGS,
+    DEFAULT_PATTERNS,
+    DEFAULT_RUNTIME_CONFIG,
     _resolve_substrate,
+    find_latest_a3_checkpoint,
     parse_args,
 )
 
@@ -54,18 +59,12 @@ def test_standalone_run_loads_one_substrate(monkeypatch):
 
 def arguments(*extra):
     return [
-        "--warm-start",
-        "a3.npz",
         "--train-sources",
         "train.jsonl",
         "--validation-sources",
         "validation.jsonl",
         "--alignment-labels",
         "labels.json",
-        "--patterns",
-        "patterns.jsonl",
-        "--embeddings",
-        "embeddings.jsonl",
         "--retrieval-backend",
         "tcp",
         "--skip-test",
@@ -76,6 +75,11 @@ def arguments(*extra):
 def test_defaults_use_a4_configuration():
     args = parse_args(arguments())
     assert args.config == DEFAULT_CONFIG
+    assert args.runtime_config == DEFAULT_RUNTIME_CONFIG
+    assert args.data_mode == "runtime"
+    assert args.warm_start is None
+    assert args.patterns == DEFAULT_PATTERNS
+    assert args.embeddings == DEFAULT_EMBEDDINGS
     assert args.epochs is None
     assert not args.skip_latency
     assert parse_args(arguments("--skip-latency")).skip_latency
@@ -86,13 +90,48 @@ def test_defaults_use_a4_configuration():
     assert not hasattr(args, "comparison_steps")
 
 
-@pytest.mark.parametrize("required", ["--warm-start", "--alignment-labels"])
-def test_requires_checkpoint_and_firing_labels(required):
-    argv = arguments()
-    index = argv.index(required)
+def test_accepts_checkpoint_and_bank_overrides():
+    args = parse_args(
+        arguments(
+            "--warm-start",
+            "a3.npz",
+            "--patterns",
+            "patterns.jsonl",
+            "--embeddings",
+            "embeddings.jsonl",
+        )
+    )
+    assert args.warm_start == Path("a3.npz")
+    assert args.patterns == Path("patterns.jsonl")
+    assert args.embeddings == Path("embeddings.jsonl")
+
+
+def test_requires_firing_labels_in_aligned_mode():
+    argv = arguments("--data-mode", "aligned")
+    index = argv.index("--alignment-labels")
     del argv[index : index + 2]
     with pytest.raises(SystemExit):
         parse_args(argv)
+
+
+def test_finds_newest_completed_a3_checkpoint(tmp_path):
+    def checkpoint(run, name, metadata, timestamp):
+        run_dir = tmp_path / run
+        path = run_dir / "checkpoints" / name
+        path.parent.mkdir(parents=True)
+        path.touch()
+        (run_dir / "meta.json").write_text(metadata, encoding="utf-8")
+        os.utime(path, (timestamp, timestamp))
+        return path
+
+    final = "a3hybrid_final.npz"
+    a3 = '{"stage": "A3"}'
+    checkpoint("a3hybrid-old", final, a3, 1)
+    latest = checkpoint("a3hybrid-new", final, a3, 2)
+    checkpoint("a3hybrid-incomplete", "task_0_stories.npz", a3, 3)
+    checkpoint("a3hybrid-wrong-stage", final, '{"stage": "A2"}', 4)
+    checkpoint("a3hybrid-invalid", final, "[]", 5)
+    assert find_latest_a3_checkpoint(tmp_path) == latest
 
 
 @pytest.mark.parametrize(
@@ -119,7 +158,7 @@ def test_rejects_invalid_or_nontraining_options(extra):
 
 
 def test_test_split_is_explicit():
-    argv = arguments()
+    argv = arguments("--data-mode", "aligned")
     argv.remove("--skip-test")
     with pytest.raises(SystemExit):
         parse_args(argv)
