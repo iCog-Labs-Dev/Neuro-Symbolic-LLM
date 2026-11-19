@@ -76,6 +76,8 @@ logs/
 bin/
 # Jupyter
 .ipynb_checkpoints/
+/john.ipynb
+/run_benchmark_jupyterhub.ipynb
 
 # Build artifacts
 *.egg-info/
@@ -138,6 +140,8 @@ htmlcov/
 Thumbs.db
 .DS_Store
 runs/
+/benchmark-work/
+/benchmark-results-*.zip
 models/
 .local-tools/
 .review-notes/

@@ -408,11 +408,7 @@ def build_routed_extraction_prompt(
 
     input_section = general.text[input_section_match.end() :]
     combined = (
-        discourse_guidance
-        + "\n\n"
-        + general_instructions.rstrip()
-        + "\n\n"
-        + """
+        discourse_guidance + "\n\n" + general_instructions.rstrip() + "\n\n" + """
     ## FINAL COMBINED EXTRACTION REQUIREMENTS
 
     You must perform BOTH stages in this single generation.
@@ -471,12 +467,20 @@ def build_routed_extraction_prompt(
 
     Do not return only discourse assertions.
     Do not return a separate DiscourseExtraction object.
-    """
-        + "\n\n"
-        + input_heading
-        + "\n"
-        + input_section
+    """ + "\n\n" + input_heading + "\n" + input_section
     )
+
+    # Preserve the input heading when a routed prompt splits instructions from input.
+    input_heading = next(
+        (
+            line
+            for line in general.text.splitlines()
+            if line.lstrip().startswith("## ") and line.strip().endswith(". INPUT")
+        ),
+        "",
+    )
+    if input_heading and input_heading not in combined and input_section:
+        combined = combined[: -len(input_section)] + input_heading + input_section
 
     return CatalogDocumentPrompt(
         version=(
