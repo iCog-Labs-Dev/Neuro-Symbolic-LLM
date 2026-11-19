@@ -14,6 +14,7 @@ from experiments.run_stage_a4 import (
     DEFAULT_EMBEDDINGS,
     DEFAULT_PATTERNS,
     DEFAULT_RUNTIME_CONFIG,
+    _apply_training_overrides,
     _resolve_substrate,
     find_latest_a3_checkpoint,
     parse_args,
@@ -88,6 +89,21 @@ def test_defaults_use_a4_configuration():
     assert parse_args(arguments("--log-every", "1")).log_every == 1
     assert not hasattr(args, "compare")
     assert not hasattr(args, "comparison_steps")
+
+
+def test_effective_seed_and_epochs_round_trip(tmp_path):
+    import yaml
+
+    from stages.stage_A.a4.config import load_config
+
+    args = parse_args(arguments("--seed", "879", "--epochs", "2", "--rank", "16"))
+    config = _apply_training_overrides(load_config(args.config), args)
+    assert config.training.seed == 879
+    assert config.training.epochs == 2
+    recorded = tmp_path / "recorded.yaml"
+    recorded.write_text(yaml.safe_dump(config.to_dict()))
+    restored = load_config(recorded, recorded=True)
+    assert restored == config
 
 
 def test_accepts_checkpoint_and_bank_overrides():

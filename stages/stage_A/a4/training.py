@@ -17,6 +17,7 @@ import optax
 from metrics.a4.console import training_row
 from residual.symbolic_head.alignment import ValuePredictor
 from stages.results import RunWriter
+from stages.stage_A.a4.checkpoint import pack_head_params
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config
 from stages.stage_A.a4.data import A4Data
 from stages.stage_A.a4.model import A4Model
@@ -248,6 +249,7 @@ def evaluate(
     token_masks=None,
     *,
     eval_batches=None,
+    symbolic_enabled=True,
 ):
     """Evaluate label-free deployment cross-entropy and perplexity.
 
@@ -265,6 +267,7 @@ def evaluate(
             head_params["symbolic"],
             ids,
             latents,
+            symbolic_enabled=symbolic_enabled,
         )
 
         labels = jnp.where(mask, ids, -100)
@@ -570,6 +573,9 @@ def train(
 
     results = {
         "stage": "A4",
+        "mode": "standalone_aligned",
+        "seed": training.seed,
+        "checkpoints": ["checkpoints/a4-final.npz"],
         "training_state_source": TRAINING_STATE_SOURCE,
         "updates": updates,
         "frozen_residual_sha256": fingerprint,
@@ -598,6 +604,29 @@ def train(
             eval_batches=training.test_batches,
         )
 
+    results["frozen_a3_baseline"] = {
+        "validation": evaluate(
+            model,
+            frozen_residual,
+            params,
+            data.validation,
+            training,
+            data.validation_mask,
+            symbolic_enabled=False,
+        )
+    }
+    if data.test is not None:
+        results["frozen_a3_baseline"]["test"] = evaluate(
+            model,
+            frozen_residual,
+            params,
+            data.test,
+            training,
+            data.test_mask,
+            eval_batches=training.test_batches,
+            symbolic_enabled=False,
+        )
+
     writer.save_params(
         "a3-frozen",
         model.continuous.adapter_params(frozen_residual),
@@ -605,11 +634,7 @@ def train(
 
     writer.save_checkpoint(
         "a4-final",
-        {
-            f"{group}.{layer}": weights
-            for group, layers in params.items()
-            for layer, weights in layers.items()
-        },
+        pack_head_params(params),
         opt_state=state,
         updates=updates,
         training_state_source=TRAINING_STATE_SOURCE,
@@ -732,31 +757,42 @@ def train_sequential(
     )
 
     names = [task.name for task in tasks]
+    shared_validation = data.metadata["validation_scope"] == "shared"
+    eval_sets = (
+        {"shared_validation": tasks[0].eval_set}
+        if shared_validation
+        else {task.name: task.eval_set for task in tasks}
+    )
     eval_blocks = {
-        task.name: np.concatenate(
-            [np.asarray(batch) for batch in task.eval_set],
-            axis=0,
-        )
-        for task in tasks
+        name: np.concatenate(batches, axis=0) for name, batches in eval_sets.items()
     }
+    if not shared_validation:
+        seen: set[bytes] = set()
+        for blocks in eval_blocks.values():
+            fingerprints = {row.tobytes() for row in blocks}
+            if seen.intersection(fingerprints):
+                raise ValueError(
+                    "Task-specific evaluation requires distinct validation sets"
+                )
+            seen.update(fingerprints)
 
     def evaluate_all(after_task):
         results = {}
-        for task in tasks:
-            results[task.name] = evaluate(
+        for name, blocks in eval_blocks.items():
+            results[name] = evaluate(
                 model,
                 frozen_residual,
                 params,
-                eval_blocks[task.name],
+                blocks,
                 training,
-                eval_batches=len(task.eval_set),
+                eval_batches=len(eval_sets[name]),
             )
             writer.log(
                 "eval",
                 after_task=after_task,
-                domain=task.name,
+                domain=name,
                 split="validation",
-                **results[task.name],
+                **results[name],
             )
         return results
 
@@ -830,11 +866,7 @@ def train_sequential(
 
         writer.save_checkpoint(
             f"task_{task_index}_{task.name}",
-            {
-                f"{group}.{layer}": weights
-                for group, layers in params.items()
-                for layer, weights in layers.items()
-            },
+            pack_head_params(params),
             opt_state=state,
             updates=updates,
             bank_snapshot_sha256=bank.input_snapshot_sha256,
@@ -848,40 +880,55 @@ def train_sequential(
     if not frozen["params_unchanged"]:
         raise RuntimeError("Frozen LLM changed")
 
-    from stages.stage_base import mean_forgetting
-
-    loss_matrix = np.asarray(
-        [
-            [row[name]["loss"] for name in names]
-            for row in history
-        ],
-        dtype=float,
-    )
-
-    forgetting = [
-        None if index == 0 else float(
-            mean_forgetting(
-                loss_matrix,
-                index,
-                higher_is_better=False,
-            )
-        )
-        for index in range(len(history))
-    ]
-
     report = {
         "stage": "A4",
         "mode": "runtime_sequential",
+        "training_state_source": TRAINING_STATE_SOURCE,
+        "seed": training.seed,
         "task_order": names,
+        "task_epochs": {task.name: task.epochs for task in tasks},
+        "validation_scope": data.metadata["validation_scope"],
         "updates": updates,
         "initial": initial,
         "after_task": history,
-        "loss_matrix": loss_matrix.tolist(),
-        "mean_forgetting": forgetting,
+        "test": {
+            name: evaluate(
+                model,
+                frozen_residual,
+                params,
+                blocks,
+                training,
+                eval_batches=training.test_batches,
+            )
+            for name, blocks in data.test_blocks.items()
+        },
         "frozen": frozen,
         "frozen_residual_sha256": fingerprint,
         "bank_snapshot_sha256": bank.input_snapshot_sha256,
+        "checkpoints": [
+            *(
+                f"checkpoints/task_{index}_{name}.npz"
+                for index, name in enumerate(names)
+            ),
+            "checkpoints/a4-final.npz",
+        ],
     }
+    if not shared_validation:
+        from stages.stage_base import mean_forgetting
+
+        losses = np.asarray([[row[name]["loss"] for name in names] for row in history])
+        report["loss_matrix"] = losses.tolist()
+        report["perplexity_matrix"] = [
+            [row[name]["ppl"] for name in names] for row in history
+        ]
+        report["mean_forgetting"] = [
+            None if index == 0 else float(mean_forgetting(losses, index))
+            for index in range(len(history))
+        ]
+        if len(names) > 1:
+            report["backward_transfer_ce"] = float(
+                np.mean(losses.diagonal()[:-1] - losses[-1, :-1])
+            )
 
     writer.save_params(
         "a3-frozen",
@@ -890,11 +937,7 @@ def train_sequential(
 
     writer.save_checkpoint(
         "a4-final",
-        {
-            f"{group}.{layer}": weights
-            for group, layers in params.items()
-            for layer, weights in layers.items()
-        },
+        pack_head_params(params),
         opt_state=state,
         updates=updates,
         bank_snapshot_sha256=bank.input_snapshot_sha256,

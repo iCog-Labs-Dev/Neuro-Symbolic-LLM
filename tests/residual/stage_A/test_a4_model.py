@@ -25,7 +25,7 @@ from residual.symbolic_head.jax_head import SymbolicHead  # noqa: E402
 from stages.results import RunWriter, load_params  # noqa: E402
 from stages.stage_A.a3 import A3HybridConfig, A3Model  # noqa: E402
 from stages.stage_A.a3.a3_tail import residual_modify  # noqa: E402
-from stages.stage_A.a4.checkpoint import restore_a3_weights  # noqa: E402
+from stages.stage_A.a4.checkpoint import restore_a3_weights, unpack_head_params  # noqa: E402
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config  # noqa: E402
 from stages.stage_A.a4.data import A4Data  # noqa: E402
 from stages.stage_A.a4.model import A4Model  # noqa: E402
@@ -39,8 +39,9 @@ from stages.stage_A.a4.training import (  # noqa: E402
     make_train_step,
     residual_fingerprint,
     train,
+    train_sequential,
 )
-from stages.stage_base import TrainingConfig  # noqa: E402
+from stages.stage_base import Domain, TrainingConfig  # noqa: E402
 from symbolic_memory.jax_bridge import RetrievedTemplates  # noqa: E402
 from tests.frozenllm.conftest import _torch_model  # noqa: E402
 
@@ -225,7 +226,7 @@ def test_checkpoint_rejects_invalid_weights(env, invalid):
 
 
 def test_objective_rejects_invalid_label_shape_before_retrieval(env):
-    with pytest.raises(ValueError, match="position needs one integer target"):
+    with pytest.raises(ValueError, match="position requires one integer template index"):
         objective_at_latents(
             env.a4,
             env.params,
@@ -371,7 +372,7 @@ def test_zero_value_weight_disables_predictor_gradient(env, aligned_env):
 
 
 @pytest.mark.parametrize(
-    "key_weight,value_weight", [(1.0, 1.0), (0.0, 0.0), (0.25, 2.0)]
+    "key_weight,value_weight", [(1.0, 1.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)]
 )
 def test_aligned_objective_is_exactly_ce_plus_key_and_value(
     env, aligned_env, monkeypatch, key_weight, value_weight
@@ -394,6 +395,8 @@ def test_aligned_objective_is_exactly_ce_plus_key_and_value(
         jnp.sum((predictions - aligned.values[jnp.array([0, 2])]) ** 2, axis=-1)
     )
     expected_ce = env.sub.compute_loss(result.logits, env.ids, losses=("CE",))
+    if not (key_weight or value_weight):
+        expected_key = expected_value = 0.0
 
     total, terms = jax.jit(
         lambda params: objective_at_latents(
@@ -829,3 +832,85 @@ def test_eager_train_step_uses_same_parameter_groups(run):
         jnp.array([0]),
     )
     assert bool(finite) and set(updated) == {"symbolic", "value"}
+
+@pytest.mark.parametrize("scope", ["shared", "task_specific"])
+def test_sequential_checkpoints_round_trip_all_parameters(
+    run, tmp_path, monkeypatch, scope
+):
+    from stages.stage_A.a4 import training
+
+    config = replace(run.config, key_weight=0.0, value_weight=0.0)
+    blocks = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
+    alternate = blocks + 5
+    tasks = (
+        Domain("first", blocks, (jnp.asarray(blocks),), 1),
+        Domain(
+            "second",
+            alternate,
+            (jnp.asarray(blocks if scope == "shared" else alternate),),
+            1,
+        ),
+    )
+    data = SimpleNamespace(
+        tasks=tasks,
+        metadata={"validation_scope": scope},
+        test_blocks={"stories": blocks},
+    )
+    with RunWriter(tmp_path, "sequential") as writer:
+        save = writer.save_checkpoint
+        pack = training.pack_head_params
+        saved_tags = []
+        snapshots = []
+
+        def capture(params):
+            snapshots.append(jax.tree.map(np.asarray, params))
+            return pack(params)
+
+        def verify_checkpoint(tag, params, **metadata):
+            path = save(tag, params, **metadata)
+            expected = snapshots[-1]
+            for artifact in (path, writer.dir / "params" / f"{tag}.npz"):
+                actual = unpack_head_params(load_params(artifact))
+                assert jax.tree.structure(actual) == jax.tree.structure(expected)
+                for left, right in zip(
+                    jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+                ):
+                    assert left.dtype == right.dtype
+                    np.testing.assert_array_equal(left, right)
+            saved_tags.append(tag)
+            return path
+
+        monkeypatch.setattr(training, "pack_head_params", capture)
+        monkeypatch.setattr(writer, "save_checkpoint", verify_checkpoint)
+        report = train_sequential(run.model, run.frozen, data, run.bank, config, writer)
+
+    assert saved_tags == ["task_0_first", "task_1_second", "a4-final"]
+    assert report["updates"] == 2
+    assert report["task_order"] == ["first", "second"]
+    assert report["test"]["stories"]["tokens"] == 4
+    assert len(report["after_task"]) == 2
+    if scope == "shared":
+        assert all(set(row) == {"shared_validation"} for row in report["after_task"])
+        assert {"loss_matrix", "mean_forgetting", "backward_transfer_ce"}.isdisjoint(
+            report
+        )
+    else:
+        assert all(set(row) == {"first", "second"} for row in report["after_task"])
+        losses = report["loss_matrix"]
+        assert report["backward_transfer_ce"] == pytest.approx(
+            losses[0][0] - losses[1][0]
+        )
+
+
+def test_sequential_task_specific_validation_rejects_shared_partitions(run, tmp_path):
+    config = replace(run.config, key_weight=0.0, value_weight=0.0)
+    blocks = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
+    tasks = tuple(
+        Domain(name, blocks, (jnp.asarray(blocks),), 1) for name in ("one", "two")
+    )
+    data = SimpleNamespace(tasks=tasks, metadata={"validation_scope": "task_specific"})
+    with (
+        RunWriter(tmp_path, "sequential") as writer,
+        pytest.raises(ValueError, match="distinct validation sets"),
+    ):
+        train_sequential(run.model, run.frozen, data, run.bank, config, writer)

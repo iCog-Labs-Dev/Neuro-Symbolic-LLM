@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from frozenllm.substrate import FrozenSubstrate
+    from stages.stage_A.a4.config import A4Config
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +116,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model")
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--rank", type=int, help="Expected rank of the A3 warm start.")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seq-len", type=int)
     parser.add_argument("--learning-rate", type=float)
@@ -183,6 +186,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             parser.error(f"Invalid --{name.replace('_', '-')}")
     if args.epochs is not None and args.epochs < 0:
         parser.error("--epochs must be nonnegative")
+    if args.seed is not None and not 0 <= args.seed < 2**32:
+        parser.error("--seed must be an unsigned 32-bit integer")
+    if args.rank is not None and args.rank < 1:
+        parser.error("--rank must be positive")
     for name in ("learning_rate", "max_grad_norm"):
         value = getattr(args, name)
         if value is not None and (not math.isfinite(value) or value <= 0):
@@ -198,6 +205,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Native retrieval requires --native-library and its build manifest"
         )
     return args
+
+
+def _apply_training_overrides(config: A4Config, args: argparse.Namespace) -> A4Config:
+    overrides = {
+        name: getattr(args, name)
+        for name in (
+            "model",
+            "seed",
+            "epochs",
+            "batch_size",
+            "seq_len",
+            "learning_rate",
+            "eval_batches",
+            "log_every",
+            "output_dir",
+        )
+        if getattr(args, name) is not None
+    }
+    return replace(
+        config,
+        training=replace(
+            config.training, **overrides, jit=config.training.jit and not args.no_jit
+        ),
+    )
 
 
 def _resolve_substrate(
@@ -240,13 +271,17 @@ def main(
     from residual.symbolic_head.jax_head import Retriever, SymbolicHead
     from runtime.data_loader import load_runtime_data
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
-    from stages.stage_A.a3 import A3HybridConfig, A3Model
+    from stages.stage_A.a3 import A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
-    from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, load_config
+    from stages.stage_A.a4.config import (
+        TRAINING_STATE_SOURCE,
+        load_config,
+        load_residual_config,
+    )
     from stages.stage_A.a4.data import load_data
     from stages.stage_A.a4.model import A4Model
     from stages.stage_A.a4.training import train, train_sequential
-    from stages.stage_base import configure_logging, load_configs
+    from stages.stage_base import configure_logging
     from symbolic_memory.bank import load_bank
     from symbolic_memory.jax_bridge import JaxRetriever
     from symbolic_memory.service import RetrievalClient
@@ -259,37 +294,29 @@ def main(
     log.info("Embedding bank: %s", args.embeddings)
 
     config = load_config(args.config)
-    overrides = {
-        name: getattr(args, name)
-        for name in (
-            "model",
-            "epochs",
-            "batch_size",
-            "seq_len",
-            "learning_rate",
-            "eval_batches",
-            "log_every",
-            "output_dir",
-        )
-        if getattr(args, name) is not None
-    }
-    config = replace(
-        config,
-        training=replace(
-            config.training, **overrides, jit=config.training.jit and not args.no_jit
-        ),
-    )
+    config = _apply_training_overrides(config, args)
     jax.config.update("jax_default_matmul_precision", args.precision)
     torch.set_num_threads(2)
     torch.manual_seed(config.training.seed)
     bank = load_bank(args.patterns, args.embeddings)
     if len(bank.records) < config.minimum_templates:
         raise ValueError(f"Bank needs at least {config.minimum_templates} templates")
-    inherited = load_configs(
-        config.residual_config,
-        A3HybridConfig,
-        objective_section="a3_hybrid",
-    )
+    inherited = load_residual_config(config.residual_config)
+    if args.rank is not None and inherited.adapter.rank != args.rank:
+        raise ValueError("Requested rank differs from the inherited A3 rank")
+    warm_start = args.warm_start.resolve()
+    recorded_path = warm_start.parent.parent / "config.yaml"
+    if warm_start.parent.name in {"checkpoints", "params"} and recorded_path.is_file():
+        recorded = load_residual_config(recorded_path)
+        inherited_adapter = replace(inherited.adapter, seed=recorded.adapter.seed)
+        if (
+            recorded.adapter != inherited_adapter
+            or recorded.objective != inherited.objective
+            or recorded.training.model != config.training.model
+        ):
+            raise ValueError(
+                "Inherited residual configuration differs from the A3 warm start"
+            )
     substrate_reused = substrate is not None
     substrate = _resolve_substrate(config.training.model, substrate)
     adapter = ResidualAdapter(inherited.adapter, substrate.architecture)
@@ -311,6 +338,8 @@ def main(
             batch_size=config.training.batch_size,
             eval_batches=config.training.eval_batches,
             default_epochs=config.training.epochs,
+            epochs_override=args.epochs,
+            training_mode="sequential",
         )
 
         # Runtime-only training uses next-token CE.
@@ -404,6 +433,8 @@ def main(
                             "stages/stage_A/a4/objective.py",
                             "stages/stage_A/a4/training.py",
                             "stages/stage_A/a4/config.py",
+                            "stages/stage_A/a4/checkpoint.py",
+                            "runtime/data_loader.py",
                             "residual/symbolic_head/alignment.py",
                             "frozenllm/substrate/loader.py",
                             "frozenllm/substrate/substrate.py",
@@ -415,6 +446,10 @@ def main(
                         )
                     },
                     "model": config.training.model,
+                    "seed": config.training.seed,
+                    "rank": inherited.adapter.rank,
+                    "data_mode": args.data_mode,
+                    "runtime_data": data.metadata if args.data_mode == "runtime" else None,
                     "substrate_reused": substrate_reused,
                     "layers": list(continuous.layers),
                     "bank_snapshot": bank.input_snapshot_sha256,

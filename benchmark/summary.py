@@ -18,6 +18,7 @@ from benchmark.benchmark import (
     _read_json,
     _select_headline_cohort,
     _write_json,
+    a4_comparison_groups,
     measurement_reason,
     metric_values_for_record,
     resolve_report_dir,
@@ -54,7 +55,9 @@ def _realized_task_orders(records: list[dict[str, Any]]) -> str:
     return "; ".join(_format_task_order(list(order)) for order in orders) or "N/A"
 
 
-def _comparison_table(cohort, specs, records: list[dict[str, Any]] | None = None) -> list[str]:
+def _comparison_table(
+    cohort, specs, records: list[dict[str, Any]] | None = None
+) -> list[str]:
     labels = [label for label, _, _ in specs]
     lines = [
         f"| Method | {' | '.join(labels)} |",
@@ -68,28 +71,30 @@ def _comparison_table(cohort, specs, records: list[dict[str, Any]] | None = None
         )
         for _, key, _ in specs
     }
-    if records is not None:
-        for _, key, _ in specs:
-            metric_samples[key]["a4"] = [
-                (int(record.get("seed", 0)), value)
-                for record in records
-                if record.get("method") == "a4"
-                for value in metric_values_for_record(
-                    record, key, int(record.get("rank", 16))
-                )
-            ]
     for method in METHODS:
+        if method == "a4":
+            continue
+        cells = [
+            _cell([value for _, value in metric_samples[key][method]])
+            for _, key, _ in specs
+        ]
+        lines.append(f"| {method.upper()} | {' | '.join(cells)} |")
+    groups = a4_comparison_groups(records or []) or {"A4": []}
+    for label, rows in groups.items():
         cells = []
         for _, key, _ in specs:
-            cell = _cell([value for _, value in metric_samples[key][method]])
-            if (
-                method == "a4"
-                and key == "residual_direction_redundancy"
-                and cell != "N/A"
-            ):
+            values = [
+                value
+                for row in rows
+                for value in metric_values_for_record(
+                    row, key, int(row.get("rank", 16))
+                )
+            ]
+            cell = _cell(values)
+            if key == "residual_direction_redundancy" and values:
                 cell += " — inherited from frozen A3 residual"
             cells.append(cell)
-        lines.append(f"| {method.upper()} | {' | '.join(cells)} |")
+        lines.append(f"| {label} | {' | '.join(cells)} |")
     lines.append("")
     return lines
 
@@ -142,27 +147,78 @@ def _figure_notice() -> list[str]:
 
 
 def _a4_detail_table(records: list[dict[str, Any]]) -> list[str]:
-    rows = []
+    lines = ["## A4 Run Evidence", ""]
     for record in records:
-        if record.get("method") != "a4":
+        if record.get("method") != "a4" or record.get("status") == "invalid":
             continue
-        detail = record.get("deployed_evaluation", {}).get("a4", {}).get(
-            "symbolic_detail", {}
+        lines.extend(
+            [
+                f"### {_safe_text(record['run_id'])}",
+                "",
+                f"Mode {_safe_text(record.get('a4_data_mode', 'aligned'))}, "
+                f"arm {_safe_text(record.get('a4_arm', 'full'))}, seed {record['seed']}.",
+                "",
+            ]
         )
-        for label, value in detail.items():
-            rows.append(f"| {_safe_text(label)} | {_cell([float(value)])} |")
-    if not rows:
-        rows.append(
-            "| N/A | N/A — post-hoc A4 evaluation was not run or produced no result |"
+        history = record.get("after_task", [])
+        if history:
+            lines.extend(
+                [
+                    f"Validation scope is {_safe_text(record['validation_scope'])}.",
+                    "",
+                    "| After task | Validation set | CE | Perplexity |",
+                    "|---|---|---:|---:|",
+                ]
+            )
+            for name, evaluations in zip(
+                ["Initial", *record["task_order"]],
+                [record["initial"], *history],
+                strict=True,
+            ):
+                for dataset, metrics in evaluations.items():
+                    lines.append(
+                        f"| {_safe_text(name)} | {_safe_text(dataset)} | "
+                        f"{metrics['loss']:.4g} | {metrics['ppl']:.4g} |"
+                    )
+            if record.get("backward_transfer_ce") is not None:
+                lines.extend(
+                    [
+                        "",
+                        f"Backward transfer in CE is {record['backward_transfer_ce']:.4g}.",
+                    ]
+                )
+            lines.append("")
+        baseline = record.get("frozen_a3_baseline", {})
+        if baseline:
+            lines.extend(
+                [
+                    "| Frozen A3 split | CE | Perplexity |",
+                    "|---|---:|---:|",
+                    *(
+                        f"| {_safe_text(split)} | {metrics['loss']:.4g} | {metrics['ppl']:.4g} |"
+                        for split, metrics in baseline.items()
+                    ),
+                    "",
+                ]
+            )
+        detail = (
+            record.get("deployed_evaluation", {})
+            .get("a4", {})
+            .get("symbolic_detail", {})
         )
-    return [
-        "## A4 Symbolic Stage Metrics",
-        "",
-        "| Metric | Value |",
-        "|---|---:|",
-        *rows,
-        "",
-    ]
+        if detail:
+            lines.extend(
+                [
+                    "| Symbolic metric | Value |",
+                    "|---|---:|",
+                    *(
+                        f"| {_safe_text(label)} | {_cell([float(value)])} |"
+                        for label, value in detail.items()
+                    ),
+                    "",
+                ]
+            )
+    return lines if len(lines) > 2 else []
 
 
 def report_manifest(
@@ -257,6 +313,17 @@ def report_manifest(
                 {
                     "run_id": row["run_id"],
                     "task_order": row.get("task_order", []),
+                    **(
+                        {
+                            key: row.get(key)
+                            for key in (
+                                "a4_data_mode", "a4_arm", "seed", "rank", "protocol",
+                                "validation_scope", "after_task", "backward_transfer_ce",
+                                "task_epochs", "checkpoints", "frozen_a3_baseline",
+                            )
+                        }
+                        if row.get("method") == "a4" else {}
+                    ),
                     "params_unchanged": row.get("params_unchanged"),
                     "metrics": {
                         key: {

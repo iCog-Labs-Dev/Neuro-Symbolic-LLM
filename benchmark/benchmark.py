@@ -107,6 +107,7 @@ def effective_condition(
     runtime_source: str,
     epochs: int | None,
     source_sha256: str,
+    a4_condition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     condition = {
         "schema": "nsllm.condition/v2",
@@ -125,6 +126,8 @@ def effective_condition(
         "epochs": epochs,
         "source_sha256": source_sha256,
     }
+    if a4_condition is not None:
+        condition.update(a4_condition)
     condition["condition_sha256"] = fingerprint(condition)
     return condition
 
@@ -458,12 +461,17 @@ RUNNERS = {
     "a3": ROOT / "experiments" / "run_stage_a3.py",
     "a4": ROOT / "experiments" / "run_stage_a4.py",
 }
-A4_INPUT_FIELDS = (
+A4_ARM_CONFIGS = {
+    "ce_only": ROOT / "configs/stage_A/a4_ce_only.yaml",
+    "key_only": ROOT / "configs/stage_A/a4_key_only.yaml",
+    "value_only": ROOT / "configs/stage_A/a4_value_only.yaml",
+    "full": DEFAULT_CONFIGS["a4"],
+}
+A4_BANK_FIELDS = ("a4_patterns", "a4_embeddings")
+A4_ALIGNED_FIELDS = (
     "a4_train_sources",
     "a4_validation_sources",
     "a4_alignment_labels",
-    "a4_patterns",
-    "a4_embeddings",
     "a4_test_sources",
 )
 EXTERNAL_METRIC_SPECS = (
@@ -714,6 +722,9 @@ class RunSpec:
     task_order: tuple[str, ...] = ()
     heldout_tasks: tuple[str, ...] = ()
     a2_arm: str | None = None
+    a4_data_mode: str = "aligned"
+    a4_arm: str | None = None
+    a4_epochs: int | None = None
     a4_warm_start: str | None = None
     a4_train_sources: str | None = None
     a4_validation_sources: str | None = None
@@ -764,22 +775,22 @@ def _load_deployed_metrics(
     in lightweight environments.
     """
     if run.get("method") == "a4":
-        validation = result.get("validation", {})
+        history = result.get("after_task", [])
+        validation = result.get("validation", history[-1] if history else {})
         test = result.get("test", {})
+        test_domains = (
+            test if result.get("mode") == "runtime_sequential" else {"a4": test}
+        )
         symbolic, symbolic_reason, symbolic_detail = _a4_symbolic_metrics(
             Path(run.get("run_dir", result.get("_run_dir", ""))),
-            Path(run["a4_post_eval_dir"])
-            if run.get("a4_post_eval_dir")
-            else None,
+            Path(run["a4_post_eval_dir"]) if run.get("a4_post_eval_dir") else None,
         )
         return {
             "status": "measured",
             "domains": {
-                "a4": {
-                    "status": "measured",
-                    "loss": test.get("loss") if test else None,
-                    "ppl": test.get("ppl") if test else None,
-                }
+                name: {"status": "measured", **metrics}
+                for name, metrics in test_domains.items()
+                if metrics
             },
             "representation": {
                 "reason": (
@@ -793,7 +804,11 @@ def _load_deployed_metrics(
                 "training_step_mean_ms": result.get("training_step_mean_ms"),
                 "symbolic": symbolic,
                 "symbolic_detail": symbolic_detail,
-                "symbolic_reason": symbolic_reason,
+                "symbolic_reason": (
+                    "Source-grounded diagnostics require an aligned A4 run."
+                    if result.get("mode") == "runtime_sequential"
+                    else symbolic_reason
+                ),
             },
         }
 
@@ -1368,10 +1383,34 @@ def expand_specs(
             f"Unknown methods: {unknown}; choose from {sorted(DEFAULT_CONFIGS)}"
         )
     a4_inputs = dict(a4_inputs or {})
+    a4_mode = a4_inputs.get("a4_data_mode", "aligned")
+    a4_arms = a4_inputs.get("a4_arms") or (
+        ("ce_only",) if a4_mode == "runtime" else ("full",)
+    )
+    inputs = {}
     if "a4" in methods:
+        if a4_mode not in {"aligned", "runtime"}:
+            raise ValueError(f"Unknown A4 data mode: {a4_mode}")
+        if len(set(a4_arms)) != len(a4_arms) or any(
+            arm not in A4_ARM_CONFIGS for arm in a4_arms
+        ):
+            raise ValueError("A4 arms must be unique and use known arm names")
+        if a4_mode == "runtime" and tuple(a4_arms) != ("ce_only",):
+            raise ValueError("Runtime A4 supports only the ce_only arm")
+        if a4_mode == "runtime" and any(
+            a4_inputs.get(name) for name in A4_ALIGNED_FIELDS
+        ):
+            raise ValueError(
+                "Runtime A4 uses runtime YAML; omit aligned source and label inputs"
+            )
+        if any(not 0 <= seed < 2**32 for seed in seeds):
+            raise ValueError("A4 seeds must be unsigned 32-bit integers")
+        if epochs is not None and epochs < 0:
+            raise ValueError("A4 epochs must be nonnegative")
+        required = A4_BANK_FIELDS + (A4_ALIGNED_FIELDS if a4_mode == "aligned" else ())
         missing = [
             name
-            for name in A4_INPUT_FIELDS
+            for name in required
             if not isinstance(a4_inputs.get(name), str)
             or not Path(a4_inputs[name]).is_file()
         ]
@@ -1391,6 +1430,11 @@ def expand_specs(
                 raise ValueError(
                     "A4 native retrieval requires a library and its .json manifest"
                 )
+        inputs = {
+            field: str(Path(value).resolve())
+            for field in (*A4_BANK_FIELDS, *A4_ALIGNED_FIELDS, "a4_native_library")
+            if (value := a4_inputs.get(field))
+        }
     if not k_values or any(k < 0 for k in k_values):
         raise ValueError("k_values must contain non-negative integers.")
     if len(set(k_values)) != len(k_values):
@@ -1416,44 +1460,55 @@ def expand_specs(
                     )
                     heldout_tag = "" if not heldout else f"-holdout-{'-'.join(heldout)}"
                     run_id = f"{method}-seed{seed}{suffix}-{protocol}-{order_tag}{heldout_tag}"
-                    attempts = output_dir / "runs" / run_id / "attempts"
-                    specs.append(
-                        RunSpec(
-                            method=method,
-                            seed=seed,
-                            protocol=protocol,
-                            run_id=run_id,
-                            config=str(DEFAULT_CONFIGS[method]),
-                            output_dir=str(attempts),
-                            run_name="attempt-0001",
-                            k=k,
-                            rank=rank,
-                            runtime_config=str(runtime_config),
-                            runtime_source=runtime_source,
-                            task_order=order,
-                            heldout_tasks=heldout,
-                            a2_arm="full" if method == "a2" else None,
-                            a4_train_sources=a4_inputs.get("a4_train_sources"),
-                            a4_validation_sources=a4_inputs.get("a4_validation_sources"),
-                            a4_alignment_labels=a4_inputs.get("a4_alignment_labels"),
-                            a4_patterns=a4_inputs.get("a4_patterns"),
-                            a4_embeddings=a4_inputs.get("a4_embeddings"),
-                            a4_test_sources=a4_inputs.get("a4_test_sources"),
-                            a4_retrieval_backend=a4_inputs.get(
-                                "a4_retrieval_backend", "native"
-                            ),
-                            a4_native_library=a4_inputs.get("a4_native_library"),
-                            a4_mork_url=a4_inputs.get(
-                                "a4_mork_url", "http://127.0.0.1:18000"
-                            ),
-                            a4_retrieval_host=a4_inputs.get(
-                                "a4_retrieval_host", "127.0.0.1"
-                            ),
-                            a4_retrieval_port=int(
-                                a4_inputs.get("a4_retrieval_port", 19091)
-                            ),
+                    for arm in a4_arms if method == "a4" else (None,):
+                        protocol_id = f"{run_id}-{a4_mode}-{arm}" if arm else run_id
+                        attempts = output_dir / "runs" / protocol_id / "attempts"
+                        specs.append(
+                            RunSpec(
+                                method=method,
+                                seed=seed,
+                                protocol=protocol,
+                                run_id=protocol_id,
+                                config=str(
+                                    A4_ARM_CONFIGS[arm]
+                                    if arm
+                                    else DEFAULT_CONFIGS[method]
+                                ),
+                                output_dir=str(attempts),
+                                run_name="attempt-0001",
+                                k=k,
+                                rank=rank,
+                                runtime_config=str(runtime_config),
+                                runtime_source=runtime_source,
+                                task_order=order,
+                                heldout_tasks=heldout,
+                                a2_arm="full" if method == "a2" else None,
+                                a4_data_mode=a4_mode if method == "a4" else "aligned",
+                                a4_arm=arm,
+                                a4_epochs=epochs if method == "a4" else None,
+                                a4_train_sources=inputs.get("a4_train_sources"),
+                                a4_validation_sources=inputs.get(
+                                    "a4_validation_sources"
+                                ),
+                                a4_alignment_labels=inputs.get("a4_alignment_labels"),
+                                a4_patterns=inputs.get("a4_patterns"),
+                                a4_embeddings=inputs.get("a4_embeddings"),
+                                a4_test_sources=inputs.get("a4_test_sources"),
+                                a4_retrieval_backend=a4_inputs.get(
+                                    "a4_retrieval_backend", "native"
+                                ),
+                                a4_native_library=inputs.get("a4_native_library"),
+                                a4_mork_url=a4_inputs.get(
+                                    "a4_mork_url", "http://127.0.0.1:18000"
+                                ),
+                                a4_retrieval_host=a4_inputs.get(
+                                    "a4_retrieval_host", "127.0.0.1"
+                                ),
+                                a4_retrieval_port=int(
+                                    a4_inputs.get("a4_retrieval_port", 19091)
+                                ),
+                            )
                         )
-                    )
     return specs
 
 
@@ -1461,9 +1516,12 @@ def _materialize(spec: RunSpec, root: Path, epochs: int | None) -> Path:
     source = Path(spec.config)
     config = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
     if spec.method == "a4":
-        # A4's runner accepts no benchmark seed/epoch override; preserve its
-        # strict configuration schema and record the requested condition only.
-        pass
+        inherited = (
+            Path(spec.a4_warm_start).resolve().parents[1] / "config.yaml"
+            if spec.a4_warm_start
+            else source.resolve().parent / config["residual_config"]
+        )
+        config["residual_config"] = str(inherited.resolve(strict=True))
     else:
         _set_seed(config, spec.method, spec.seed)
         _set_rank(config, spec.rank)
@@ -1501,6 +1559,27 @@ def _condition(
     epochs: int | None,
     source_sha256: str,
 ) -> dict[str, Any]:
+    a4_condition = None
+    if spec.method == "a4":
+        inputs = {
+            field: sha256_file(value)
+            for field in (*A4_BANK_FIELDS, *A4_ALIGNED_FIELDS, "a4_native_library")
+            if (value := getattr(spec, field)) is not None
+        }
+        if spec.a4_retrieval_backend == "native" and spec.a4_native_library:
+            inputs["a4_native_manifest"] = sha256_file(spec.a4_native_library + ".json")
+        a4_condition = {
+            "a4_data_mode": spec.a4_data_mode,
+            "a4_arm": spec.a4_arm,
+            "a4_input_sha256": inputs,
+            "a4_retrieval_backend": spec.a4_retrieval_backend,
+            "a4_residual_config_sha256": sha256_file(
+                yaml.safe_load(config.read_text(encoding="utf-8"))["residual_config"]
+            ),
+            "a4_warm_start_sha256": (
+                sha256_file(spec.a4_warm_start) if spec.a4_warm_start else None
+            ),
+        }
     return effective_condition(
         method=spec.method,
         seed=spec.seed,
@@ -1515,6 +1594,7 @@ def _condition(
         runtime_source=spec.runtime_source,
         epochs=epochs,
         source_sha256=source_sha256,
+        a4_condition=a4_condition,
     )
 
 
@@ -1580,17 +1660,18 @@ def make_manifest(
                     )
                 )
     if "a4" in methods:
+        runtime_a4 = (a4_inputs or {}).get("a4_data_mode") == "runtime"
         specs.extend(
             expand_specs(
                 output_dir,
-                seeds=seeds[:1],
+                seeds=seeds,
                 methods=["a4"],
                 k_values=k_values,
-                rank_values=[(rank_values or [16])[0]],
+                rank_values=rank_values,
                 epochs=epochs,
-                protocol="a4",
-                task_order=(),
-                heldout_tasks=(),
+                protocol="sequential" if runtime_a4 else "a4",
+                task_order=base_order if runtime_a4 else (),
+                heldout_tasks=heldout_tasks if runtime_a4 else (),
                 runtime_config=runtime_config,
                 runtime_source=runtime_source,
                 a4_inputs=a4_inputs,
@@ -1600,9 +1681,9 @@ def make_manifest(
     run_rows = []
     for spec in specs:
         config = _materialize(spec, output_dir, epochs)
-        runtime_config = _materialize_runtime(spec, output_dir)
+        materialized_runtime = _materialize_runtime(spec, output_dir)
         condition = _condition(
-            spec, config, runtime_config, epochs, str(source["source_sha256"])
+            spec, config, materialized_runtime, epochs, str(source["source_sha256"])
         )
         run_rows.append(
             {
@@ -1613,7 +1694,7 @@ def make_manifest(
                 "planned_run_id": spec.run_id,
                 "planned_condition_sha256": condition["condition_sha256"],
                 "materialized_config": str(config),
-                "materialized_runtime_config": str(runtime_config),
+                "materialized_runtime_config": str(materialized_runtime),
                 **condition,
             }
         )
@@ -1660,6 +1741,12 @@ def _command(
         command = [
             sys.executable,
             str(RUNNERS["a4"]),
+            "--data-mode",
+            spec.a4_data_mode,
+            "--seed",
+            str(spec.seed),
+            "--rank",
+            str(spec.rank),
             "--config",
             str(config),
             "--output-dir",
@@ -1668,18 +1755,10 @@ def _command(
             spec.run_name,
             "--warm-start",
             str(spec.a4_warm_start),
-            "--train-sources",
-            str(spec.a4_train_sources),
-            "--validation-sources",
-            str(spec.a4_validation_sources),
-            "--alignment-labels",
-            str(spec.a4_alignment_labels),
             "--patterns",
             str(spec.a4_patterns),
             "--embeddings",
             str(spec.a4_embeddings),
-            "--test-sources",
-            str(spec.a4_test_sources),
             "--retrieval-backend",
             spec.a4_retrieval_backend,
             "--mork-url",
@@ -1689,6 +1768,22 @@ def _command(
             "--retrieval-port",
             str(spec.a4_retrieval_port),
         ]
+        if spec.a4_epochs is not None:
+            command.extend(["--epochs", str(spec.a4_epochs)])
+        if spec.a4_data_mode == "runtime":
+            command.extend(
+                ["--runtime-config", str(runtime_config or spec.runtime_config)]
+            )
+        elif spec.a4_data_mode == "aligned":
+            for field in A4_ALIGNED_FIELDS:
+                value = getattr(spec, field)
+                if value is None:
+                    raise ValueError(f"Aligned A4 requires {field}")
+                command.extend(
+                    ["--" + field.removeprefix("a4_").replace("_", "-"), value]
+                )
+        else:
+            raise ValueError(f"Unknown A4 data mode: {spec.a4_data_mode}")
         if spec.a4_retrieval_backend == "native":
             command.extend(["--native-library", str(spec.a4_native_library)])
         return command
@@ -1723,17 +1818,28 @@ def _resolve_a4_warm_start(manifest: dict[str, Any], raw: dict[str, Any]) -> Pat
         row
         for row in manifest.get("runs", [])
         if row.get("method") == "a3"
-        and int(row.get("seed", -1)) == int(raw.get("seed", -2))
+        and row.get("seed") == raw.get("seed")
+        and row.get("rank", 16) == raw.get("rank", 16)
         and row.get("status") == "complete"
         and row.get("run_dir")
     ]
-    for row in reversed(candidates):
-        checkpoints = sorted(Path(row["run_dir"]).glob("params/task_*.npz"))
-        if checkpoints:
-            return checkpoints[-1]
+    for row in candidates:
+        directory = Path(row["run_dir"])
+        checkpoint = directory / "checkpoints/a3hybrid_final.npz"
+        if not checkpoint.is_file() or not (directory / "config.yaml").is_file():
+            continue
+        if row.get("condition_sha256") and row.get("config_sha"):
+            valid, _ = validate_complete_attempt(
+                directory,
+                condition_sha256=row["condition_sha256"],
+                config_sha256=row["config_sha"],
+            )
+            if not valid:
+                continue
+        return checkpoint.resolve()
     raise RuntimeError(
         f"{raw.get('run_id', 'A4')}: no completed A3 checkpoint for seed "
-        f"{raw.get('seed')}; train A3 before A4"
+        f"{raw.get('seed')} and rank {raw.get('rank', 16)}; train A3 before A4"
     )
 
 
@@ -1869,7 +1975,8 @@ def train_manifest(
                 raw.get("requested_heldout_tasks", raw.get("heldout_tasks", ()))
             ),
             a2_arm=raw.get("a2_arm", "full" if raw["method"] == "a2" else None),
-            a4_warm_start=raw.get("a4_warm_start"),
+            a4_data_mode=raw.get("a4_data_mode", "aligned"),
+            a4_arm=raw.get("a4_arm", "full"),
             a4_train_sources=raw.get("a4_train_sources"),
             a4_validation_sources=raw.get("a4_validation_sources"),
             a4_alignment_labels=raw.get("a4_alignment_labels"),
@@ -1883,6 +1990,9 @@ def train_manifest(
             a4_retrieval_port=int(raw.get("a4_retrieval_port", 19091)),
         )
         effective_epochs = epochs if epochs is not None else manifest.get("epochs")
+        if spec.method == "a4":
+            warm_start = _resolve_a4_warm_start(_read_json(manifest_path), raw)
+            spec = replace(spec, a4_warm_start=str(warm_start), a4_epochs=effective_epochs)
         config = _materialize(
             spec,
             config_root,
@@ -1896,6 +2006,8 @@ def train_manifest(
             effective_epochs,
             str(current_source["source_sha256"]),
         )
+        if spec.method == "a4" and raw.get("a4_input_sha256", {}) != condition["a4_input_sha256"]:
+            raise RuntimeError(f"{spec.run_id}: A4 input artifacts changed after planning")
         config_sha = sha256_file(config)
         previous_run = Path(raw["run_dir"]) if raw.get("run_dir") else None
         if resume and previous_run is not None:
@@ -1917,6 +2029,7 @@ def train_manifest(
                 if (
                     a4_post_eval
                     and spec.method == "a4"
+                    and spec.a4_data_mode == "aligned"
                     and a4_probes is not None
                 ):
                     post_eval_dir = _run_a4_post_eval(
@@ -1945,14 +2058,6 @@ def train_manifest(
         attempts_root = Path(spec.output_dir)
         attempt_name = next_attempt_name(attempts_root)
         attempt_spec = replace(spec, run_name=attempt_name)
-        if spec.method == "a4":
-            warm_start = _resolve_a4_warm_start(manifest, raw)
-            attempt_spec = replace(attempt_spec, a4_warm_start=str(warm_start))
-            _update_manifest(
-                manifest_path,
-                spec.run_id,
-                a4_warm_start=str(warm_start),
-            )
         run_dir = attempts_root / attempt_name
         results = run_dir / "results.json"
         _update_manifest(
@@ -1966,6 +2071,10 @@ def train_manifest(
             run_dir=str(run_dir),
             planned_condition_sha256=condition["condition_sha256"],
             **condition,
+            **(
+                {"a4_warm_start": spec.a4_warm_start, "a4_epochs": spec.a4_epochs}
+                if spec.method == "a4" else {}
+            ),
             started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
         log_path = output_dir / "logs" / f"{spec.run_id}-{attempt_name}.log"
@@ -2018,9 +2127,30 @@ def train_manifest(
         shutil.copy2(config, provenance_dir / "materialized_stage.yaml")
         shutil.copy2(runtime_config, provenance_dir / "materialized_runtime.yaml")
         meta = _read_json(run_dir / "meta.json")
+        a4_result_fields = {}
         if spec.method == "a4":
-            realized_order = []
-            realized_id = spec.run_id + "-a4"
+            expected_mode = "standalone_aligned" if spec.a4_data_mode == "aligned" else "runtime_sequential"
+            result = _read_json(results)
+            if (
+                meta.get("seed") != spec.seed
+                or meta.get("rank") != spec.rank
+                or meta.get("warm_start_sha256") != condition["a4_warm_start_sha256"]
+                or meta.get("residual_config_sha256") != condition["a4_residual_config_sha256"]
+                or result.get("mode") != expected_mode
+                or result.get("seed") != spec.seed
+            ):
+                raise RuntimeError(f"{spec.run_id}: A4 results differ from the requested condition")
+            checkpoints = result["checkpoints"]
+            for checkpoint in checkpoints:
+                if not (run_dir / checkpoint).is_file():
+                    raise RuntimeError(f"{spec.run_id}: missing A4 checkpoint {checkpoint}")
+            a4_result_fields = {
+                "checkpoints": checkpoints,
+                "validation_scope": result.get("validation_scope"),
+                "task_epochs": result.get("task_epochs"),
+            }
+        if spec.method == "a4" and spec.a4_data_mode == "aligned":
+            realized_id = spec.run_id
         else:
             realized_order = meta.get("runtime_data", {}).get("task_order")
             if not realized_order:
@@ -2068,10 +2198,12 @@ def train_manifest(
             log=str(run_dir / "logs" / "stdout.log"),
             run_dir=str(run_dir),
             finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **a4_result_fields,
         )
         if (
             a4_post_eval
             and spec.method == "a4"
+            and spec.a4_data_mode == "aligned"
             and a4_probes is not None
         ):
             post_eval_dir = _run_a4_post_eval(
@@ -2096,30 +2228,56 @@ def train_manifest(
 
 def _result_record(raw: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
     if run.get("method") == "a4":
-        validation = raw.get("validation", {})
-        test = raw.get("test", {})
+        runtime = raw.get("mode") == "runtime_sequential"
+        history = raw.get("after_task", [])
+        validation = (
+            (history[-1] if history else {})
+            if runtime
+            else {"a4": raw.get("validation", {})}
+        )
+        test = raw.get("test", {}) if runtime else {"a4": raw.get("test", {})}
+        forgetting = raw.get("mean_forgetting", [])
+        validation_loss = _mean_finite([row.get("loss") for row in validation.values()])
+        test_loss = _mean_finite([row.get("loss") for row in test.values()])
         return {
             "run_id": run["run_id"],
             "method": "a4",
-            "seed": run["seed"],
+            "seed": raw.get("seed", run["seed"]),
             "k": None,
             "rank": run.get("rank", 16),
-            "protocol": "a4",
-            "task_order": [],
-            "heldout_tasks": [],
+            "protocol": "sequential" if runtime else "a4",
+            "a4_data_mode": "runtime" if runtime else "aligned",
+            "a4_arm": run.get("a4_arm") or ("ce_only" if runtime else "full"),
+            "validation_scope": raw.get("validation_scope"),
+            "task_order": raw.get("task_order", []),
+            "heldout_tasks": run.get("heldout_tasks", []),
             "condition_sha256": run.get("condition_sha256"),
-            "domains": ["a4"],
-            "final_mean_loss": validation.get("loss"),
-            "final_mean_ppl": validation.get("ppl"),
-            "final_test_mean_loss": test.get("loss") if test else None,
-            "final_test_mean_ppl": test.get("ppl") if test else None,
-            "loss_matrix": [],
-            "perplexity_matrix": [],
-            "mean_forgetting": None,
+            "domains": list(validation),
+            "final_mean_loss": validation_loss,
+            "final_mean_ppl": (
+                math.exp(validation_loss)
+                if runtime and validation_loss is not None
+                else validation.get("a4", {}).get("ppl")
+            ),
+            "final_test_mean_loss": test_loss,
+            "final_test_mean_ppl": (
+                math.exp(test_loss)
+                if runtime and test_loss is not None
+                else test.get("a4", {}).get("ppl")
+            ),
+            "loss_matrix": raw.get("loss_matrix", []),
+            "perplexity_matrix": raw.get("perplexity_matrix", []),
+            "mean_forgetting": forgetting[-1] if forgetting else None,
+            "backward_transfer_ce": raw.get("backward_transfer_ce"),
+            "after_task": history,
+            "initial": raw.get("initial", {}),
+            "task_epochs": raw.get("task_epochs", {}),
+            "checkpoints": raw.get("checkpoints", []),
+            "frozen_a3_baseline": raw.get("frozen_a3_baseline", {}),
             "steps": raw.get("updates"),
-            "tokens": validation.get("tokens"),
+            "tokens": sum(row.get("tokens", 0) for row in validation.values()) or None,
             "mean_step_time": raw.get("training_step_mean_ms"),
-            "params_unchanged": None,
+            "params_unchanged": raw.get("frozen", {}).get("params_unchanged"),
             "results": run.get("results"),
             "heldout_transfer": None,
         }
@@ -2368,6 +2526,10 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
     representation = deployed.get("representation", {})
     if metric in fields:
         value = record.get(fields[metric])
+    elif record.get("method") == "a4" and metric in {
+        "domain_kl", "token_accuracy", "residual_direction_redundancy",
+    }:
+        value = deployed.get("a4", {}).get("symbolic", {}).get(metric)
     elif metric == "residual_compressibility":
         value = (record.get(metric) or {}).get(str(rank))
     elif metric == "residual_direction_redundancy":
@@ -2410,6 +2572,8 @@ def measurement_reason(record: dict[str, Any], metric: str) -> str:
             "Requires a matched rank sweep with positive reference improvement: "
             + str(record.get("compressibility_status", "unavailable"))
         )
+    if metric == "forgetting" and record.get("validation_scope") == "shared":
+        return "Shared ROCStories validation measures CE/PPL after each task."
     if metric.startswith("a4_"):
         return str(
             record.get("deployed_evaluation", {})
@@ -2435,6 +2599,19 @@ def resolve_report_dir(value: Path | str | None = None) -> Path:
             "Report directory must not be the repository root or its ancestor"
         )
     return destination
+
+
+def a4_comparison_groups(
+    records: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in records:
+        if row.get("method") != "a4" or row.get("status") == "invalid":
+            continue
+        mode = row.get("a4_data_mode")
+        label = f"A4 {mode} {row['a4_arm']} r{row['rank']}" if mode else "A4"
+        groups.setdefault(label, []).append(row)
+    return groups
 
 
 def metric_values_for_record(
@@ -2623,12 +2800,11 @@ def _metric_samples(
             if values:
                 samples[seed] = float(np.mean(values))
         by_seed[method] = samples
-    by_seed["a4"] = {}
     seed_sets = [set(by_seed[method]) for method in ("a1", "a2", "a3")]
     common = set.intersection(*seed_sets) if all(seed_sets) else set()
     return {
-        method: [(seed, by_seed[method][seed]) for seed in sorted(common)]
-        for method in METHODS
+        method: [(seed, samples[seed]) for seed in sorted(common)]
+        for method, samples in by_seed.items()
     }
 
 
@@ -2659,6 +2835,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
     parser.add_argument("--runtime-source")
+    parser.add_argument("--a4-data-mode", choices=("aligned", "runtime"), default="aligned")
+    parser.add_argument("--a4-arms", choices=tuple(A4_ARM_CONFIGS), nargs="+")
     parser.add_argument("--a4-train-sources", type=Path)
     parser.add_argument("--a4-validation-sources", type=Path)
     parser.add_argument("--a4-alignment-labels", type=Path)
@@ -2694,6 +2872,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     seeds, ranks, ks, protocols = profiles[args.profile]
     a4_inputs = {
+        "a4_data_mode": args.a4_data_mode,
+        "a4_arms": args.a4_arms,
         "a4_train_sources": str(args.a4_train_sources)
         if args.a4_train_sources
         else None,
@@ -2751,7 +2931,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "eval" and args.a4_post_eval:
         manifest = _read_json(manifest_path)
         for row in manifest.get("runs", []):
-            if row.get("method") != "a4" or row.get("status") != "complete":
+            if (row.get("method") != "a4" or row.get("status") != "complete"
+                or row.get("a4_data_mode", "aligned") != "aligned"):
                 continue
             run_dir = Path(row.get("run_dir", ""))
             if run_dir.is_dir():

@@ -26,8 +26,8 @@ from benchmark.benchmark import (
     INTERNAL_METRIC_SPECS,
     MEASURED_METRICS,
     REPORTED_METRICS,
-    _filter_adapter_params,
     _a4_symbolic_metrics,
+    _filter_adapter_params,
     _load_deployed_metrics,
     _materialize,
     _metric_samples,
@@ -288,13 +288,212 @@ def test_a4_command_uses_only_stage_a4_flags(tmp_path: Path) -> None:
     )[0]
     spec = replace(spec, a4_warm_start=str(tmp_path / "a3.npz"))
     command = runner._command(spec, Path(spec.config))
-    assert str(runner.RUNNERS["a4"]) in command
+    assert command[1:4] == [str(runner.RUNNERS["a4"]), "--data-mode", "aligned"]
+    assert command[command.index("--seed") + 1] == "0"
+    assert command[command.index("--rank") + 1] == "16"
     assert "--runtime-config" not in command
     assert "--training-mode" not in command
     assert "--runtime-source" not in command
     assert "--task-order" not in command
     assert "--heldout-task" not in command
     assert "--arm" not in command
+
+
+def test_a4_arms_plan_each_seed_and_rank_with_distinct_conditions(tmp_path):
+    inputs = {"a4_retrieval_backend": "tcp", "a4_arms": list(runner.A4_ARM_CONFIGS)}
+    for field in (*runner.A4_BANK_FIELDS, *runner.A4_ALIGNED_FIELDS):
+        path = tmp_path / field
+        path.write_text(field)
+        inputs[field] = str(path)
+    manifest = make_manifest(
+        tmp_path,
+        seeds=[3, 8],
+        methods=["a3", "a4"],
+        k_values=[1],
+        rank_values=[4, 16],
+        epochs=2,
+        a4_inputs=inputs,
+    )
+    rows = [row for row in manifest["runs"] if row["method"] == "a4"]
+    assert len(rows) == 16
+    assert len({row["run_id"] for row in rows}) == 16
+    assert len({row["condition_sha256"] for row in rows}) == 16
+    for row in rows:
+        assert row["a4_arm"] in row["run_id"]
+        assert row["a4_data_mode"] == "aligned"
+        assert row["a4_epochs"] == 2
+        config = yaml.safe_load(Path(row["materialized_config"]).read_text())
+        assert Path(config["residual_config"]).is_file()
+        assert (
+            tuple(config["objective"].values())
+            == {
+                "ce_only": (0, 0),
+                "key_only": (1, 0),
+                "value_only": (0, 1),
+                "full": (1, 1),
+            }[row["a4_arm"]]
+        )
+
+
+def test_runtime_a4_command_and_result(tmp_path):
+    bank = {}
+    for field in runner.A4_BANK_FIELDS:
+        path = tmp_path / field
+        path.touch()
+        bank[field] = str(path)
+    (spec,) = expand_specs(
+        tmp_path,
+        seeds=[8],
+        methods=["a4"],
+        k_values=[1],
+        epochs=2,
+        a4_inputs={**bank, "a4_data_mode": "runtime", "a4_retrieval_backend": "tcp"},
+    )
+    warm_start = tmp_path / "a3.npz"
+    runtime = tmp_path / "materialized-runtime.yaml"
+    command = runner._command(
+        replace(spec, a4_warm_start=str(warm_start)), Path(spec.config), runtime
+    )
+    assert command[2:6] == ["--data-mode", "runtime", "--seed", "8"]
+    assert command[command.index("--runtime-config") + 1] == str(runtime)
+    assert command[command.index("--epochs") + 1] == "2"
+    assert "--alignment-labels" not in command and "--train-sources" not in command
+
+    validation = {"shared_validation": {"loss": 2, "ppl": 7, "tokens": 100}}
+    record = runner._result_record(
+        {
+            "mode": "runtime_sequential",
+            "seed": 8,
+            "validation_scope": "shared",
+            "task_order": ["stories_1"],
+            "after_task": [validation],
+            "test": {"stories": {"loss": 3, "ppl": 20}},
+        },
+        {"run_id": spec.run_id, "method": "a4", "seed": 8, "a4_arm": spec.a4_arm},
+    )
+    assert record["protocol"] == "sequential"
+    assert record["task_order"] == ["stories_1"]
+    assert record["final_mean_loss"] == 2
+    assert record["final_mean_ppl"] == pytest.approx(math.exp(2))
+    assert record["final_test_mean_loss"] == 3
+    assert record["final_test_mean_ppl"] == pytest.approx(math.exp(3))
+    assert record["mean_forgetting"] is None
+
+
+def test_a4_resolves_checkpoint_with_matching_seed_and_rank(tmp_path):
+    rows = []
+    for seed, rank in ((8, 16), (9, 4), (8, 4)):
+        path = tmp_path / f"{seed}-{rank}"
+        (path / "checkpoints").mkdir(parents=True)
+        (path / "config.yaml").touch()
+        (path / "checkpoints/a3hybrid_final.npz").touch()
+        rows.append(
+            {
+                "method": "a3",
+                "seed": seed,
+                "rank": rank,
+                "status": "complete",
+                "run_dir": str(path),
+            }
+        )
+    resolved = runner._resolve_a4_warm_start({"runs": rows}, {"seed": 8, "rank": 4})
+    assert resolved == tmp_path / "8-4/checkpoints/a3hybrid_final.npz"
+    with pytest.raises(RuntimeError, match="seed 8 and rank 32"):
+        runner._resolve_a4_warm_start({"runs": rows}, {"seed": 8, "rank": 32})
+
+
+@pytest.mark.parametrize("mode", ["aligned", "runtime"])
+def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mode):
+    from experiments.run_stage_a4 import _apply_training_overrides, parse_args
+    from stages.stage_A.a4.config import load_config
+
+    monkeypatch.setattr(
+        runner, "source_fingerprint", lambda _: {"source_sha256": "test"}
+    )
+    inputs = {"a4_retrieval_backend": "tcp", "a4_data_mode": mode}
+    fields = runner.A4_BANK_FIELDS + (
+        runner.A4_ALIGNED_FIELDS if mode == "aligned" else ()
+    )
+    for field in fields:
+        path = tmp_path / field
+        path.write_text(field)
+        inputs[field] = str(path)
+    output = tmp_path / "benchmark"
+    make_manifest(
+        output,
+        seeds=[7, 19],
+        methods=["a3", "a4"],
+        k_values=[1],
+        rank_values=[4],
+        epochs=2,
+        a4_inputs=inputs,
+    )
+    calls = []
+    a3_checkpoints = {}
+
+    def launch(command, **kwargs):
+        flags = command[2:]
+
+        def option(name):
+            return flags[flags.index(name) + 1]
+
+        folder = Path(option("--output-dir")) / option("--run-name")
+        folder.mkdir(parents=True)
+        config = Path(option("--config"))
+        stage = Path(command[1]).stem
+        calls.append(stage)
+        order = ["first", "second"]
+        meta = {"runtime_data": {"task_order": order}}
+        result = {}
+        checkpoints = folder / "checkpoints"
+        checkpoints.mkdir()
+        if stage == "run_stage_a3":
+            (folder / "config.yaml").write_bytes(config.read_bytes())
+            seed = yaml.safe_load(config.read_text())["training"]["seed"]
+            checkpoint = checkpoints / "a3hybrid_final.npz"
+            checkpoint.write_bytes(f"A3 at seed {seed}".encode())
+            a3_checkpoints[seed] = checkpoint
+        else:
+            args = parse_args(flags)
+            effective = _apply_training_overrides(load_config(config), args)
+            checkpoint = a3_checkpoints[effective.training.seed]
+            assert args.warm_start == checkpoint
+            assert effective.residual_config == checkpoint.parents[1] / "config.yaml"
+            assert args.rank == 4
+            assert effective.training.epochs == 2
+            (folder / "config.yaml").write_text(yaml.safe_dump(effective.to_dict()))
+            (checkpoints / "a4-final.npz").touch()
+            meta.update(
+                seed=effective.training.seed,
+                rank=args.rank,
+                warm_start_sha256=sha256_file(checkpoint),
+                residual_config_sha256=sha256_file(effective.residual_config),
+            )
+            result = {
+                "mode": "standalone_aligned"
+                if mode == "aligned"
+                else "runtime_sequential",
+                "seed": effective.training.seed,
+                "task_order": order if mode == "runtime" else [],
+                "checkpoints": ["checkpoints/a4-final.npz"],
+            }
+        _write_json(folder / "meta.json", meta)
+        _write_json(folder / "results.json", result)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.subprocess, "run", launch)
+    runner.train_manifest(output)
+    manifest = runner._read_json(output / "manifest.json")
+    a4_rows = [row for row in manifest["runs"] if row["method"] == "a4"]
+    assert calls == ["run_stage_a3", "run_stage_a3", "run_stage_a4", "run_stage_a4"]
+    assert all(row["status"] == "complete" for row in a4_rows)
+    assert all(
+        row["task_order"] == (["first", "second"] if mode == "runtime" else [])
+        for row in a4_rows
+    )
+    assert a4_rows[0]["a4_warm_start_sha256"] != a4_rows[1]["a4_warm_start_sha256"]
+    runner.train_manifest(output)
+    assert len(calls) == 4
 
 
 def test_real_default_configs_materialize(tmp_path: Path) -> None:
@@ -306,7 +505,7 @@ def test_real_default_configs_materialize(tmp_path: Path) -> None:
         rank_values=[4],
     )
 
-    assert {Path(spec.config) for spec in specs} == set(DEFAULT_CONFIGS.values())
+    assert {Path(spec.config) for spec in specs} == {DEFAULT_CONFIGS[name] for name in ("a1", "a2", "a3")}
     for spec in specs:
         materialized = _materialize(spec, tmp_path, epochs=1)
         config = yaml.safe_load(materialized.read_text(encoding="utf-8"))
@@ -345,6 +544,7 @@ def test_runtime_source_override_ignores_yaml_default(
     )
 
     assert runtime_data.metadata["mode"] == "separate"
+    assert runtime_data.metadata["validation_scope"] == "task_specific"
     assert selected == ["eurlex", "ledgar", "scotus"]
 
 
@@ -597,9 +797,11 @@ def test_runtime_data_applies_task_order_heldout_and_joint_protocols(
         sequence_length=2,
         batch_size=2,
         eval_batches=1,
+        epochs_override=1,
     )
     assert sequential.training_tasks is sequential.tasks
     assert sequential.task_order == ("first", "second")
+    assert [task.epochs for task in sequential.tasks] == [1, 1]
 
 
 def _condition(**overrides):
@@ -1027,8 +1229,11 @@ def test_general_report_uses_methods_as_rows_and_one_evidence_table(tmp_path):
     assert "Realized task order: rocstories task 1, 2, 3" in content
     assert "| Method | Residual compressibility |" in content
     assert "| A1 |" in content and "| A2 |" in content and "| A3 |" in content
-    assert "| Method | Retrieval macro precision @8 |" in content
-    assert "| A4 | 0.8 (n=1) |" in content
+    lines = content.splitlines()
+    header = next(i for i, line in enumerate(lines) if line.startswith("| Method | Validation loss"))
+    columns = [cell.strip() for cell in lines[header].strip("|").split("|")]
+    values = [cell.strip() for cell in lines[header + 5].strip("|").split("|")]
+    assert dict(zip(columns, values, strict=True))["Retrieval macro precision @8"] == "0.8 (n=1)"
     assert "inherited from frozen A3 residual" in content
     assert "paired delta" not in content.lower()
     assert "| Run | Metric | Value |" not in content

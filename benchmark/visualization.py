@@ -15,6 +15,7 @@ from benchmark.benchmark import (
     _metric_samples,
     _read_json,
     _select_headline_cohort,
+    a4_comparison_groups,
     metric_values_for_record,
     resolve_report_dir,
 )
@@ -66,16 +67,16 @@ def generate_visualizations(
                     for method, values in samples.items()
                     if values
                 ]
-                a4_values = [
-                    value
-                    for row in records
-                    if row.get("method") == "a4"
-                    for value in metric_values_for_record(
-                        row, key, int(row.get("rank", 16))
-                    )
-                ]
-                if a4_values:
-                    points.append(("A4", fmean(a4_values)))
+                for name, rows in a4_comparison_groups(records).items():
+                    values = [
+                        value
+                        for row in rows
+                        for value in metric_values_for_record(
+                            row, key, int(row.get("rank", 16))
+                        )
+                    ]
+                    if values:
+                        points.append((name, fmean(values)))
             else:
                 for row in records:
                     if row.get("method") != section:

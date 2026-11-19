@@ -1,0 +1,12 @@
+residual_config: a3_hybrid_pc.yaml
+
+objective:
+  key_weight: 0.0
+  value_weight: 1.0
+
+retrieval:
+  top_m: 8
+  minimum_templates: 10000
+
+training:
+  learning_rate: 0.0001

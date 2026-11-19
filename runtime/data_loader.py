@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -658,6 +658,7 @@ def load_runtime_data(
     batch_size: int = 16,
     eval_batches: int = 8,
     default_epochs: int = 3,
+    epochs_override: int | None = None,
 ) -> RuntimeData:
     """Prepare runtime datasets for sequential training."""
 
@@ -726,6 +727,11 @@ def load_runtime_data(
     else:
         raise ValueError(f"Unsupported runtime mode: {mode!r}")
 
+    if epochs_override is not None:
+        if epochs_override < 0:
+            raise ValueError("epochs_override must be nonnegative")
+        tasks = tuple(replace(task, epochs=epochs_override) for task in tasks)
+
     if requested_order:
         available = {task.name: task for task in tasks}
         if set(requested_order) != set(available) or len(requested_order) != len(
@@ -783,6 +789,7 @@ def load_runtime_data(
         "batch_size": batch_size,
         "task_order": list(task_order_names),
         "training_mode": training_mode,
+        "validation_scope": "shared" if mode == "stories" else "task_specific",
         "heldout_tasks": list(heldout),
         "datasets": [
             item["name"]

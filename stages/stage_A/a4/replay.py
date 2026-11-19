@@ -139,6 +139,8 @@ def checkpoint_replay(
     if meta["retrieval_backend"] != "native":
         raise ValueError("Latency measurement requires a native-backend A4 run")
     original = training_arguments(meta, native_library=native_library)
+    if getattr(original, "data_mode", "aligned") != "aligned":
+        raise ValueError("A4 diagnostics require an aligned run with source provenance")
     library = (
         native_library.resolve(strict=True)
         if native_library
@@ -153,23 +155,22 @@ def checkpoint_replay(
     import optax
     import torch
 
-    from frozenllm.substrate import FrozenSubstrate
+    from experiments.run_stage_a4 import _resolve_substrate
     from residual import ResidualAdapter
     from residual.symbolic_head.jax_head import SymbolicHead
     from stages.results import load_params
-    from stages.stage_A.A3_model import A3Config, A3Model
-    from stages.stage_A.a4.checkpoint import restore_a3_weights
-    from stages.stage_A.a4.config import load_config
+    from stages.stage_A.a3 import A3Model
+    from stages.stage_A.a4.checkpoint import restore_a3_weights, unpack_head_params
+    from stages.stage_A.a4.config import load_config, load_residual_config
     from stages.stage_A.a4.data import load_data
     from stages.stage_A.a4.model import A4Model
     from stages.stage_A.a4.training import init_params, residual_fingerprint
-    from stages.stage_base import load_configs
     from symbolic_memory.bank import load_bank
     from symbolic_memory.native_bridge import NativeJaxRetriever
 
     if not any(device.platform == "gpu" for device in jax.devices()):
         raise RuntimeError("A real JAX GPU is required")
-    config = load_config(run / "config.yaml")
+    config = load_config(run / "config.yaml", recorded=True)
     if not config.training.jit:
         raise ValueError("Latency measurement requires the compiled A4 path")
     jax.config.update("jax_default_matmul_precision", original.precision)
@@ -185,9 +186,8 @@ def checkpoint_replay(
         )
     if digest(config.residual_config) != meta["residual_config_sha256"]:
         raise ValueError("Inherited residual configuration changed")
-    inherited = load_configs(config.residual_config, A3Config)
-    if substrate is None:
-        substrate = FrozenSubstrate(config.training.model, dtype=torch.float32)
+    inherited = load_residual_config(config.residual_config)
+    substrate = _resolve_substrate(config.training.model, substrate)
     adapter = ResidualAdapter(inherited.adapter, substrate.architecture)
     continuous = A3Model(
         substrate,
@@ -224,12 +224,7 @@ def checkpoint_replay(
                     retriever,
                 ),
             )
-            params: dict[str, Any] = {"symbolic": {}, "value": {}}
-            for name, weights in load_params(checkpoint).items():
-                group, layer = name.split(".", 1)
-                params[group][layer] = {
-                    key: jnp.asarray(value) for key, value in weights.items()
-                }
+            params = unpack_head_params(load_params(checkpoint))
             expected = init_params(model, config.training.seed)
             if jax.tree.structure(params) != jax.tree.structure(expected):
                 raise ValueError("Checkpoint parameter structure differs from A4")

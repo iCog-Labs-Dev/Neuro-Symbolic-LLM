@@ -340,3 +340,30 @@ def test_capture_must_cover_all_attached_layers():
             lambda value: value,
             expected_calls=3,
         )
+
+def test_probe_rejects_changed_preparation_input(probe_input, tmp_path):
+    payload, replay, tokenizer = probe_input
+    source = tmp_path / "reference.json"
+    source.write_text("edited")
+    payload["inputs"] = [
+        {
+            "path": str(source),
+            "sha256": hashlib.sha256(b"original").hexdigest(),
+        }
+    ]
+    with pytest.raises(ValueError, match="preparation input changed"):
+        validate_probes(payload, replay, tokenizer)
+
+
+def test_probe_rejects_training_text_under_different_identity(probe_input):
+    payload, replay, tokenizer = probe_input
+    replay.arguments.train_sources.write_text(
+        json.dumps(
+            {
+                "document_id": "other-id",
+                "source_text": payload["documents"][0]["source_text"],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_probes(payload, replay, tokenizer)

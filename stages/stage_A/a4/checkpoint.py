@@ -12,6 +12,26 @@ import numpy as np
 from stages.stage_A.a3 import A3Model
 
 
+def pack_head_params(params: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Encode A4's group/layer/weight tree in the RunWriter layout."""
+    return {
+        f"{group}.{layer}": weights
+        for group, layers in params.items()
+        for layer, weights in layers.items()
+    }
+
+
+def unpack_head_params(weights: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Reconstruct the A4 parameter tree from a checkpoint archive."""
+    params: dict[str, Any] = {"symbolic": {}, "value": {}}
+    for name, layer_weights in weights.items():
+        group, layer = name.split(".", 1)
+        params[group][layer] = {
+            key: jnp.asarray(value) for key, value in layer_weights.items()
+        }
+    return params
+
+
 def restore_a3_weights(
     model: A3Model,
     weights: Mapping[str, Mapping[str, Any]],
@@ -65,4 +85,4 @@ def restore_a3_weights(
     return params._replace(nodes=nodes)
 
 
-__all__ = ["restore_a3_weights"]
+__all__ = ["pack_head_params", "restore_a3_weights", "unpack_head_params"]

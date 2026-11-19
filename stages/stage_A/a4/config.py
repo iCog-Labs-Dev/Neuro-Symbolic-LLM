@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 if TYPE_CHECKING:
-    from stages.stage_base import TrainingConfig
+    from stages.stage_base import RunConfig, TrainingConfig
 
 TRAINING_STATE_SOURCE = "frozen-a3-prediction-v1"
 
@@ -45,11 +45,7 @@ class A4Config:
     def to_dict(self) -> dict[str, Any]:
         return {
             "residual_config": str(self.residual_config),
-            "training": {
-                name: value
-                for name, value in asdict(self.training).items()
-                if name != "reset_optimizer"
-            },
+            "training": asdict(self.training),
             "objective": {
                 "key_weight": self.key_weight,
                 "value_weight": self.value_weight,
@@ -61,7 +57,7 @@ class A4Config:
         }
 
 
-def load_config(path: Path) -> A4Config:
+def load_config(path: Path, *, recorded: bool = False) -> A4Config:
     """Load A4 settings and inherit shared training configuration."""
 
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -71,10 +67,15 @@ def load_config(path: Path) -> A4Config:
     if not isinstance(raw, dict) or set(raw) != sections:
         raise ValueError(f"A4 configuration requires sections {sorted(sections)}")
 
+    from stages.stage_base import TrainingConfig
+
     for name, allowed in (
         ("objective", {"key_weight", "value_weight"}),
         ("retrieval", {"top_m", "minimum_templates"}),
-        ("training", {"learning_rate"}),
+        (
+            "training",
+            set(TrainingConfig.__dataclass_fields__) if recorded else {"learning_rate"},
+        ),
     ):
         section = raw[name]
 
@@ -89,7 +90,13 @@ def load_config(path: Path) -> A4Config:
     if not residual_path.is_file():
         raise ValueError(f"Residual configuration not found: {residual_path}")
 
-    from stages.stage_base import TrainingConfig
+    if recorded:
+        return A4Config(
+            residual_config=residual_path,
+            training=TrainingConfig.from_dict(raw["training"]),
+            **raw["objective"],
+            **raw["retrieval"],
+        )
 
     repo_root = Path(__file__).resolve().parents[3]
     shared_path = repo_root / "configs" / "training.yaml"
@@ -140,8 +147,19 @@ def load_config(path: Path) -> A4Config:
     )
 
 
+def load_residual_config(path: Path) -> RunConfig:
+    """Load either an A3 stage YAML or the effective configuration saved by A3."""
+    from stages.stage_A.a3 import A3HybridConfig
+    from stages.stage_base import load_configs
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    section = "a3_hybrid" if "a3_hybrid" in raw else "objective"
+    return load_configs(path, A3HybridConfig, objective_section=section)
+
+
 __all__ = [
     "A4Config",
     "TRAINING_STATE_SOURCE",
     "load_config",
+    "load_residual_config",
 ]

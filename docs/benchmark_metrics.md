@@ -139,20 +139,35 @@ protocols: supply their names or use `--protocols sequential joint`. Rank
 
 ## A4 integration and metric evidence
 
-A4 is planned after A3 and is launched only through
-`experiments/run_stage_a4.py`. Its command receives only that runner's accepted
-artifact and retrieval options; it does not receive runtime-dataset, task-order,
-held-out-task, protocol, or A2-arm flags. A4 uses the completed same-seed A3
-`params/task_*.npz` checkpoint as its warm start. Because the A4 runner has no
-seed override, the benchmark plans one A4 run using the first selected seed.
+The benchmark launches A4 through `experiments/run_stage_a4.py` for each
+requested seed and rank. Each condition uses the final checkpoint and effective
+configuration of the first completed A3 run in manifest order with the same
+seed and rank. All alignment arms for a given seed and rank use that same
+checkpoint and the same source, label and bank artifacts.
+
+- **Standalone aligned** is the benchmark default. It uses source JSONL and a
+  bank-matched alignment artifact. The default `full` arm applies both
+  alignment losses. Use `--a4-arms ce_only key_only value_only full` to run
+  all four arms with weights `(0, 0)`, `(1, 0)`, `(0, 1)` and `(1, 1)`.
+  Each arm has its own run ID and condition fingerprint. Each result also
+  records the frozen A3-only baseline on the same validation and test inputs.
+- **Sequential CE-only** uses `--a4-data-mode runtime` with the materialized
+  runtime YAML, patterns and embeddings. The run records the effective seed,
+  realized task order, epoch counts, per-task checkpoints and next-token evals.
+  ROCStories uses one shared validation split. Its report shows validation CE
+  and perplexity before training and after each task. For separate datasets
+  with distinct task validation sets, the report includes the loss matrix and
+  CE backward transfer, where positive values indicate improvement.
+- **Sequential aligned** requires a validated mapping between runtime tasks
+  and alignment labels before it can produce benchmark results.
 
 The shared metric inventory is:
 
 | Metric | A4 evidence | A1/A2/A3 |
 |---|---|---|
-| Validation loss, perplexity | `results.json` `validation.loss` / `validation.ppl` | Computed by the shared evaluator |
-| Held-out test loss, perplexity | `results.json` `test.loss` / `test.ppl` when `--test-sources` is supplied | Computed by the shared evaluator |
-| Validation-loss forgetting | N/A: A4 has no task sequence | Shared runner output |
+| Validation loss, perplexity | Aligned `validation` or sequential `after_task` in `results.json` | Computed by the shared evaluator |
+| Held-out test loss, perplexity | Aligned `test` with `--test-sources`, or sequential runtime test splits | Computed by the shared evaluator |
+| Validation-loss forgetting | Sequential evaluation on distinct task validation sets | Shared runner output |
 | On-domain KL drift, token accuracy | Measured from `metrics/a4` representation reports on source-disjoint probe windows (`kl_base_to_model`, `next_token_accuracy`) | Shared evaluator |
 | Calibration ECE | N/A: A4 representation probes do not emit calibration bins | Shared evaluator |
 | Residual compressibility, task-gradient conflict, ablation metrics | N/A: A4 has no shared A1-A3 task/rank sweep or ablation protocol | Shared evaluator |
@@ -173,11 +188,12 @@ Example (replace paths with real, source-disjoint artifacts):
 
 ```bash
 python -m benchmark.benchmark run --methods a1 a2 a3 a4 --seeds 0 \
+  --a4-data-mode aligned --a4-arms ce_only key_only value_only full \
   --a4-train-sources path/to/train.jsonl \
   --a4-validation-sources path/to/validation.jsonl \
   --a4-alignment-labels path/to/alignment.json \
-  --a4-patterns path/to/patterns.json \
-  --a4-embeddings path/to/embeddings.npy \
+  --a4-patterns path/to/patterns.jsonl \
+  --a4-embeddings path/to/embeddings.jsonl \
   --a4-test-sources path/to/test.jsonl \
   --a4-native-library path/to/libmork_native.so \
   --output-dir runs/benchmark-a4
@@ -185,7 +201,8 @@ python -m benchmark.summary --output-dir runs/benchmark-a4 --report-dir docs/sta
 python -m benchmark.visualization --output-dir runs/benchmark-a4 --report-dir docs/stage_A_results
 ```
 
-For post-run diagnostics, add `--a4-post-eval --a4-probes path/to/probes`.
+For aligned post-run diagnostics, add `--a4-post-eval --a4-probes path/to/probes.json`.
+Use source-disjoint held-out documents with independently verified template IDs.
 Optionally add `--a4-skip-latency` or `--a4-native-library PATH`. Diagnostics
 are written outside immutable A4 run directories under
 `<output-dir>/a4_post_eval/<run_id>/`; individual failures are recorded as N/A

@@ -84,6 +84,15 @@ def test_rejects_mismatched_manifest(inputs, field):
         admit(inputs)
 
 
+def test_rejects_labels_after_training_source_changes(inputs):
+    args, _, _ = inputs
+    args.train_sources.write_text(
+        json.dumps({"source_text": "1 2 3 9"}) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="different training blocks"):
+        admit(inputs)
+
+
 def test_rejects_missing_labels_instead_of_ce_fallback(inputs):
     inputs[2]["labels"].pop()
     with pytest.raises(ValueError, match="lack firing labels"):
