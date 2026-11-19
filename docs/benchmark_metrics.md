@@ -149,6 +149,14 @@ manifest row. Each A4 result records the exact A3 run ID, checkpoint path and
 hash, shared-condition fingerprint, realized task order, and model revision
 and tokenizer identity.
 
+Pairing uses the A3 effective config, runtime metadata and completed benchmark
+manifest to check the shared settings. It verifies the final checkpoint against
+both the benchmark artifact index and the original checkpoint SHA-256 sidecar.
+The benchmark enables `--record-a4-pairing` for A3 attempts planned with A4:
+the ordinary artifacts identify the model and dataset by name and settings, but
+do not identify the loaded model revision, tokenizer, or exact token blocks.
+Rerun A3 through the benchmark if its attempt lacks that pairing evidence.
+
 Aligned benchmark inputs must belong to the corresponding configured runtime
 splits. Aligned training and evaluation still use the prepared JSONL artifacts.
 Standalone exploratory A4 keeps the latest-checkpoint fallback.

@@ -354,12 +354,14 @@ def main(
     ).hexdigest()
     if pair is not None:
         common = pair["common"]
+        runtime_config_sha256 = hashlib.sha256(
+            args.runtime_config.read_bytes()
+        ).hexdigest()
         if (
             pair["checkpoint"] != str(warm_start)
             or pair["checkpoint_sha256"] != checkpoint_sha256
             or pair["residual_config_sha256"] != residual_config_sha256
-            or common["runtime_config_sha256"]
-            != hashlib.sha256(args.runtime_config.read_bytes()).hexdigest()
+            or common["runtime_config_sha256"] != runtime_config_sha256
             or common["training_mode"] != "sequential"
             or inherited.adapter.rank != common["rank"]
             or (
@@ -415,7 +417,10 @@ def main(
         )
         if pair is not None and (
             list(runtime_data.task_order) != pair["task_order"]
-            or runtime_pairing_fingerprint(runtime_data) != pair["runtime_data_sha256"]
+            or runtime_pairing_fingerprint(
+                runtime_data, runtime_config_sha256=runtime_config_sha256
+            )
+            != pair["runtime_data_sha256"]
         ):
             raise ValueError(
                 "A4 runtime dataset, splits or task order differ from its A3 pair"

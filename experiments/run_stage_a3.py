@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
@@ -354,7 +355,12 @@ def run_one(
                     {
                         "a4_pairing": {
                             "frozen": substrate.pairing_identity(),
-                            "runtime_sha256": runtime_pairing_fingerprint(runtime_data),
+                            "runtime_sha256": runtime_pairing_fingerprint(
+                                runtime_data,
+                                runtime_config_sha256=hashlib.sha256(
+                                    args.runtime_config.read_bytes()
+                                ).hexdigest(),
+                            ),
                             "evaluation_split": args.split,
                         }
                     }

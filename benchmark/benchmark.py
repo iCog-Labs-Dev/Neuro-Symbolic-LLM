@@ -1851,7 +1851,7 @@ def _command(
         "--training-mode",
         "joint" if spec.protocol == "joint" else "sequential",
     ]
-    if spec.a3_record_pairing:
+    if spec.method == "a3" and spec.a3_record_pairing:
         command.append("--record-a4-pairing")
     if spec.runtime_source:
         command.extend(["--runtime-source", spec.runtime_source])
@@ -1943,25 +1943,64 @@ def _resolve_a4_warm_start(
             meta = _read_json(directory / "meta.json")
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             training, adapter = config["training"], config["adapter"]
+            runtime = meta["runtime_data"]
+            if not all(
+                isinstance(value, dict) for value in (training, adapter, runtime)
+            ):
+                raise ValueError("Expected configuration and runtime mappings")
         except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
             rejected.append(f"{candidate}: invalid recorded configuration or metadata")
             continue
-        runtime = meta.get("runtime_data", {})
-        pairing = meta.get("a4_pairing", {})
-        frozen = pairing.get("frozen", {})
-        layers = meta.get("adapted_layers") or []
+        pairing = meta.get("a4_pairing")
+        if not isinstance(pairing, dict):
+            rejected.append(
+                f"{candidate}: missing A4 pairing metadata; rerun A3 with --record-a4-pairing"
+            )
+            continue
+        frozen = pairing.get("frozen")
+        runtime_sha256 = pairing.get("runtime_sha256")
+        if (
+            not isinstance(frozen, dict)
+            or not isinstance(frozen.get("revision"), str)
+            or not frozen["revision"]
+            or not isinstance(frozen.get("architecture"), dict)
+            or not isinstance(frozen.get("tokenizer_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", frozen["tokenizer_sha256"])
+            or not isinstance(runtime_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256)
+            or pairing.get("evaluation_split") != "test"
+        ):
+            rejected.append(
+                f"{candidate}: incompatible or incomplete A4 pairing metadata"
+            )
+            continue
+        architecture = frozen["architecture"]
+        num_layers, hidden_size = meta.get("num_layers"), meta.get("hidden_size")
+        layers = meta.get("adapted_layers")
         order = runtime.get("task_order")
+        heldout = runtime.get("heldout_tasks", [])
         requested_order = [
             name for name in common["task_order"] if name not in common["heldout_tasks"]
         ]
         if (
             meta.get("stage") != "A3"
             or meta.get("model") != common["model"]
+            or type(num_layers) is not int
+            or type(hidden_size) is not int
+            or hidden_size < 1
+            or architecture.get("num_layers") != num_layers
+            or architecture.get("hidden_size") != hidden_size
+            or not isinstance(layers, list)
+            or not layers
+            or any(
+                type(layer) is not int or not 0 <= layer < num_layers for layer in layers
+            )
             or any(
                 training.get(key) != common[key]
                 for key in ("model", "seed", "seq_len", "batch_size", "eval_batches")
             )
             or adapter.get("rank") != common["rank"]
+            or adapter.get("seed") != common["seed"]
             or any(
                 adapter.get(key) != value
                 for key, value in common["layer_selection"].items()
@@ -1969,40 +2008,48 @@ def _resolve_a4_warm_start(
             or sha256_file(directory / "provenance/materialized_runtime.yaml")
             != common["runtime_config_sha256"]
             or runtime.get("mode") != common["runtime_source"]
+            or common["training_mode"] != "sequential"
             or runtime.get("training_mode") != common["training_mode"]
             or runtime.get("sequence_length") != common["seq_len"]
             or runtime.get("batch_size") != common["batch_size"]
-            or sorted(runtime.get("heldout_tasks", [])) != common["heldout_tasks"]
+            or not isinstance(heldout, list)
+            or not all(isinstance(task, str) for task in heldout)
+            or sorted(heldout) != common["heldout_tasks"]
+            or not isinstance(order, list)
             or not order
             or order != row.get("task_order")
             or (requested_order and order != requested_order)
-            or not frozen.get("revision")
-            or not frozen.get("tokenizer_sha256")
-            or not pairing.get("runtime_sha256")
-            or pairing.get("evaluation_split") != "test"
         ):
             rejected.append(
                 f"{candidate}: incompatible or missing realized configuration"
             )
             continue
-        if not _valid_a3_checkpoint(
-            checkpoint,
-            layers,
-            frozen.get("architecture", {}).get("hidden_size", 0),
-            common["rank"],
-        ):
+        if not _valid_a3_checkpoint(checkpoint, layers, hidden_size, common["rank"]):
             rejected.append(f"{candidate}: invalid final checkpoint parameters")
+            continue
+        try:
+            checkpoint_sha256 = sha256_file(checkpoint)
+            recorded_sha256 = checkpoint.with_suffix(".npz.sha256").read_text(
+                encoding="utf-8"
+            ).strip()
+        except (OSError, ValueError):
+            rejected.append(
+                f"{candidate}: missing or unreadable checkpoint SHA-256 sidecar"
+            )
+            continue
+        if recorded_sha256 != checkpoint_sha256:
+            rejected.append(f"{candidate}: final checkpoint SHA-256 sidecar mismatch")
             continue
         matches.append(
             {
                 "run_id": candidate,
                 "condition_sha256": row["condition_sha256"],
                 "checkpoint": str(checkpoint.resolve()),
-                "checkpoint_sha256": sha256_file(checkpoint),
+                "checkpoint_sha256": checkpoint_sha256,
                 "residual_config_sha256": sha256_file(config_path),
                 "common": common,
                 "common_sha256": fingerprint(common),
-                "runtime_data_sha256": pairing["runtime_sha256"],
+                "runtime_data_sha256": runtime_sha256,
                 "task_order": order,
                 "layers": layers,
                 "frozen": frozen,

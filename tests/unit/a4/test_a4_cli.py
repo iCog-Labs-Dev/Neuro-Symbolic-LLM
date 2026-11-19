@@ -118,12 +118,16 @@ def test_benchmark_requires_explicit_warm_start(tmp_path, capsys):
 
 def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
     from contextlib import nullcontext
+    from dataclasses import replace
+
+    import numpy as np
 
     from experiments import run_stage_a4 as runner
     from runtime import data_loader
     from stages.stage_A import a3
     from stages.stage_A.a4 import checkpoint, model, training
     from stages.stage_A.a4.config import load_config
+    from stages.stage_base import Domain
     from symbolic_memory import bank, jax_bridge, service, storage
 
     config = load_config(DEFAULT_CONFIG)
@@ -147,6 +151,14 @@ def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
             DEFAULT_RUNTIME_CONFIG.read_bytes()
         ).hexdigest(),
     )
+    blocks = np.zeros((1, config.training.seq_len), dtype=np.int32)
+    task = Domain("stories", blocks, (blocks,), config.training.epochs)
+    runtime_data = data_loader.RuntimeData(
+        (task,),
+        {"stories": blocks},
+        ("stories",),
+        {},
+    )
     pair = {
         "run_id": "matched-a3",
         "checkpoint": str(warm_start),
@@ -159,7 +171,9 @@ def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
         "frozen": identity,
         "layers": [0],
         "task_order": ["stories"],
-        "runtime_data_sha256": "runtime-sha",
+        "runtime_data_sha256": data_loader.runtime_pairing_fingerprint(
+            runtime_data, runtime_config_sha256=common["runtime_config_sha256"]
+        ),
     }
     pair_path = tmp_path / "pair.json"
     pair_path.write_text(json.dumps(pair))
@@ -176,18 +190,8 @@ def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(checkpoint, "restore_a3_weights", Mock(return_value=None))
     monkeypatch.setattr("stages.results.load_params", Mock(return_value={}))
-    monkeypatch.setattr(
-        data_loader,
-        "load_runtime_data",
-        Mock(
-            return_value=SimpleNamespace(
-                tasks=(None,), task_order=("stories",), metadata={}
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        data_loader, "runtime_pairing_fingerprint", Mock(return_value="runtime-sha")
-    )
+    load_runtime_data = Mock(return_value=runtime_data)
+    monkeypatch.setattr(data_loader, "load_runtime_data", load_runtime_data)
     monkeypatch.setattr(
         bank,
         "load_bank",
@@ -229,12 +233,30 @@ def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
         "paired",
     ]
 
+    original_checkpoint = warm_start.read_bytes()
+    warm_start.write_bytes(original_checkpoint + b" changed")
+    with pytest.raises(ValueError, match="checkpoint differs from its A3 pair"):
+        runner.main(argv)
+    resolve.assert_not_called()
+    train.assert_not_called()
+    warm_start.write_bytes(original_checkpoint)
+
     frozen.pairing_identity.return_value = {**identity, "tokenizer_sha256": "other"}
     with pytest.raises(ValueError, match="tokenizer differ"):
         runner.main(argv)
     train.assert_not_called()
 
     frozen.pairing_identity.return_value = identity
+    load_runtime_data.return_value = replace(
+        runtime_data, test_blocks={"stories": blocks + 1}
+    )
+    with pytest.raises(
+        ValueError, match="runtime dataset, splits or task order differ"
+    ):
+        runner.main(argv)
+    train.assert_not_called()
+
+    load_runtime_data.return_value = runtime_data
     assert runner.main(argv) == 0
     resolve.assert_called_with(common["model"], None, revision="commit")
     train.assert_called_once()

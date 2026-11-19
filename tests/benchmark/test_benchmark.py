@@ -382,7 +382,9 @@ def test_runtime_a4_command_and_result(tmp_path):
 
 @pytest.mark.parametrize("mode", ["aligned", "runtime"])
 def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mode):
+    from experiments import run_stage_a3
     from experiments.run_stage_a4 import _apply_training_overrides, parse_args
+    from runtime.data_loader import RuntimeData, runtime_pairing_fingerprint
     from stages.stage_A.a4.config import load_config
 
     monkeypatch.setattr(
@@ -409,62 +411,111 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
     calls = []
     a3_checkpoints = {}
 
+    order = ["first", "second"]
     frozen = {
         "revision": "immutable-commit",
-        "architecture": {"hidden_size": 8},
-        "tokenizer_sha256": "tokenizer-hash",
+        "architecture": {"hidden_size": 8, "num_layers": 1},
+        "tokenizer_sha256": "a" * 64,
     }
 
+    def load_runtime(**kwargs):
+        blocks = np.arange(1024, dtype=np.int32).reshape(8, 128)
+        tasks = tuple(
+            _Task(name, blocks + index, (blocks + index + 2,), 2)
+            for index, name in enumerate(order)
+        )
+        return RuntimeData(
+            tasks,
+            {"stories": blocks + 4},
+            tuple(order),
+            {
+                "mode": kwargs["source"],
+                "training_mode": kwargs["training_mode"],
+                "sequence_length": kwargs["sequence_length"],
+                "batch_size": kwargs["batch_size"],
+                "task_order": order,
+            },
+        )
+
+    def make_model(*args, rank, **kwargs):
+        return SimpleNamespace(
+            init_params=lambda key: {
+                "layer_0": {
+                    "A": jax.random.uniform(key, (8, rank)),
+                    "B": np.zeros((rank, 8), dtype=np.float32),
+                },
+            },
+            adapter_params=lambda params: params,
+        )
+
+    substrate = SimpleNamespace(
+        architecture=SimpleNamespace(hidden_size=8, num_layers=1),
+        params={},
+        tokenizer=object(),
+        pairing_identity=lambda: frozen,
+        verify_frozen=lambda: {"params_unchanged": True},
+    )
+    monkeypatch.setattr(run_stage_a3, "FrozenSubstrate", lambda _: substrate)
+    monkeypatch.setattr(
+        run_stage_a3,
+        "ResidualAdapter",
+        lambda *_: SimpleNamespace(layers=(0,), scale=1),
+    )
+    monkeypatch.setattr(run_stage_a3, "A3Model", make_model)
+    monkeypatch.setattr(run_stage_a3, "load_runtime_data", load_runtime)
+    monkeypatch.setattr(
+        run_stage_a3, "train", lambda **kwargs: (kwargs["params"], {"steps": 0})
+    )
+    monkeypatch.setattr(
+        run_stage_a3, "evaluate_deployment", lambda *args, **kwargs: {"loss": 1.0}
+    )
+    monkeypatch.setattr(
+        run_stage_a3, "log_experiment_header", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(run_stage_a3, "log_final_summary", lambda *args, **kwargs: None)
+
+    real_run = subprocess.run
+
     def launch(command, **kwargs):
+        if command[0] != sys.executable:
+            return real_run(command, **kwargs)
         flags = command[2:]
 
         def option(name):
             return flags[flags.index(name) + 1]
 
         folder = Path(option("--output-dir")) / option("--run-name")
-        folder.mkdir(parents=True)
         config = Path(option("--config"))
         stage = Path(command[1]).stem
         calls.append(stage)
-        order = ["first", "second"]
-        meta = {"runtime_data": {"task_order": order}}
-        result = {}
-        checkpoints = folder / "checkpoints"
-        checkpoints.mkdir()
         if stage == "run_stage_a3":
             assert "--record-a4-pairing" in flags
-            effective = yaml.safe_load(config.read_text())
-            effective["training"].update(
-                model="gpt2", seq_len=128, batch_size=8, eval_batches=8
-            )
-            (folder / "config.yaml").write_text(yaml.safe_dump(effective))
-            seed = effective["training"]["seed"]
-            checkpoint = checkpoints / "a3hybrid_final.npz"
-            np.savez(
-                checkpoint,
-                **{
-                    "params/layer_0/A": np.full((8, 4), seed, dtype=np.float32),
-                    "params/layer_0/B": np.zeros((4, 8), dtype=np.float32),
-                },
-            )
-            a3_checkpoints[seed] = checkpoint
-            meta.update(
-                stage="A3",
-                model="gpt2",
-                adapted_layers=[0],
-                a4_pairing={
-                    "frozen": frozen,
-                    "runtime_sha256": "data-sha",
-                    "evaluation_split": "test",
-                },
-            )
-            meta["runtime_data"].update(
-                mode="stories",
-                training_mode="sequential",
+            options = run_stage_a3.parse_args(flags)
+            assert options.record_a4_pairing
+            seed = yaml.safe_load(config.read_text())["training"]["seed"]
+            assert run_stage_a3.main(flags) == 0
+            a3_checkpoints[seed] = folder / "checkpoints/a3hybrid_final.npz"
+            metadata = json.loads((folder / "meta.json").read_text())
+            runtime_sha256 = sha256_file(options.runtime_config)
+            data = load_runtime(
+                source=options.runtime_source,
+                training_mode=options.training_mode,
                 sequence_length=128,
                 batch_size=8,
             )
+            assert metadata["a4_pairing"] == {
+                "frozen": frozen,
+                "runtime_sha256": runtime_pairing_fingerprint(
+                    data,
+                    runtime_config_sha256=runtime_sha256,
+                ),
+                "evaluation_split": "test",
+            }
+            return SimpleNamespace(returncode=0)
         else:
+            checkpoints = folder / "checkpoints"
+            checkpoints.mkdir(parents=True)
+            meta = {"runtime_data": {"task_order": order}}
             args = parse_args(flags)
             effective = _apply_training_overrides(load_config(config), args)
             checkpoint = a3_checkpoints[effective.training.seed]
@@ -554,6 +605,66 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
         runner._resolve_a4_warm_start({"runs": [alternate, a3]}, {**a4, "a4_a3_k": 1})
         == pair
     )
+    a3_dir = Path(a3["run_dir"])
+    meta_path = a3_dir / "meta.json"
+    meta = runner._read_json(meta_path)
+    pairing_metadata = meta.pop("a4_pairing")
+    completion_spec = runner._read_json(a3_dir / "spec.json")
+    _write_json(meta_path, meta)
+    runner.finalize_attempt(a3_dir, completion_spec)
+    with pytest.raises(RuntimeError, match="missing A4 pairing metadata"):
+        runner._resolve_a4_warm_start({"runs": [a3]}, a4)
+    for key, invalid in (
+        ("evaluation_split", "train"),
+        ("runtime_sha256", "invalid"),
+        ("frozen", None),
+    ):
+        _write_json(
+            meta_path, {**meta, "a4_pairing": {**pairing_metadata, key: invalid}}
+        )
+        runner.finalize_attempt(a3_dir, completion_spec)
+        with pytest.raises(
+            RuntimeError, match="incompatible or incomplete A4 pairing metadata"
+        ):
+            runner._resolve_a4_warm_start({"runs": [a3]}, a4)
+    meta["a4_pairing"] = pairing_metadata
+    for changes in (
+        {"num_layers": 2},
+        {"hidden_size": 16},
+        {"adapted_layers": [1]},
+        {"runtime_data": {**meta["runtime_data"], "training_mode": "joint"}},
+        {
+            "runtime_data": {**meta["runtime_data"], "task_order": list(reversed(order))}
+        },
+    ):
+        _write_json(meta_path, {**meta, **changes})
+        runner.finalize_attempt(a3_dir, completion_spec)
+        with pytest.raises(
+            RuntimeError, match="incompatible or missing realized configuration"
+        ):
+            runner._resolve_a4_warm_start({"runs": [a3]}, a4)
+    _write_json(meta_path, meta)
+    config_path = a3_dir / "config.yaml"
+    config_text = config_path.read_text()
+    for section, key, invalid in (("training", "seed", 19), ("adapter", "rank", 16)):
+        config = yaml.safe_load(config_text)
+        config[section][key] = invalid
+        config_path.write_text(yaml.safe_dump(config))
+        runner.finalize_attempt(a3_dir, completion_spec)
+        with pytest.raises(
+            RuntimeError, match="incompatible or missing realized configuration"
+        ):
+            runner._resolve_a4_warm_start({"runs": [a3]}, a4)
+    config_path.write_text(config_text)
+    runner.finalize_attempt(a3_dir, completion_spec)
+    checkpoint = a3_checkpoints[7]
+    with checkpoint.open("ab") as stream:
+        stream.write(b"changed checkpoint")
+    with pytest.raises(RuntimeError, match="artifact hash mismatch"):
+        runner._resolve_a4_warm_start({"runs": [a3]}, a4)
+    runner.finalize_attempt(a3_dir, completion_spec)
+    with pytest.raises(RuntimeError, match="checkpoint SHA-256 sidecar mismatch"):
+        runner._resolve_a4_warm_start({"runs": [a3]}, a4)
     a3_checkpoints[7].unlink()
     with pytest.raises(RuntimeError, match="missing final checkpoint"):
         runner._resolve_a4_warm_start({"runs": [a3]}, a4)
@@ -893,13 +1004,30 @@ def test_runtime_pairing_checks_split_membership_and_realized_blocks(
             source_texts=sources,
         )
 
+    def fingerprint(data):
+        return data_loader.runtime_pairing_fingerprint(
+            data, runtime_config_sha256=sha256_file(config)
+        )
+
     source_files = {split: set(records) for split, records in texts.items()}
-    original = data_loader.runtime_pairing_fingerprint(load(source_files))
-    assert original == data_loader.runtime_pairing_fingerprint(load())
+    data = load(source_files)
+    original = fingerprint(data)
+    assert original == fingerprint(load())
     with pytest.raises(ValueError, match="outside the runtime split"):
         load({**source_files, "validation": {"11 12"}})
-    texts["validation"] = ["24 25"]
-    assert original != data_loader.runtime_pairing_fingerprint(load())
+    for split in texts:
+        saved = texts[split]
+        texts[split] = ["24 25"]
+        assert original != fingerprint(load()), split
+        texts[split] = saved
+    assert original != fingerprint(replace(data, task_order=("changed",)))
+    assert original != fingerprint(
+        replace(data, metadata={**data.metadata, "seed": 123})
+    )
+    config.write_text(
+        config.read_text().replace("dataset: example", "dataset: different")
+    )
+    assert original != fingerprint(load())
 
 
 def _condition(**overrides):

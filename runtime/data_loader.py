@@ -164,13 +164,18 @@ def array_fingerprint(value: np.ndarray) -> str:
     return digest.hexdigest()
 
 
-def runtime_pairing_fingerprint(data: RuntimeData) -> str:
-    """Identify the realized task order and token blocks in all splits."""
+def runtime_pairing_fingerprint(
+    data: RuntimeData, *, runtime_config_sha256: str
+) -> str:
+    """Identify the runtime configuration and the ordered, realized token blocks."""
+    training_tasks = data.training_tasks or data.tasks
     payload = {
+        "runtime_config_sha256": runtime_config_sha256,
         "metadata": data.metadata,
-        "train": {
-            task.name: array_fingerprint(task.train_blocks) for task in data.tasks
-        },
+        "task_order": data.task_order,
+        "train": [
+            (task.name, array_fingerprint(task.train_blocks)) for task in training_tasks
+        ],
         "validation": {
             task.name: [array_fingerprint(batch) for batch in task.eval_set]
             for task in data.tasks
