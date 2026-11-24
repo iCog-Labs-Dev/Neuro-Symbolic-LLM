@@ -78,6 +78,79 @@ def _comparison_table(cohort, specs) -> list[str]:
     return lines
 
 
+def _compressibility_tables(records: list[dict[str, Any]]) -> list[str]:
+    """Show complete saved rank curves, counting each matched sweep once."""
+    lines = [
+        "## Residual compressibility by rank",
+        "",
+        "Values are validation-loss improvement divided by improvement at the reference rank. "
+        "The reference is 1 by definition; values above 1 exceed its improvement, and negative "
+        "values mean worse loss than the base model. n counts measured sweeps (seeds/data).",
+        "",
+    ]
+    groups = {}
+    for record in records:
+        curve = record.get("residual_compressibility")
+        if record.get("status") == "invalid" or not curve:
+            continue
+        ranks = tuple(sorted(int(rank) for rank in curve))
+        reference = (record.get("compressibility_detail") or {}).get(
+            "reference_rank"
+        ) or max(ranks)
+        condition = (
+            record.get("protocol", "sequential"),
+            tuple(record.get("task_order", ())),
+            tuple(record.get("heldout_tasks", ())),
+            record.get("runtime_source", "unknown"),
+            reference,
+            ranks,
+        )
+        method = str(record["method"]).upper()
+        label = f"{method}, K={record.get('k')}" if method == "A3" else method
+        sweeps = groups.setdefault(condition, {}).setdefault(label, {})
+        # Every rank record repeats the curve for its sweep. Do not count it again.
+        sweep = (record.get("seed"), record.get("runtime_data_sha256"))
+        sweeps[sweep] = curve
+    if not groups:
+        return lines + [
+            "N/A: no valid matched rank sweeps with a reliable reference.",
+            "",
+        ]
+    for condition, methods in sorted(groups.items(), key=lambda item: str(item[0])):
+        protocol, order, heldout, source, reference, ranks = condition
+        lines += [
+            f"Protocol: {_safe_text(protocol)}; runtime source: {_safe_text(source)}; "
+            f"task order: {_safe_text(_format_task_order(list(order)))}; "
+            f"held-out tasks: {_safe_text(', '.join(heldout) or 'none')}.",
+            "",
+            "| Method/configuration | "
+            + " | ".join(
+                f"Rank {rank}" + (" reference" if rank == reference else "")
+                for rank in ranks
+            )
+            + " |",
+            "|---|" + "---:|" * len(ranks),
+        ]
+        for label, sweeps in sorted(methods.items()):
+            cells = []
+            for rank in ranks:
+                values = [
+                    value
+                    for curve in sweeps.values()
+                    for value in metric_values_for_record(
+                        {"residual_compressibility": curve},
+                        "residual_compressibility",
+                        rank,
+                    )
+                ]
+                cells.append(
+                    f"{fmean(values):.3f} (n={len(values)})" if values else "N/A"
+                )
+            lines.append(f"| {_safe_text(label)} | " + " | ".join(cells) + " |")
+        lines.append("")
+    return lines
+
+
 def _combined_evidence_table(records: list[dict[str, Any]]) -> list[str]:
     lines = [
         "## Run evidence, dataset token accuracy, and N/A reasons",
@@ -174,6 +247,7 @@ def report_manifest(
         "read/write overlap across layers. Ablation fidelity compares predicted and "
         "actual held-out loss changes for sampled rank channels.",
         "",
+        *_compressibility_tables(records),
         *_combined_evidence_table(records),
         *_figure_notice(),
     ]

@@ -278,6 +278,83 @@ def test_real_default_configs_materialize(tmp_path: Path) -> None:
         assert "domains" not in config
         assert config["adapter"]["rank"] == 4
         assert config["training"]["epochs"] == 1
+        stage = yaml.safe_load(Path(spec.config).read_text(encoding="utf-8"))
+        shared = yaml.safe_load(
+            (runner.ROOT / "configs/training.yaml").read_text(encoding="utf-8")
+        )
+        assert config["training"]["learning_rate"] == stage["training"]["learning_rate"]
+        assert (
+            config["training"]["reset_optimizer"]
+            == shared["training"]["reset_optimizer"]
+        )
+        assert config["training"]["model"] == shared["model"]["name"]
+        assert config["training"]["seq_len"] == shared["model"]["seq_len"]
+        assert (
+            config["training"]["eval_batches"]
+            == shared["evaluation"]["validation_batches"]
+        )
+
+
+def test_default_rank_sweep_and_runtime_manifest_path(tmp_path):
+    manifest = make_manifest(
+        tmp_path, seeds=[0], methods=["a1", "a2", "a3"], k_values=[2, 4, 8]
+    )
+    assert runner.DEFAULT_RANKS == (4, 8, 16)
+    assert manifest["rank_values"] == [4, 8, 16]
+    assert len(manifest["runs"]) == 15
+    assert manifest["runtime_config"] == str(DEFAULT_RUNTIME_CONFIG.resolve())
+    assert {row["rank"] for row in manifest["runs"]} == {4, 8, 16}
+    source = yaml.safe_load(DEFAULT_RUNTIME_CONFIG.read_text(encoding="utf-8"))
+    for row in manifest["runs"]:
+        runtime = yaml.safe_load(
+            Path(row["materialized_runtime_config"]).read_text(encoding="utf-8")
+        )
+        assert runtime["datasets"] == source["datasets"]
+        assert runtime["evaluation"] == source["evaluation"]
+        assert runtime["runtime"]["max_tasks"] == source["runtime"]["max_tasks"]
+    with pytest.raises(ValueError, match="positive integers"):
+        expand_specs(tmp_path, seeds=[0], methods=["a1"], k_values=[2], rank_values=[])
+
+
+def test_materialized_config_snapshots_shared_defaults_with_stage_precedence(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs/training.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "name": "custom-model",
+                    "seq_len": 64,
+                    "batch_size": 2,
+                    "rank": 32,
+                },
+                "training": {
+                    "epochs": 7,
+                    "reset_optimizer": True,
+                    "learning_rate": 0.9,
+                },
+                "evaluation": {"validation_batches": 3, "test_batches": 5},
+            }
+        )
+    )
+    stage = tmp_path / "stage.yaml"
+    stage.write_text(
+        yaml.safe_dump({"training": {"learning_rate": 0.025, "batch_size": 4}})
+    )
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    config = runner._load_stage_config(stage)
+    assert config["training"] == {
+        "model": "custom-model",
+        "seq_len": 64,
+        "batch_size": 4,
+        "epochs": 7,
+        "reset_optimizer": True,
+        "learning_rate": 0.025,
+        "eval_batches": 3,
+        "test_batches": 5,
+    }
+    assert config["adapter"]["rank"] == 32
 
 
 def test_runtime_source_override_ignores_yaml_default(
@@ -992,6 +1069,42 @@ def test_effect_magnitudes_are_not_prediction_fidelity():
         assert metric_values_for_record(record, key, 16) == []
 
 
+def test_compressibility_table_separates_conditions_and_deduplicates_sweeps():
+    from benchmark.summary import _compressibility_tables
+
+    records = []
+    for seed, small in ((0, 1.1), (1, 1.3)):
+        for rank in (4, 8, 16):
+            records.append(
+                {
+                    "method": "a3",
+                    "k": 2,
+                    "seed": seed,
+                    "rank": rank,
+                    "protocol": "sequential",
+                    "task_order": ["task_a"],
+                    "runtime_data_sha256": f"data-{seed}",
+                    "residual_compressibility": {"4": small, "8": 0.9, "16": 1.0},
+                }
+            )
+    records.append(
+        {
+            **records[0],
+            "k": 8,
+            "residual_compressibility": {"4": -2.955, "8": 0.194, "16": 1.0},
+        }
+    )
+    records.append({**records[0], "protocol": "joint"})
+    records.append({**records[0], "status": "invalid", "k": 99})
+    content = "\n".join(_compressibility_tables(records))
+    assert "| Method/configuration | Rank 4 | Rank 8 | Rank 16 reference |" in content
+    assert "| A3, K=2 | 1.200 (n=2) | 0.900 (n=2) | 1.000 (n=2) |" in content
+    assert "| A3, K=8 | -2.955 (n=1) | 0.194 (n=1) | 1.000 (n=1) |" in content
+    assert content.count("| Method/configuration |") == 2
+    assert "K=99" not in content
+    assert "N/A" in "\n".join(_compressibility_tables([]))
+
+
 def test_reevaluation_replaces_old_metric_catalog_without_editing_manifest(tmp_path):
     path = tmp_path / "manifest.json"
     _write_json(path, {"runs": [], "measured_metrics": ["invariant_redundancy"]})
@@ -1347,7 +1460,12 @@ def test_realized_identity_and_resume(tmp_path, monkeypatch, source):
     )
     output = tmp_path / "runs"
     runner.make_manifest(
-        output, seeds=[0], methods=["a1"], k_values=[1], runtime_source=source
+        output,
+        seeds=[0],
+        methods=["a1"],
+        k_values=[1],
+        rank_values=[16],
+        runtime_source=source,
     )
     calls = []
 

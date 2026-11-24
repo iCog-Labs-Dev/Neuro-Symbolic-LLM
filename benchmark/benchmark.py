@@ -445,7 +445,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME_CONFIG = ROOT / "configs" / "runtime_datasets.yaml"
 BENCHMARK_RUNTIME_SOURCE = None
 METHODS = ("a1", "a2", "a3")
-BENCHMARK_LEARNING_RATE = 1.0e-3
+DEFAULT_RANKS = (4, 8, 16)
 DEFAULT_CONFIGS = {
     "a1": ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml",
     "a2": ROOT / "configs" / "stage_A" / "a2_pc_inspired.yaml",
@@ -1045,10 +1045,40 @@ def _set_rank(config: dict[str, Any], rank: int) -> None:
     config.setdefault("adapter", {})["rank"] = rank
 
 
-def _set_shared_training(config: dict[str, Any]) -> None:
-    training = config.setdefault("training", {})
-    training["learning_rate"] = BENCHMARK_LEARNING_RATE
-    training["reset_optimizer"] = False
+def _load_stage_config(path: Path) -> dict[str, Any]:
+    """Snapshot shared defaults with explicit stage settings taking precedence.
+
+    Use the same model/evaluation aliases as stages.stage_base.load_configs,
+    without importing the model stack during planning.
+    """
+    shared = (
+        yaml.safe_load((ROOT / "configs" / "training.yaml").read_text(encoding="utf-8"))
+        or {}
+    )
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    model = shared.get("model") or {}
+    training = dict(shared.get("training") or {})
+    model_training = {
+        key: model[key] for key in ("seq_len", "batch_size", "seed") if key in model
+    }
+    if "name" in model:
+        model_training["model"] = model["name"]
+    training = {**model_training, **training}
+    evaluation = shared.get("evaluation") or {}
+    for source, target in (
+        ("validation_batches", "eval_batches"),
+        ("test_batches", "test_batches"),
+    ):
+        if source in evaluation:
+            training[target] = evaluation[source]
+    config["training"] = {**training, **(config.get("training") or {})}
+    adapter = {
+        key: model[key]
+        for key in ("rank", "alpha", "activation", "init_std", "layers", "seed")
+        if key in model
+    }
+    config["adapter"] = {**adapter, **(config.get("adapter") or {})}
+    return config
 
 
 def _set_method_variant(config: dict[str, Any], spec: RunSpec) -> None:
@@ -1079,7 +1109,7 @@ def expand_specs(
     seeds: list[int],
     methods: list[str],
     k_values: list[int],
-    rank_values: list[int] | None = None,
+    rank_values: Sequence[int] | None = None,
     epochs: int | None = None,
     protocol: str = "sequential",
     task_order: list[str] | tuple[str, ...] | None = None,
@@ -1105,7 +1135,7 @@ def expand_specs(
         raise ValueError("k_values must contain non-negative integers.")
     if len(set(k_values)) != len(k_values):
         raise ValueError("k_values must be unique")
-    ranks = rank_values or [16]
+    ranks = DEFAULT_RANKS if rank_values is None else rank_values
     if not ranks or any(rank < 1 for rank in ranks):
         raise ValueError("rank_values must contain positive integers.")
     if len(set(ranks)) != len(ranks):
@@ -1150,10 +1180,9 @@ def expand_specs(
 
 def _materialize(spec: RunSpec, root: Path, epochs: int | None) -> Path:
     source = Path(spec.config)
-    config = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    config = _load_stage_config(source)
     _set_seed(config, spec.method, spec.seed)
     _set_rank(config, spec.rank)
-    _set_shared_training(config)
     _set_epochs(config, epochs)
     _set_protocol(config, spec.protocol)
     _set_method_variant(config, spec)
@@ -1210,7 +1239,7 @@ def make_manifest(
     seeds: list[int],
     methods: list[str],
     k_values: list[int],
-    rank_values: list[int] | None = None,
+    rank_values: Sequence[int] | None = None,
     epochs: int | None = None,
     protocol: str = "sequential",
     protocols: list[str] | tuple[str, ...] | None = None,
@@ -1268,9 +1297,9 @@ def make_manifest(
     run_rows = []
     for spec in specs:
         config = _materialize(spec, output_dir, epochs)
-        runtime_config = _materialize_runtime(spec, output_dir)
+        materialized_runtime = _materialize_runtime(spec, output_dir)
         condition = _condition(
-            spec, config, runtime_config, epochs, str(source["source_sha256"])
+            spec, config, materialized_runtime, epochs, str(source["source_sha256"])
         )
         run_rows.append(
             {
@@ -1281,7 +1310,7 @@ def make_manifest(
                 "planned_run_id": spec.run_id,
                 "planned_condition_sha256": condition["condition_sha256"],
                 "materialized_config": str(config),
-                "materialized_runtime_config": str(runtime_config),
+                "materialized_runtime_config": str(materialized_runtime),
                 **condition,
             }
         )
@@ -1294,7 +1323,7 @@ def make_manifest(
         "methods": methods,
         "seeds": seeds,
         "k_values": k_values,
-        "rank_values": rank_values or [16],
+        "rank_values": list(DEFAULT_RANKS if rank_values is None else rank_values),
         "epochs": epochs,
         "domains": list(base_order),
         "runtime_config": str(runtime_config),
@@ -2071,11 +2100,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     output_dir = args.output_dir.resolve()
     profiles = {
-        "smoke": ([0], [16], [4], ["sequential"]),
-        "headline": ([0, 1, 2], [16], [1, 2, 4, 8], ["sequential", "joint"]),
+        "smoke": ([0], DEFAULT_RANKS, [4], ["sequential"]),
+        "headline": ([0, 1, 2], DEFAULT_RANKS, [1, 2, 4, 8], ["sequential", "joint"]),
         "full": (
             [0, 1, 2, 3, 4],
-            [1, 2, 4, 8, 16, 32, 64],
+            DEFAULT_RANKS,
             [1, 2, 4, 8],
             ["sequential", "joint", "heldout", "commutator"],
         ),

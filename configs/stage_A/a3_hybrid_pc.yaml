@@ -1,5 +1,8 @@
 # Stage A3: Hybrid predictive-coding residual training
 
+training:
+  learning_rate: 1.0e-3
+
 adapter:
   activation: identity
   alpha: 16
