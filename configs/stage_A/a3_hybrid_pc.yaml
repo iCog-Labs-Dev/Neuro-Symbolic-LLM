@@ -1,8 +1,5 @@
 # Stage A3: Hybrid predictive-coding residual training
 
-training:
-  learning_rate: 1.0e-3
-
 adapter:
   activation: identity
   alpha: 16
@@ -11,6 +8,9 @@ adapter:
   late_end: null
   layers: null
   seed: 42
+
+training:
+  learning_rate: 1.0e-3
 
 a3_hybrid:
   infer_steps: 4

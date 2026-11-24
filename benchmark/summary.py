@@ -88,7 +88,9 @@ def _compressibility_tables(records: list[dict[str, Any]]) -> list[str]:
         "values mean worse loss than the base model. n counts measured sweeps (seeds/data).",
         "",
     ]
-    groups = {}
+    groups: dict[
+        tuple[Any, ...], dict[str, dict[tuple[Any, Any], dict[str, float]]]
+    ] = {}
     for record in records:
         curve = record.get("residual_compressibility")
         if record.get("status") == "invalid" or not curve:
