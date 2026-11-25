@@ -48,6 +48,8 @@ class TestFunctionalCallCorrectness:
             f"mean_abs_diff={float(diff.mean()):.3e}"
         )
 
+        assert ref_logits.shape == jax_logits.shape
+        assert torch.allclose(ref_logits, jax_logits, atol=1e-3, rtol=1e-3)
         assert float(diff.max()) < 1e-3
 
 

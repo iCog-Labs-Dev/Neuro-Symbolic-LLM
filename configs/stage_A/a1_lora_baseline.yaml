@@ -1,0 +1,13 @@
+adapter:
+  activation: identity
+  alpha: 16
+  init_std: null
+  layers: null
+  seed: 0
+
+objective:
+  lambda_kl: 0.0
+  lambda_wd: 0.0
+
+training:
+  learning_rate: 1.0e-3

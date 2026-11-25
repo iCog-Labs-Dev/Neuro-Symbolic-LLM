@@ -1,0 +1,132 @@
+
+# ── Active model ──────────────────────────────────────────────────────────────
+# Choose one model for the experiment.
+active: ollama_qwen3_8_27b
+
+# ── Provider profiles ─────────────────────────────────────────────────────────
+profiles:
+
+  # Hosted APIs
+
+  openai:
+    provider: openai
+    model: gpt-6.1-terra
+    api_key_env: OPENAI_API_KEY
+    max_output_tokens: 128000
+
+  anthropic:
+    provider: anthropic
+    model: claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY
+    max_tokens: 21000
+
+  gemini:
+    provider: gemini
+    model: gemini-3.8-flash
+    api_key_env: GEMINI_API_KEY
+    max_output_tokens: 65536
+
+  # OpenAI-compatible APIs
+
+  openai_compatible:
+    provider: openai-compatible
+    model_env: OPENAI_COMPATIBLE_MODEL_USED
+    api_key_env: OPENAI_COMPATIBLE_API_KEY
+    base_url_env: OPENAI_COMPATIBLE_BASE_URL
+    max_output_tokens: 10000
+
+  # Local and self-hosted models
+  # Standard teacher generation budget: 10,000 tokens.
+  # num_ctx must accommodate both the input prompt and generated output.
+
+  ollama:
+    provider: ollama
+    model: qwen3:8b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 10000
+    num_ctx: 32768
+
+  ollama_qwen05:
+    provider: ollama
+    model: qwen2.5:0.5b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 10000
+    num_ctx: 24576
+    temperature: 0.0
+
+  ollama_qwen25_3b:
+    provider: ollama
+    model: qwen2.5:3b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 10000
+    num_ctx: 24576
+    temperature: 0.0
+
+  ollama_qwen3_8b:
+    provider: ollama
+    model: qwen3:8b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 16000
+    num_ctx: 32768
+    think: false
+    temperature: 0.0
+
+  ollama_gemma3_4b:
+    provider: ollama
+    model: gemma3:4b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 10000
+    num_ctx: 24576
+    temperature: 0.0
+
+  ollama_llama31_8b:
+    provider: ollama
+    model: llama3.1:8b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 16000
+    num_ctx: 24576
+    temperature: 0.0
+
+  ollama_catalog:
+    provider: ollama
+    model: qwen3:8b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 10000
+    num_ctx: 24576
+    think: false
+    temperature: 0.0
+
+  ollama_qwen3_32b:
+    provider: ollama
+    model: qwen3:32b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 10000
+    num_ctx: 32768
+    think: false
+    temperature: 0.0
+
+  ollama_qwen3_8_27b:
+    provider: ollama
+    model: qwen3.8:27b
+    host_env: OLLAMA_HOST
+    max_output_tokens: 16000
+    num_ctx: 32768
+    think: false
+    temperature: 0.0
+
+  # Transformers local teacher
+
+  transformers_local:
+    provider: transformers-local
+    model: Qwen/Qwen2.5-3B-Instruct
+    hf_token_env: HF_TOKEN
+    max_new_tokens: 10000
+
+  # Fine-tuned semantic student
+
+  semantic_document_student:
+    provider: transformers-local
+    model: models/semantic_document_parser
+    max_new_tokens: 10000
+    role: student
+    add_special_tokens: false
