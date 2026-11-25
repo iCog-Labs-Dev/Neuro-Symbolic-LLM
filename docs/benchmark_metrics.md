@@ -124,12 +124,13 @@ An uploaded Markdown report by itself cannot reconstruct checkpoint metrics.
 Do not run `plan` or `train` to refresh completed runs. Summary/visualization
 alone also cannot repair an old evaluation.json; run checkpoint `eval` first.
 
-Smoke and headline profiles have one rank (16), so compressibility is explicitly
-N/A. Pass `--ranks 4 16` or a wider sweep to measure it. The full profile uses
-ranks 1, 2, 4, 8, 16, 32, 64, but also requests named heldout and commutator
-protocols: supply their names or use `--protocols sequential joint`. Rank
-comparisons match method, seed, K, protocol, realized order, held-out set and
-runtime data fingerprint.
+Smoke, headline and full profiles default to ranks `(4, 8, 16)` through
+`DEFAULT_RANKS`. Use `--ranks` to override the sweep. Compressibility requires
+at least two matched ranks and a sufficiently positive reference improvement;
+otherwise it remains N/A. The full profile also requests named heldout and
+commutator protocols: supply their task names or use
+`--protocols sequential joint`. Rank comparisons match method, seed, K,
+protocol, realized order, held-out set and runtime data fingerprint.
 
 ## Files and output ownership
 
@@ -160,8 +161,7 @@ commands or shell wrapper above to run the pipeline from a fresh checkout.
 
 ## Validation limits
 
-Planning and contract tests cover stories and separate sources. A real local
-smoke attempt cannot reach data loading because the Python environment lacks
-`optax`. Successful model training and ROCStories numeric results are therefore
-not claimed. Install the project training dependencies and run both source smoke
-profiles on the intended training host before accepting runtime performance.
+Planning and contract tests cover stories and separate sources. These checks
+do not establish successful model training or ROCStories numeric performance.
+Validate both runtime sources on the intended training host before drawing
+performance conclusions.
