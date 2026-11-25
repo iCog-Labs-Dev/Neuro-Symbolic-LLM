@@ -11,4 +11,4 @@ objective:
   seed: 42
 
 training:
-  learning_rate: 1.0e-2
+  learning_rate: 1.0e-3

@@ -162,6 +162,28 @@ python experiments/run_stage_a3.py --K 1 2 4 8
 python experiments/run_stage_a4.py
 ```
 
+### 3. A1/A2/A3 Benchmark Metrics and Visualizations
+
+Train and evaluate all three methods, then generate internal and external
+metric tables, comparison plots, individual method plots and a final summary:
+
+```bash
+bash scripts/run_benchmark_full.sh --profile headline
+```
+
+The headline profile uses the YAML runtime source (ROCStories by default) and three seeds. Use `--runtime-source separate` for LexGLUE. Open
+`docs/stage_A_results/index.html` to see the comparison and all individual
+reports. To regenerate reports from saved measurements without retraining:
+
+```bash
+python -m benchmark.summary --output-dir runs/benchmark
+python -m benchmark.visualization --output-dir runs/benchmark
+```
+
+See [benchmark metrics](docs/benchmark_metrics.md) for metric definitions,
+evidence requirements and profiles. JupyterHub notebooks are kept locally and
+are not tracked. Generated reports in `docs/stage_A_results` are tracked.
+
 ## Configuration and Results
 
 - `configs/stage_A/` — Stage-specific experiment configurations.
