@@ -159,9 +159,16 @@ def mean_seen_loss(values: Any, t: int) -> jax.Array:
     )
 
 
-def mean_forgetting(values: Any, t: int) -> jax.Array:
-    """Return mean increase from each prior task's best observed loss."""
+def mean_seen_accuracy(values: Any, t: int) -> jax.Array:
+    """Preserve the shared accuracy API for existing stage consumers."""
+    return jnp.mean(_loss_matrix(values, t)[t, : t + 1])
+
+
+def mean_forgetting(values: Any, t: int, *, higher_is_better: bool = True) -> jax.Array:
+    """Return forgetting for scores, or loss increases when explicitly selected."""
     loss = _loss_matrix(values, t)
+    if higher_is_better:
+        loss = -loss
     if t == 0:
         raise ValueError("Forgetting is undefined at t=0: there are no earlier tasks.")
     training_step = jnp.arange(t)[:, None]
@@ -194,6 +201,7 @@ __all__ = [
     "expected_calibration_error",
     "kl_to_base",
     "mean_forgetting",
+    "mean_seen_accuracy",
     "mean_seen_loss",
     "paired_deltas",
     "perplexity",

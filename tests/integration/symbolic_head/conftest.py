@@ -1,4 +1,4 @@
-"""Fixtures for retrieval integration tests requiring a live MORK HTTP service."""
+"""Fixtures for A4 tests requiring a live MORK HTTP service."""
 
 import pytest
 

@@ -30,7 +30,7 @@ docker compose ps mork-server
 MORK builds from `docker/mork/`; the root `Dockerfile` provides Python CPU
 tooling. The host endpoint is `http://127.0.0.1:8000`; Compose containers use
 `http://mork-server:8000`. Pass it as `--server-url` to the bank CLI or
-the client configuration.
+`--mork-url` to A4. A4's default port 18000 is a separate deployment setting.
 HTTP 200 or 404 at the root passes the health check; bank readback below checks
 functionality. Fixed-bank retrieval does not require Redis.
 
@@ -47,18 +47,18 @@ reinstall and verify after restart.
 
 ## Install and verify a bank
 
-With prepared artifacts in `data/symbolic/`, run from the repository root:
+With prepared artifacts in `data/a4/`, run from the repository root:
 
 ```bash
 python -m symbolic_memory inspect-bank \
-  --patterns data/symbolic/patterns.jsonl --embeddings data/symbolic/embeddings.jsonl
+  --patterns data/a4/patterns.jsonl --embeddings data/a4/embeddings.jsonl
 
 python -m symbolic_memory install-bank \
-  --patterns data/symbolic/patterns.jsonl --embeddings data/symbolic/embeddings.jsonl \
+  --patterns data/a4/patterns.jsonl --embeddings data/a4/embeddings.jsonl \
   --server-url http://127.0.0.1:8000
 
 python -m symbolic_memory check-bank \
-  --patterns data/symbolic/patterns.jsonl --embeddings data/symbolic/embeddings.jsonl \
+  --patterns data/a4/patterns.jsonl --embeddings data/a4/embeddings.jsonl \
   --server-url http://127.0.0.1:8000
 ```
 
@@ -79,7 +79,7 @@ MORK matching unifies native terms and enforces shared-variable constraints:
 
 ```bash
 python -m symbolic_memory match-bank \
-  --patterns data/symbolic/patterns.jsonl --embeddings data/symbolic/embeddings.jsonl \
+  --patterns data/a4/patterns.jsonl --embeddings data/a4/embeddings.jsonl \
   --server-url http://127.0.0.1:8000 \
   --pattern '(, (Agent $event $agent) (Event $event))'
 ```
@@ -93,7 +93,7 @@ Index loading verifies MORK records once; retain the index for subsequent querie
 
 ## Native GPU/CPU bridge
 
-Native retrieval uses `NativeJaxRetriever` and JAX CUDA FFI:
+The default A4 backend uses `NativeJaxRetriever` and JAX CUDA FFI:
 
 ```text
 GPU query -> D2H copy -> CPU normalization/search/KV gather -> H2D results
@@ -132,7 +132,7 @@ import jax
 from symbolic_memory.bank import load_bank
 from symbolic_memory.native_bridge import NativeJaxRetriever
 
-bank = load_bank(Path("data/symbolic/patterns.jsonl"), Path("data/symbolic/embeddings.jsonl"))
+bank = load_bank(Path("data/a4/patterns.jsonl"), Path("data/a4/embeddings.jsonl"))
 with NativeJaxRetriever.from_mork(
     bank, server_url="http://127.0.0.1:8000",
     library_path=Path("data/native/retrieval.so"), top_m=8,
@@ -142,7 +142,7 @@ with NativeJaxRetriever.from_mork(
 ```
 
 Queries are rank-1/rank-2 float32 arrays with the bank's vector dimension.
-The returned retrieval function exposes K/V arrays. Result K/V shapes are
+Pass `retrieve` to `SymbolicHead` for model integration. Result K/V shapes are
 `[batch, min(top_m, bank_count), dimension]`; scores/indices omit the last axis.
 Indices map through `template_ids`. Selection is discrete; retain the original
 query for differentiable attention over constant bank vectors.
@@ -173,7 +173,7 @@ intervals separately from CPU search. These scopes cannot nest, overlap, close
 the retriever or receive concurrent submissions.
 Event intervals can include scheduling/submission gaps; they are not PCIe bus
 measurements. Use separate instrumented/uninstrumented passes and the
-recorded raw timing samples.
+[A4 metrics CLI](../stages/stage_A/a4/README.md#evaluation-and-metrics) for timings.
 
 ## TCP service and adapters
 
@@ -181,7 +181,7 @@ For a separate retrieval process:
 
 ```bash
 python -m symbolic_memory serve-bank \
-  --patterns data/symbolic/patterns.jsonl --embeddings data/symbolic/embeddings.jsonl \
+  --patterns data/a4/patterns.jsonl --embeddings data/a4/embeddings.jsonl \
   --server-url http://127.0.0.1:8000 --host 127.0.0.1 --port 9090
 ```
 
@@ -234,4 +234,4 @@ python -m pytest tests/unit/symbolic_memory/ -q -rs
 Compiled tests skip without the library; CUDA tests need a real JAX GPU and live
 MORK tests need a server. Only locally serialized verified indexes are supported.
 Bank consistency and self-key tests do not establish held-out retrieval quality;
-evaluate retrieval with independently labelled held-out probes.
+see [A4 evaluation](../stages/stage_A/a4/README.md#evaluation-and-metrics).

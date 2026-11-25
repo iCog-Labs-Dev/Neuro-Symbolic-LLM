@@ -634,7 +634,10 @@ def summarize(
         "mean_seen_loss": [float(mean_seen_loss(loss, t)) for t in range(num_tasks)],
         # Undefined at t=0 (no earlier task), stored as null.
         "mean_forgetting": [None]
-        + [float(mean_forgetting(loss, t)) for t in range(1, num_tasks)],
+        + [
+            float(mean_forgetting(loss, t, higher_is_better=False))
+            for t in range(1, num_tasks)
+        ],
     }
 
 
