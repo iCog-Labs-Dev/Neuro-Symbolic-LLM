@@ -36,11 +36,6 @@ Introduces iterative latent-state inference and energy minimization using Fabric
 
 [See more](stages/stage_A/a3/README_A3.md)
 
-### A4 — Symbolic Head
-
-Connects neural representations with structured symbolic knowledge through template retrieval and symbolic attention, backed by MORK.
-[See more](stages/stage_A/a4/README.md)
-
 ### Semantic Parser
 
 Provides teacher–student semantic extraction, validation, MeTTa representation, and integration with the hybrid miner for symbolic knowledge preparation.
@@ -89,7 +84,7 @@ For Ollama installation, server startup, model downloads, and backend configurat
 
 Run commands from the repository root after activating the environment.
 
-### 1. Offline Preparation — A4 Symbolic Pipeline
+### 1. Offline Preparation — Symbolic Pipeline
 
 Run the end-to-end offline preparation workflow:
 
@@ -130,12 +125,6 @@ To compare different inference-step counts:
 python experiments/run_stage_a3.py --K 1 2 4 8
 ```
 
-**A4 — Symbolic Head**
-
-```bash
-python experiments/run_stage_a4.py
-```
-
 ### 3. A1/A2/A3 Benchmark Metrics and Visualizations
 
 Train and evaluate all three methods, then generate internal and external
@@ -162,7 +151,7 @@ are not tracked. Generated reports in `docs/stage_A_results` are tracked.
 
 - `configs/stage_A/` — Stage-specific experiment configurations.
 - `configs/parser_config/` — Semantic parser and model backend configurations.
-- `experiments/` — Experiment entry points for A1–A4.
+- `experiments/` — Experiment entry points for A1–A3.
 - `runs/` — Training outputs, checkpoints, metrics, and experiment summaries.
 
 Refer to each component's documentation for detailed configuration options, training procedures, evaluation, and implementation details.

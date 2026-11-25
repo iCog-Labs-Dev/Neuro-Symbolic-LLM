@@ -48,28 +48,10 @@ from benchmark.benchmark import (
 )
 from benchmark.summary import report_manifest
 from benchmark.visualization import generate_visualizations
-from metrics.adapter_audits import (
-    measure_adapter_ablations,
-    measure_cross_adapter_curvature,
-)
 from metrics.performance import (
     calibration_stats,
     ece_from_stats,
     expected_calibration_error,
-)
-from metrics.research_audits import (
-    ablation_fidelity,
-    accuracy_forgetting,
-    calibration_error,
-    classification_metrics,
-    curvature_coupling,
-    evaluate_audits,
-    factor_organization,
-    fingerprint_separability,
-    fingerprint_stability,
-    functional_commutator,
-    off_support_leakage,
-    squared_error,
 )
 
 
@@ -728,105 +710,6 @@ def test_completion_validation_rejects_mutation(tmp_path: Path) -> None:
     assert "hash mismatch" in str(reason)
 
 
-def test_factor_fracture_and_overlap_match_paper_examples():
-    pytest.importorskip("metrics.a4.representation")
-    result = factor_organization([[1, 0, 0, 0], [1, 1, 1, 1], [0, 1, 0, 0]])
-    assert result["fracture"] == pytest.approx([0.25, 1.0, 0.25])
-    assert result["overlap"][0][2] == 0
-    partial = factor_organization([[0, 0], [1, 0]])
-    assert partial["fracture"] == [None, 0.5]
-    assert partial["zero_effect_factor_indices"] == [0]
-    assert partial["mean_overlap"] is None
-    with pytest.raises(ValueError, match="nonnegative"):
-        factor_organization([[-1, 2]])
-
-
-def test_factor_organization_reuses_shared_metrics(monkeypatch):
-    contributions = [[1, 0], [0, 0]]
-    shared = {
-        "fracture": [0.5, None],
-        "valid_factor_indices": [0],
-        "zero_effect_factor_indices": [1],
-        "overlap_matrix": [[1.0]],
-        "mean_off_diagonal_overlap": None,
-    }
-    calls = []
-
-    def shared_factor_organization(values):
-        calls.append(values)
-        return shared
-
-    def load_module(name):
-        assert name == "metrics.a4.representation"
-        return SimpleNamespace(factor_organization=shared_factor_organization)
-
-    monkeypatch.setattr("metrics.research_audits.import_module", load_module)
-    result = factor_organization(contributions)
-    assert calls == [contributions]
-    assert result["mean_fracture"] == 0.5
-    assert result["overlap"] == [[1.0]]
-    assert result["zero_effect_factor_indices"] == [1]
-
-
-def test_factor_organization_unavailable_does_not_block_other_audits(monkeypatch):
-    def missing_module(name):
-        raise ModuleNotFoundError("missing shared metrics", name="metrics.a4")
-
-    monkeypatch.setattr("metrics.research_audits.import_module", missing_module)
-    result = evaluate_audits(
-        {
-            "schema": "a1-a3-research-audit/v1",
-            "factor_importance": [[1, 0]],
-            "mixed_hessian": [[2]],
-        }
-    )
-    assert result["factor_organization"]["status"] == "unavailable"
-    assert result["factor_organization"]["mean_fracture"] is None
-    assert result["mixed_curvature"] == 2
-
-
-def test_audit_formulas_and_missing_information():
-    assert curvature_coupling([[2]]) == 2
-    assert (
-        evaluate_audits(
-            {
-                "schema": "a1-a3-research-audit/v1",
-                "cross_support_hessians": [[[1]], [[2]]],
-            }
-        )["cross_support_coupling"]
-        == 2
-    )
-    assert off_support_leakage(
-        [0.4, 0.5, 0.1, 0], [True, True, False, False]
-    ) == pytest.approx(0.1)
-    assert off_support_leakage([0, 0], [True, False]) is None
-    assert fingerprint_separability(
-        [[0], [2], [8], [10]], ["a", "a", "b", "b"]
-    ) == pytest.approx(16)
-    assert squared_error([[1, 0]], [[0, 0]], "naturality") == 1
-    assert functional_commutator([[3, 4]], [[0, 0]]) == 5
-    assert fingerprint_stability([[1, 2], [3, 4]], [[2, 4], [6, 8]]) == pytest.approx(1)
-    assert fingerprint_stability([[1, 1]], [[2, 2]]) is None
-    assert ablation_fidelity([0.2, 0.05, 0.3], [0.18, 0.06, 0.09])[
-        "mae"
-    ] == pytest.approx(0.08)
-    with pytest.raises(ValueError):
-        off_support_leakage([1, 2], [True])
-
-
-def test_task_scores_and_accuracy_forgetting_are_distinct_from_token_accuracy():
-    assert accuracy_forgetting(
-        [[0.90, None, None], [0.82, 0.88, None], [0.75, 0.80, 0.91]]
-    )["final"] == pytest.approx(0.115)
-    result = classification_metrics([0, 1, 1], [0, 1, 0])
-    assert result["accuracy"] == pytest.approx(2 / 3)
-    assert result["macro_f1"] == pytest.approx(2 / 3)
-    assert classification_metrics([[1, 0], [0, 1]], [[1, 1], [0, 1]], multilabel=True)[
-        "micro_f1"
-    ] == pytest.approx(0.8)
-    assert calibration_error([0.9, 0.9], [1, 0]) == pytest.approx(0.4)
-
-
 def test_k_selection_uses_shared_seed_and_fingerprint():
     rows = []
     for k, seed, data, loss in [
@@ -855,10 +738,6 @@ def test_k_selection_uses_shared_seed_and_fingerprint():
 
 def test_symbolic_audit_inputs_are_ignored(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("benchmark.benchmark._load_deployed_metrics", lambda *args: {})
-    monkeypatch.setattr(
-        "metrics.research_audits.factor_organization",
-        lambda values: {"mean_fracture": 0.5},
-    )
     checkpoint = tmp_path / "outputs" / "run" / "params" / "task_0_x.npz"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"checkpoint")
@@ -1148,62 +1027,6 @@ def test_empty_artifacts_generate_explicit_na_figures(tmp_path):
         assert "Figures are stored separately" in report
         assert "![" not in report
     assert "<img" not in (reports / "index.html").read_text()
-
-
-def _audit_parameters():
-    return {
-        "layer_1": {"A": jnp.ones(2), "B": jnp.array([1.0, 2.0])},
-        "layer_2": {"A": jnp.ones(2), "B": jnp.array([3.0, 4.0])},
-    }
-
-
-def test_ablations_record_signed_effects_without_mutating_checkpoint():
-    params = _audit_parameters()
-    audit = measure_adapter_ablations(
-        {
-            "helpful": lambda p: 10 - p["layer_1"]["B"].sum(),
-            "harmful": lambda p: p["layer_2"]["B"].sum(),
-        },
-        params,
-    )
-    assert audit["effects"] == {
-        "layer_1": {"helpful": 3.0, "harmful": 0.0},
-        "layer_2": {"helpful": 0.0, "harmful": -7.0},
-    }
-    assert audit["mean_loss_increase"] == -1
-    assert audit["fingerprint_rms"] == pytest.approx(np.sqrt(58 / 4))
-    np.testing.assert_array_equal(params["layer_1"]["B"], [1, 2])
-    np.testing.assert_array_equal(params["layer_2"]["B"], [3, 4])
-
-
-def test_cross_adapter_norm_covers_both_factors_and_excludes_diagonal_blocks():
-    def loss(p):
-        a, b = p["layer_1"], p["layer_2"]
-        return (
-            3 * jnp.vdot(a["A"], b["B"])
-            + 2 * jnp.vdot(a["B"], b["A"])
-            + 100 * jnp.vdot(a["A"], a["B"])
-        )
-
-    audit = measure_cross_adapter_curvature(loss, _audit_parameters(), samples=3)
-    assert audit["value"] == pytest.approx(np.sqrt(26), rel=0.002)
-    assert list(audit["pairs"]) == ["layer_1:layer_2"]
-    independent = measure_cross_adapter_curvature(
-        lambda p: sum(jnp.sum(block["B"] ** 2) for block in p.values()),
-        _audit_parameters(),
-    )
-    assert independent["value"] == 0
-
-
-def test_audits_reject_undefined_or_nonfinite_measurements():
-    with pytest.raises(ValueError, match="at least two"):
-        measure_cross_adapter_curvature(
-            lambda p: 0, {"layer_1": _audit_parameters()["layer_1"]}
-        )
-    with pytest.raises(ValueError, match="positive integer"):
-        measure_cross_adapter_curvature(lambda p: 0, _audit_parameters(), samples=0)
-    with pytest.raises(ValueError, match="non-finite"):
-        measure_adapter_ablations({"bad": lambda p: float("nan")}, _audit_parameters())
 
 
 def test_quadratic_gate_predictor_and_true_ablations_are_independent():
@@ -1518,6 +1341,8 @@ def test_default_cli_runs_plan_train_eval(tmp_path, monkeypatch):
     calls = []
 
     def plan(*args, **kwargs):
+        assert tuple(kwargs["rank_values"]) == (4, 8, 16)
+        assert kwargs["methods"] == ["a1", "a2", "a3"]
         calls.append("plan")
         return {"runs": []}
 

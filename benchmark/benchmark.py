@@ -823,8 +823,6 @@ def measure_ablation_prediction(
     import jax
     import jax.numpy as jnp
 
-    from metrics.research_audits import ablation_fidelity
-
     if isinstance(max_components, bool) or max_components < 1:
         raise ValueError("max_components must be positive")
     atoms = [
@@ -907,7 +905,7 @@ def measure_ablation_prediction(
             )
     if not pairs:
         raise ValueError("No held-out test tokens for paired ablation measurements")
-    scores = ablation_fidelity(
+    scores = _ablation_fidelity(
         [row["predicted"] for row in pairs], [row["actual"] for row in pairs]
     )
     return {
@@ -933,6 +931,36 @@ def measure_ablation_prediction(
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _ablation_fidelity(predicted: Any, actual: Any) -> dict[str, float | None]:
+    """MAE and tie-aware Spearman correlation for measured channel ablations."""
+    p, a = np.asarray(predicted, dtype=float), np.asarray(actual, dtype=float)
+    for values in (p, a):
+        if values.ndim != 1 or not values.size or not np.isfinite(values).all():
+            raise ValueError("ablation values must be nonempty finite 1-D arrays")
+    if p.shape != a.shape:
+        raise ValueError("ablation arrays must have equal lengths")
+
+    def ranks(values: np.ndarray) -> np.ndarray:
+        order = np.argsort(values, kind="stable")
+        result = np.empty(len(values), dtype=float)
+        start = 0
+        while start < len(values):
+            end = start + 1
+            while end < len(values) and values[order[end]] == values[order[start]]:
+                end += 1
+            result[order[start:end]] = (start + end - 1) / 2
+            start = end
+        return result
+
+    rp, ra = ranks(p), ranks(a)
+    correlation = (
+        float(np.corrcoef(rp, ra)[0, 1])
+        if len(p) >= 2 and np.std(rp) > 0 and np.std(ra) > 0
+        else None
+    )
+    return {"mae": float(np.mean(np.abs(p - a))), "spearman": correlation}
 
 
 def _config_fingerprint(config: dict[str, Any]) -> str:

@@ -1,4 +1,4 @@
-"""Miner-owned pattern contracts and backward-compatible A4 aliases."""
+"""Miner-owned pattern contracts and backward-compatible retrieval aliases."""
 
 from hybrid_miner.contracts import (
     PatternProvenance,
