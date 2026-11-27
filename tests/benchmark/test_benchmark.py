@@ -536,9 +536,9 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
                 residual_config_sha256=sha256_file(effective.residual_config),
             )
             result = {
-                "mode": "standalone_aligned"
-                if mode == "aligned"
-                else "runtime_sequential",
+                "mode": (
+                    "standalone_aligned" if mode == "aligned" else "runtime_sequential"
+                ),
                 "seed": effective.training.seed,
                 "a3_pairing": pair,
                 "task_order": order if mode == "runtime" else [],
@@ -633,9 +633,7 @@ def test_a4_follows_fresh_a3_runs_and_resumes_per_seed(tmp_path, monkeypatch, mo
         {"hidden_size": 16},
         {"adapted_layers": [1]},
         {"runtime_data": {**meta["runtime_data"], "training_mode": "joint"}},
-        {
-            "runtime_data": {**meta["runtime_data"], "task_order": list(reversed(order))}
-        },
+        {"runtime_data": {**meta["runtime_data"], "task_order": list(reversed(order))}},
     ):
         _write_json(meta_path, {**meta, **changes})
         runner.finalize_attempt(a3_dir, completion_spec)
@@ -679,7 +677,9 @@ def test_real_default_configs_materialize(tmp_path: Path) -> None:
         rank_values=[4],
     )
 
-    assert {Path(spec.config) for spec in specs} == {DEFAULT_CONFIGS[name] for name in ("a1", "a2", "a3")}
+    assert {Path(spec.config) for spec in specs} == {
+        DEFAULT_CONFIGS[name] for name in ("a1", "a2", "a3")
+    }
     for spec in specs:
         materialized = _materialize(spec, tmp_path, epochs=1)
         config = yaml.safe_load(materialized.read_text(encoding="utf-8"))
@@ -1368,7 +1368,9 @@ def test_report_exact_metrics_and_missing_evidence(tmp_path):
     _write_json(runs / "evaluation.json", {"records": []})
     path = report_manifest(runs, report_dir=reports)
     content = path.read_text()
-    assert len(MEASURED_METRICS) == len(INTERNAL_METRIC_SPECS) + len(EXTERNAL_METRIC_SPECS)
+    assert len(MEASURED_METRICS) == len(INTERNAL_METRIC_SPECS) + len(
+        EXTERNAL_METRIC_SPECS
+    )
     assert len(INTERNAL_METRIC_SPECS) == 16
     assert len(EXTERNAL_METRIC_SPECS) == 24
     for label, _, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS:
@@ -1456,10 +1458,17 @@ def test_general_report_uses_methods_as_rows_and_one_evidence_table(tmp_path):
     assert "| Method | Residual compressibility |" in content
     assert "| A1 |" in content and "| A2 |" in content and "| A3 |" in content
     lines = content.splitlines()
-    header = next(i for i, line in enumerate(lines) if line.startswith("| Method | Validation loss"))
+    header = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("| Method | Validation loss")
+    )
     columns = [cell.strip() for cell in lines[header].strip("|").split("|")]
     values = [cell.strip() for cell in lines[header + 5].strip("|").split("|")]
-    assert dict(zip(columns, values, strict=True))["Retrieval macro precision @8"] == "0.8 (n=1)"
+    assert (
+        dict(zip(columns, values, strict=True))["Retrieval macro precision @8"]
+        == "0.8 (n=1)"
+    )
     assert "inherited from frozen A3 residual" in content
     assert "paired delta" not in content.lower()
     assert "| Run | Metric | Value |" not in content
@@ -1534,9 +1543,7 @@ def test_summary_has_no_plotting_dependency():
 
     tree = ast.parse(Path(summary.__file__).read_text())
     imports = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
+        node for node in ast.walk(tree) if isinstance(node, ast.Import | ast.ImportFrom)
     ]
     assert all(
         "matplotlib" not in ast.unparse(node)
@@ -1559,8 +1566,7 @@ def test_empty_artifacts_generate_explicit_na_figures(tmp_path):
     for section in ("A1", "A2", "A3", "comparison"):
         folder = reports / "stage_A" / section
         assert len(list((folder / "figures").glob("*.png"))) == (
-            len(INTERNAL_METRIC_SPECS)
-            + len(EXTERNAL_METRIC_SPECS)
+            len(INTERNAL_METRIC_SPECS) + len(EXTERNAL_METRIC_SPECS)
         )
         report = next(folder.glob("*.md")).read_text()
         assert "Figures are stored separately" in report

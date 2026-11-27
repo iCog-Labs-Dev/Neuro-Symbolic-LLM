@@ -18,10 +18,23 @@ from metrics.a4.cli import (
 from metrics.a4.console import training_row
 
 
-@pytest.mark.parametrize("ppl,expected", [(2.7182818, "2.7183"), (None, "overflow")])
-def test_compact_training_row_displays_recorded_losses_and_ppl(ppl, expected):
-    row = training_row(2, 5, {"total": 7, "task": 1, "symbolic": 6, "ppl": ppl})
-    assert row.split() == ["2/5", "7.000000", "1.000000", "6.000000", expected]
+def test_aligned_training_row_displays_all_losses_and_task_perplexity():
+    row = training_row(
+        2, 5, {"total": 7, "task": 1, "key": 2, "value": 4, "ppl": 2.7183}
+    )
+    assert row == (
+        "    Batch 2/5 | Total loss=7.0000 | CE=1.0000 | "
+        "Key=2.0000 | Value=4.0000 | PPL=2.7183"
+    )
+
+
+def test_runtime_training_row_handles_perplexity_overflow():
+    assert training_row(
+        1, 1, {"total": 1000, "task": 1000, "key": 0, "value": 0, "ppl": None}
+    ) == (
+        "    Batch 1/1 | Total loss=1000.0000 | CE=1000.0000 | "
+        "Key=0.0000 | Value=0.0000 | PPL=overflow"
+    )
 
 
 def write_json(path, value):

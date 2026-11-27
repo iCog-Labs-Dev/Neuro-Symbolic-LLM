@@ -56,9 +56,7 @@ def generate_visualizations(
             / "figures"
         )
         folder.mkdir(parents=True, exist_ok=True)
-        for label, key, _ in (
-            INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS
-        ):
+        for label, key, _ in INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS:
             points = []
             if section == "comparison":
                 samples = _metric_samples(cohort, key) if cohort else {}

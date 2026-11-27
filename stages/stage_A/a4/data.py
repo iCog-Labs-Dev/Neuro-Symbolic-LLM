@@ -5,12 +5,32 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from stages.source_data import source_blocks
+
+ROCSTORIES_TASK_IDS = (1, 2, 3)
+ROCSTORIES_EVAL_GROUPS = tuple(
+    f"rocstories_held_out_group_{task_id}" for task_id in ROCSTORIES_TASK_IDS
+)
+HELD_OUT_GROUP_SCOPE = "fixed_held_out_groups"
+HELD_OUT_GROUP_INTERPRETATION = (
+    "These metrics describe three fixed held-out evaluation groups from the "
+    "same ROCStories corpus. Each group is paired with the training step of "
+    "the same number for metric calculation. The groups do not represent "
+    "independent semantic domains."
+)
+
+
+def _batch_labels(targets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    positions = np.column_stack((np.arange(len(targets)), targets[:, 0])).astype(
+        np.int32
+    )
+    return positions, targets[:, 1]
 
 
 @dataclass(frozen=True)
@@ -26,22 +46,58 @@ class A4Data:
 
     def batch_labels(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return token positions and bank indices for selected training blocks."""
-        targets = self.targets[indices]
-        positions = np.column_stack((np.arange(len(indices)), targets[:, 0])).astype(
-            np.int32
-        )
-        return positions, targets[:, 1]
+        return _batch_labels(self.targets[indices])
 
 
-def load_data(args: Any, tokenizer: Any, bank: Any, training: Any) -> A4Data:
+@dataclass(frozen=True)
+class AlignmentTask:
+    """Training arrays and per-row occurrence provenance for one source task."""
+
+    name: str
+    epochs: int
+    train_blocks: np.ndarray
+    train_mask: np.ndarray
+    targets: np.ndarray
+    labels: tuple[dict[str, Any], ...]
+
+    def batch_inputs(
+        self, indices: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        positions, targets = _batch_labels(self.targets[indices])
+        return self.train_blocks[indices], positions, targets, self.train_mask[indices]
+
+
+@dataclass(frozen=True)
+class SequentialAlignmentData:
+    """ROCStories tasks, shared splits and fixed held-out groups."""
+
+    tasks: tuple[AlignmentTask, ...]
+    validation: np.ndarray
+    validation_mask: np.ndarray
+    test: np.ndarray | None
+    test_mask: np.ndarray | None
+    provenance: dict[str, Any]
+    task_eval: dict[str, tuple[np.ndarray, np.ndarray]]
+
+
+def load_data(
+    args: Any, tokenizer: Any, bank: Any, training: Any
+) -> A4Data | SequentialAlignmentData:
     """Validate split separation, bank identity and complete firing-label coverage."""
     payload = args.alignment_labels.read_bytes()
     manifest = json.loads(payload)
+    sequential = getattr(args, "data_mode", None) == "sequential-aligned"
     if (
         isinstance(manifest, dict)
         and manifest.get("contract_version") == "alignment-occurrences-v2"
     ):
-        return _load_occurrences(args, tokenizer, bank, training, manifest, payload)
+        return _load_occurrences(
+            args, tokenizer, bank, training, manifest, payload, sequential=sequential
+        )
+    if sequential:
+        raise ValueError(
+            "Sequential alignment requires an alignment-occurrences-v2 manifest"
+        )
     arrays, hashes, provenance = {}, {}, {}
     splits = (
         ("train", "validation") if args.skip_test else ("train", "validation", "test")
@@ -116,6 +172,18 @@ def load_data(args: Any, tokenizer: Any, bank: Any, training: Any) -> A4Data:
 
 def padded_source_blocks(path, tokenizer, seq_len, max_rows, max_blocks):
     """Keep independent causal document chunks, including right-padded tails."""
+    payload = path.read_bytes()
+    rows = (
+        (number, json.loads(line))
+        for number, line in enumerate(payload.decode("utf-8-sig").splitlines(), 1)
+        if line.strip()
+    )
+    return _padded_source_rows(
+        path, payload, rows, tokenizer, seq_len, max_rows, max_blocks
+    )
+
+
+def _padded_source_rows(path, payload, rows, tokenizer, seq_len, max_rows, max_blocks):
     if seq_len < 2 or max_rows < 1 or max_blocks < 1:
         raise ValueError("Invalid source block limits")
     pad = tokenizer.pad_token_id
@@ -124,11 +192,7 @@ def padded_source_blocks(path, tokenizer, seq_len, max_rows, max_blocks):
     if pad is None:
         raise ValueError("Tokenizer needs a pad or EOS token")
     blocks, masks, selected, hashes = [], [], [], set()
-    payload = path.read_bytes()
-    for number, line in enumerate(payload.decode("utf-8-sig").splitlines(), 1):
-        if not line.strip():
-            continue
-        row = json.loads(line)
+    for number, row in rows:
         text = row["source_text"]
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"{path}:{number}: empty source text")
@@ -139,13 +203,21 @@ def padded_source_blocks(path, tokenizer, seq_len, max_rows, max_blocks):
         if len(tokens) < 2:
             continue
         hashes.add(digest)
-        selected.append({"document_id": row.get("document_id"), "text_sha256": digest})
+        block_start = len(blocks)
         for start in range(0, len(tokens) - 1, seq_len - 1):
             chunk = tokens[start : start + seq_len]
             if len(chunk) < 2 or len(blocks) >= max_blocks:
                 break
             blocks.append(chunk + [pad] * (seq_len - len(chunk)))
             masks.append([True] * len(chunk) + [False] * (seq_len - len(chunk)))
+        selected.append(
+            {
+                "document_id": row.get("document_id"),
+                "text_sha256": digest,
+                "block_start": block_start,
+                "blocks": len(blocks) - block_start,
+            }
+        )
     if not blocks:
         raise ValueError(f"{path}: no next-token evaluation examples")
     return (
@@ -162,7 +234,98 @@ def padded_source_blocks(path, tokenizer, seq_len, max_rows, max_blocks):
     )
 
 
-def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4Data:
+def _source_identity(row):
+    identity = (row.get("corpus_id"), row.get("document_id"))
+    if any(
+        part is None or isinstance(part, str) and not part.strip() for part in identity
+    ):
+        raise ValueError("Occurrence sources and labels require a source identity")
+    return identity
+
+
+def _partition_validation_groups(blocks, mask, metadata):
+    """Assign selected validation documents in hash order, keeping all chunks together."""
+    documents = sorted(metadata["selected"], key=lambda row: row["text_sha256"])
+    group_count = len(ROCSTORIES_EVAL_GROUPS)
+    if len(documents) < group_count:
+        raise ValueError(
+            "Sequential-aligned validation requires at least three distinct "
+            "held-out documents within the evaluation limits"
+        )
+
+    task_eval, provenance = {}, {}
+    for index, name in enumerate(ROCSTORIES_EVAL_GROUPS):
+        selected = documents[index::group_count]
+        indices = [
+            block_index
+            for row in selected
+            for block_index in range(
+                row["block_start"], row["block_start"] + row["blocks"]
+            )
+        ]
+        task_eval[name] = (blocks[indices], mask[indices])
+        provenance[name] = {
+            "path": metadata["path"],
+            "source_sha256": metadata["source_sha256"],
+            "block_index_scope": "shared_validation",
+            "selected": selected,
+            "shape": list(task_eval[name][0].shape),
+        }
+    return task_eval, provenance
+
+
+def _load_task_eval(path, tokenizer, training, args, occupied, train_identities):
+    """Load explicitly assigned groups and verify held-out provenance before packing."""
+    payload = path.read_bytes()
+    groups = {task_id: [] for task_id in ROCSTORIES_TASK_IDS}
+    identities = set(train_identities)
+    hashes = set(occupied)
+    for number, line in enumerate(payload.decode("utf-8-sig").splitlines(), 1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        task_id = row.get("task_id")
+        if (
+            isinstance(task_id, bool)
+            or not isinstance(task_id, int)
+            or task_id not in groups
+        ):
+            raise ValueError(f"{path}:{number}: invalid held-out task ID")
+        identity = _source_identity(row)
+        text = row.get("source_text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"{path}:{number}: empty source text")
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        if identity in identities or digest in hashes:
+            raise ValueError(
+                f"{path}:{number}: held-out group source overlaps another source"
+            )
+        identities.add(identity)
+        hashes.add(digest)
+        groups[task_id].append((number, row))
+
+    if not all(groups.values()):
+        raise ValueError("Held-out sources must contain all three ROCStories task IDs")
+
+    task_eval, provenance = {}, {}
+    for name, rows in zip(ROCSTORIES_EVAL_GROUPS, groups.values(), strict=True):
+        blocks, mask, _, metadata = _padded_source_rows(
+            path,
+            payload,
+            rows,
+            tokenizer,
+            training.seq_len,
+            args.max_eval_rows,
+            args.max_eval_blocks,
+        )
+        task_eval[name] = (blocks, mask)
+        provenance[name] = metadata
+    return task_eval, provenance
+
+
+def _load_occurrences(
+    args, tokenizer, bank, training, manifest, payload, *, sequential
+) -> A4Data | SequentialAlignmentData:
     if manifest.get("bank_snapshot_sha256") != bank.input_snapshot_sha256:
         raise ValueError("Alignment examples belong to another bank")
     if manifest.get("seq_len") != training.seq_len:
@@ -176,18 +339,17 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
     if not isinstance(name, str) or Path(name).name != name:
         raise ValueError("Prepared arrays must be adjacent to their manifest")
     arrays_path = args.alignment_labels.parent / name
-    if hashlib.sha256(arrays_path.read_bytes()).hexdigest() != manifest.get(
-        "arrays_sha256"
-    ):
+    arrays_payload = arrays_path.read_bytes()
+    if hashlib.sha256(arrays_payload).hexdigest() != manifest.get("arrays_sha256"):
         raise ValueError("Prepared training arrays changed")
-    with np.load(arrays_path, allow_pickle=False) as archive:
+    with np.load(BytesIO(arrays_payload), allow_pickle=False) as archive:
         if set(archive.files) != {"input_ids", "token_mask", "targets"}:
             raise ValueError("Invalid occurrence array fields")
         ids, mask, targets = (
             archive[key] for key in ("input_ids", "token_mask", "targets")
         )
     labels = manifest.get("labels")
-    count = len(ids)
+    count = ids.shape[0] if ids.ndim else 0
     if (
         ids.dtype != np.int32
         or ids.shape != (count, training.seq_len)
@@ -201,25 +363,45 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
         or np.any(mask.sum(axis=1) < 2)
     ):
         raise ValueError("Invalid right-padded occurrence arrays")
+    if np.any(targets[:, 1] < 0) or np.any(targets[:, 1] >= len(bank.records)):
+        raise ValueError("Occurrence target index is outside the bank")
     minimum = getattr(args, "minimum_examples", 5000)
-    if count < minimum or count < training.batch_size:
+    required_examples = minimum if sequential else max(minimum, training.batch_size)
+    if count < required_examples:
         raise ValueError(
-            f"Prepared data has {count} examples; requires {minimum} and one full batch"
+            f"Prepared data has {count} examples; requires at least "
+            f"{required_examples}"
         )
     if count > args.max_train_blocks:
         raise ValueError(
             "Prepared examples exceed --max-train-blocks; do not silently truncate"
         )
     documents = {}
+    document_tasks = {}
+    task_rows: dict[int, list[int]] = {task_id: [] for task_id in ROCSTORIES_TASK_IDS}
+    task_documents: dict[int, set[tuple[Any, Any]]] = {
+        task_id: set() for task_id in ROCSTORIES_TASK_IDS
+    }
     train_hashes = set()
     for line in source_payload.decode("utf-8-sig").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        identity = (row["corpus_id"], row["document_id"])
+        identity = _source_identity(row)
         if identity in documents:
             raise ValueError("Duplicate training source identity")
         text = row["source_text"]
+        if sequential:
+            task_id = row.get("task_id")
+            if (
+                isinstance(task_id, bool)
+                or not isinstance(task_id, int)
+                or task_id not in ROCSTORIES_TASK_IDS
+            ):
+                raise ValueError(
+                    f"Invalid ROCStories task ID for source {identity}: {task_id!r}"
+                )
+            document_tasks[identity] = task_id
         documents[identity] = (text, tokenizer(text, return_offsets_mapping=True))
         train_hashes.add(hashlib.sha256(text.encode()).hexdigest())
     if len(documents) > args.max_train_rows:
@@ -232,7 +414,9 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
     )
     seen = set()
     for index, label in enumerate(labels):
-        identity = (label["corpus_id"], label["document_id"])
+        if not isinstance(label, dict):
+            raise ValueError("Occurrence labels must be objects")
+        identity = _source_identity(label)
         if identity not in documents or label["template_id"] not in lookup:
             raise ValueError("Occurrence refers to an unknown source or template")
         text, encoded = documents[identity]
@@ -286,7 +470,11 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
         if key in seen:
             raise ValueError("Duplicate occurrence-template training pair")
         seen.add(key)
-    provenance = {
+        if sequential:
+            task_id = document_tasks[identity]
+            task_rows[task_id].append(index)
+            task_documents[task_id].add(identity)
+    provenance: dict[str, Any] = {
         "train": {
             "path": str(args.train_sources),
             "shape": list(ids.shape),
@@ -319,6 +507,78 @@ def _load_occurrences(args, tokenizer, bank, training, manifest, payload) -> A4D
             values,
             valid,
             metadata,
+        )
+    if sequential:
+        if not all(task_rows.values()) or sum(map(len, task_rows.values())) != count:
+            raise ValueError(
+                "Every occurrence must be assigned to exactly one of the three ROCStories tasks"
+            )
+        tasks = tuple(
+            AlignmentTask(
+                name=f"rocstories_task_{task_id}",
+                epochs=training.epochs,
+                train_blocks=ids[rows],
+                train_mask=mask[rows],
+                targets=targets[rows],
+                labels=tuple(labels[row] for row in rows),
+            )
+            for task_id, rows in task_rows.items()
+        )
+        provenance.update(
+            validation_scope=HELD_OUT_GROUP_SCOPE,
+            task_order=[task.name for task in tasks],
+            task_mapping=(
+                "Original ROCStories task_id joined by (corpus_id, document_id). "
+                "A3 runtime tasks used shuffled grouping."
+            ),
+            alignment_counts={
+                task.name: {
+                    "task_id": task_id,
+                    "examples": len(task.train_blocks),
+                    "source_documents": len(task_documents[task_id]),
+                }
+                for task_id, task in zip(ROCSTORIES_TASK_IDS, tasks, strict=True)
+            },
+            source_fingerprints={
+                **manifest["source_sha256"],
+                **{split: provenance[split]["source_sha256"] for split in split_arrays},
+                "alignment_manifest": provenance["alignment"]["sha256"],
+                "alignment_arrays": manifest["arrays_sha256"],
+            },
+        )
+        task_eval_path = getattr(args, "task_eval_sources", None)
+        if task_eval_path is None:
+            task_eval, task_eval_provenance = _partition_validation_groups(
+                split_arrays["validation"],
+                split_masks["validation"],
+                provenance["validation"],
+            )
+            assignment = (
+                "Round robin over selected validation documents sorted by text SHA-256"
+            )
+        else:
+            task_eval, task_eval_provenance = _load_task_eval(
+                task_eval_path, tokenizer, training, args, occupied, documents
+            )
+            assignment = "Explicit task_id from separate held-out source file"
+        provenance["task_eval"] = task_eval_provenance
+        provenance["source_fingerprints"]["task_eval"] = task_eval_provenance[
+            ROCSTORIES_EVAL_GROUPS[0]
+        ]["source_sha256"]
+        provenance["continual_evaluation"] = {
+            "scope": HELD_OUT_GROUP_SCOPE,
+            "interpretation": HELD_OUT_GROUP_INTERPRETATION,
+            "group_order": list(ROCSTORIES_EVAL_GROUPS),
+            "assignment": assignment,
+        }
+        return SequentialAlignmentData(
+            tasks,
+            split_arrays["validation"],
+            split_masks["validation"],
+            split_arrays.get("test"),
+            split_masks.get("test"),
+            provenance,
+            task_eval,
         )
     return A4Data(
         ids,

@@ -28,7 +28,10 @@ import optax  # noqa: E402
 
 from frozenllm.substrate import FrozenSubstrate  # noqa: E402
 from residual import ResidualAdapter  # noqa: E402
-from runtime.data_loader import load_runtime_data, runtime_pairing_fingerprint  # noqa: E402
+from runtime.data_loader import (  # noqa: E402
+    load_runtime_data,
+    runtime_pairing_fingerprint,
+)
 from stages.results import (  # noqa: E402
     RunWriter,
     default_run_name,

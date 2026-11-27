@@ -341,6 +341,7 @@ def test_capture_must_cover_all_attached_layers():
             expected_calls=3,
         )
 
+
 def test_probe_rejects_changed_preparation_input(probe_input, tmp_path):
     payload, replay, tokenizer = probe_input
     source = tmp_path / "reference.json"

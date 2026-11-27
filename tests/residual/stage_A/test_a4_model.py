@@ -25,9 +25,17 @@ from residual.symbolic_head.jax_head import SymbolicHead  # noqa: E402
 from stages.results import RunWriter, load_params  # noqa: E402
 from stages.stage_A.a3 import A3HybridConfig, A3Model  # noqa: E402
 from stages.stage_A.a3.a3_tail import residual_modify  # noqa: E402
-from stages.stage_A.a4.checkpoint import restore_a3_weights, unpack_head_params  # noqa: E402
+from stages.stage_A.a4.checkpoint import (  # noqa: E402
+    restore_a3_weights,
+    unpack_head_params,
+)
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config  # noqa: E402
-from stages.stage_A.a4.data import A4Data  # noqa: E402
+from stages.stage_A.a4.data import (  # noqa: E402
+    ROCSTORIES_EVAL_GROUPS,
+    A4Data,
+    AlignmentTask,
+    SequentialAlignmentData,
+)
 from stages.stage_A.a4.model import A4Model  # noqa: E402
 from stages.stage_A.a4.objective import (  # noqa: E402
     AlignmentLabels,
@@ -226,7 +234,9 @@ def test_checkpoint_rejects_invalid_weights(env, invalid):
 
 
 def test_objective_rejects_invalid_label_shape_before_retrieval(env):
-    with pytest.raises(ValueError, match="position requires one integer template index"):
+    with pytest.raises(
+        ValueError, match="position requires one integer template index"
+    ):
         objective_at_latents(
             env.a4,
             env.params,
@@ -349,6 +359,48 @@ def test_multilayer_value_loss_reaches_only_upstream_symbolic_heads(
             )
         else:
             assert np.linalg.norm(gradients["layer_6"][name]) > 0
+
+
+def test_sequential_alignment_gradients_stay_in_the_requested_parameter_groups(
+    env, aligned_env
+):
+    head = SymbolicHead(32, 256, (6, 7), aligned_env.a4.symbolic.retrieve)
+    model = A4Model(env.continuous, head)
+    params = init_params(model, 2)
+    # Exercise CE after writeback has started learning.
+    for layer in params["symbolic"].values():
+        layer["U_out"] = 0.01 * jax.random.normal(jax.random.PRNGKey(19), (256, 32))
+    labels = dict.fromkeys(head.layers, aligned_env.labels[7])
+
+    def losses(candidate):
+        _, terms = objective_at_latents(
+            model,
+            env.params,
+            candidate["symbolic"],
+            candidate["value"],
+            env.ids,
+            env.z,
+            labels,
+            aligned_env.keys,
+            aligned_env.values,
+            detach_alignment_states=True,
+        )
+        return jnp.stack([terms["task"], terms["key"], terms["value"]])
+
+    gradients = jax.jit(jax.jacrev(losses))(params)
+    expected = {
+        "W_sym": (True, True, False),
+        "b_sym": (True, True, False),
+        "U_out": (True, False, False),
+        "V_pred": (False, False, True),
+    }
+    for group in gradients.values():
+        for layer in group.values():
+            for name, terms in layer.items():
+                assert np.isfinite(terms).all()
+                assert (
+                    tuple(np.linalg.norm(grad) > 0 for grad in terms) == expected[name]
+                )
 
 
 def test_zero_value_weight_disables_predictor_gradient(env, aligned_env):
@@ -672,6 +724,14 @@ def test_rejects_continuous_parameters_in_optimizer(run):
         )
 
 
+def training_headings(caplog):
+    return [
+        line.split(" | ")[0]
+        for line in caplog.messages
+        if line.lstrip().startswith(("Task ", "Epoch ", "Batch "))
+    ]
+
+
 @pytest.mark.parametrize("batches", [1, 2])
 def test_training_checkpoint_separates_frozen_and_trainable_weights(
     run, tmp_path, caplog, batches
@@ -696,13 +756,14 @@ def test_training_checkpoint_separates_frozen_and_trainable_weights(
     assert result["frozen_residual_sha256"] == residual_fingerprint(
         run.model, run.frozen
     )
-    assert "Task 1/1" in caplog.text and "Epoch 1/1" in caplog.text
-    assert "Total loss" in caplog.text and "Symbolic loss" in caplog.text
-    assert f"{batches}/{batches}" in caplog.text and "Final validation:" in caplog.text
-    messages = [record.getMessage() for record in caplog.records]
-    headings = [i for i, message in enumerate(messages) if "Symbolic loss" in message]
-    assert len(headings) == 2
-    assert messages[headings[-1] - 1].strip().startswith(f"{batches}/{batches}")
+    assert "Final validation:" in caplog.text
+    assert training_headings(caplog) == [
+        "\nTask 1/1",
+        "  Epoch 1/1",
+        *(f"    Batch {batch}/{batches}" for batch in range(1, batches + 1)),
+    ]
+    assert "Total loss=" in caplog.text
+    assert "Key=" in caplog.text and "Value=" in caplog.text
     assert result["communication"]["status"] == "not_measured"
     mean_ms = result["training_step_mean_ms"]
     assert mean_ms is None if batches == 1 else mean_ms > 0
@@ -833,9 +894,10 @@ def test_eager_train_step_uses_same_parameter_groups(run):
     )
     assert bool(finite) and set(updated) == {"symbolic", "value"}
 
+
 @pytest.mark.parametrize("scope", ["shared", "task_specific"])
 def test_sequential_checkpoints_round_trip_all_parameters(
-    run, tmp_path, monkeypatch, scope
+    run, tmp_path, monkeypatch, caplog, scope
 ):
     from stages.stage_A.a4 import training
 
@@ -856,7 +918,10 @@ def test_sequential_checkpoints_round_trip_all_parameters(
         metadata={"validation_scope": scope},
         test_blocks={"stories": blocks},
     )
-    with RunWriter(tmp_path, "sequential") as writer:
+    with (
+        caplog.at_level("INFO", logger="stage_a4"),
+        RunWriter(tmp_path, "sequential") as writer,
+    ):
         save = writer.save_checkpoint
         pack = training.pack_head_params
         saved_tags = []
@@ -884,6 +949,15 @@ def test_sequential_checkpoints_round_trip_all_parameters(
         monkeypatch.setattr(writer, "save_checkpoint", verify_checkpoint)
         report = train_sequential(run.model, run.frozen, data, run.bank, config, writer)
 
+    assert training_headings(caplog) == [
+        "\nTask 1/2",
+        "  Epoch 1/1",
+        "    Batch 1/1",
+        "\nTask 2/2",
+        "  Epoch 1/1",
+        "    Batch 1/1",
+    ]
+    assert "CE=" in caplog.text and "Key=0.0000 | Value=0.0000" in caplog.text
     assert saved_tags == ["task_0_first", "task_1_second", "a4-final"]
     assert report["updates"] == 2
     assert report["task_order"] == ["first", "second"]
@@ -914,3 +988,165 @@ def test_sequential_task_specific_validation_rejects_shared_partitions(run, tmp_
         pytest.raises(ValueError, match="distinct validation sets"),
     ):
         train_sequential(run.model, run.frozen, data, run.bank, config, writer)
+
+
+@pytest.mark.parametrize("reset_optimizer", [True, False])
+def test_sequential_alignment_carries_head_and_trains_partial_batches(
+    run, tmp_path, monkeypatch, caplog, reset_optimizer
+):
+    from stages.stage_A.a4 import training
+
+    config = replace(
+        run.config,
+        key_weight=0.5,
+        value_weight=1.5,
+        training=replace(
+            run.config.training, batch_size=2, reset_optimizer=reset_optimizer
+        ),
+    )
+    blocks = np.array([[i, i + 1, i + 2, 0, 0] for i in range(1, 7)], dtype=np.int32)
+    tasks = tuple(
+        AlignmentTask(
+            name=f"rocstories_task_{index}",
+            epochs=1,
+            train_blocks=rows,
+            train_mask=rows != 0,
+            targets=np.column_stack((rows[:, 0] % 2 + 1, rows[:, 0] % 2)),
+            labels=(),
+        )
+        for index, rows in enumerate(np.split(blocks, [3, 4]), 1)
+    )
+    validation = blocks + (blocks != 0) * 7
+    data = SequentialAlignmentData(
+        tasks,
+        validation[:2],
+        validation[:2] != 0,
+        blocks[2:4],
+        blocks[2:4] != 0,
+        {
+            "alignment_counts": {
+                task.name: {"examples": len(task.train_blocks)} for task in tasks
+            },
+            "source_fingerprints": {"sources": "unit-sources"},
+            "task_mapping": "unit task mapping",
+        },
+        {
+            name: (group, group != 0)
+            for name, group in zip(
+                ROCSTORIES_EVAL_GROUPS,
+                np.split(validation, 3),
+                strict=True,
+            )
+        },
+    )
+    make_step = training.make_train_step
+    seen_examples, batch_sizes, optimizer_counts = [], [], []
+    last_params = None
+
+    def capture_step(*args, **kwargs):
+        assert kwargs["detach_alignment_states"]
+        step = make_step(*args, **kwargs)
+
+        def update(params, state, ids, positions, targets, mask):
+            nonlocal last_params
+            if last_params is not None:
+                jax.tree.map(np.testing.assert_array_equal, params, last_params)
+            optimizer_counts.append(int(state[1][0].count))
+            batch_sizes.append(len(ids))
+            seen_examples.extend(np.asarray(ids[:, 0]).tolist())
+            np.testing.assert_array_equal(positions[:, 0], np.arange(len(ids)))
+            np.testing.assert_array_equal(positions[:, 1], ids[:, 0] % 2 + 1)
+            np.testing.assert_array_equal(targets, ids[:, 0] % 2)
+            np.testing.assert_array_equal(mask, ids != 0)
+            last_params, state, terms, finite = step(
+                params, state, ids, positions, targets, mask
+            )
+            assert bool(finite)
+            assert all(float(terms[name]) > 0 for name in ("task", "key", "value"))
+            assert float(terms["total"]) == pytest.approx(
+                float(
+                    terms["task"]
+                    + config.key_weight * terms["key"]
+                    + config.value_weight * terms["value"]
+                )
+            )
+            return last_params, state, terms, finite
+
+        return update
+
+    before = residual_fingerprint(run.model, run.frozen)
+    monkeypatch.setattr(training, "make_train_step", capture_step)
+    with (
+        caplog.at_level("INFO", logger="stage_a4"),
+        RunWriter(tmp_path, "sequential-aligned") as writer,
+    ):
+        report = train_sequential(run.model, run.frozen, data, run.bank, config, writer)
+
+    assert training_headings(caplog) == [
+        "\nTask 1/3",
+        "  Epoch 1/1",
+        "    Batch 1/2",
+        "    Batch 2/2",
+        "\nTask 2/3",
+        "  Epoch 1/1",
+        "    Batch 1/1",
+        "\nTask 3/3",
+        "  Epoch 1/1",
+        "    Batch 1/1",
+    ]
+    assert "Key=" in caplog.text and "Value=" in caplog.text
+    assert batch_sizes == [2, 1, 1, 2]
+    assert sorted(seen_examples[:3]) == [1, 2, 3]
+    assert seen_examples[3] == 4
+    assert sorted(seen_examples[4:]) == [5, 6]
+    assert optimizer_counts == ([0, 1, 0, 0] if reset_optimizer else [0, 1, 2, 3])
+    assert report["updates"] == 4
+    assert report["frozen"]["params_unchanged"]
+    assert (
+        report["frozen_residual_sha256"]
+        == residual_fingerprint(run.model, run.frozen)
+        == before
+    )
+    assert len(report["after_task"]) == 3
+    assert report["after_task"][-1]["shared_validation"]["tokens"] == 4
+    assert report["test"]["shared_test"]["tokens"] == 4
+    assert report["mean_forgetting"][0] is None
+    assert np.asarray(report["loss_matrix"]).shape == (3, 3)
+    for index, task in enumerate(tasks):
+        summary = report["task_metrics"][task.name]
+        assert summary["updates"] == (2, 1, 1)[index]
+        assert summary["examples_processed"] == len(task.train_blocks)
+        assert summary["optimizer_reset"] == (index > 0 and reset_optimizer)
+        assert all(
+            math.isfinite(value) and value > 0
+            for value in summary["mean_per_update"].values()
+        )
+
+    for index, (checkpoint, updates) in enumerate(
+        zip(report["checkpoints"], [2, 3, 4, 4], strict=True)
+    ):
+        with np.load(writer.dir / checkpoint, allow_pickle=False) as archive:
+            metadata = json.loads(archive["__metadata__"].item())
+            assert metadata["updates"] == updates
+            assert metadata["data_mode"] == "sequential-aligned"
+            assert metadata["task_order"] == [task.name for task in tasks]
+            assert metadata["loss_weights"] == {"ce": 1.0, "key": 0.5, "value": 1.5}
+            assert metadata["bank_snapshot_sha256"] == run.bank.input_snapshot_sha256
+            assert metadata["frozen_residual_sha256"] == before
+            assert metadata["alignment_counts"] == data.provenance["alignment_counts"]
+            assert (
+                metadata["source_fingerprints"]
+                == data.provenance["source_fingerprints"]
+            )
+            if index < len(tasks):
+                assert metadata["task_index"] == index
+                assert metadata["task"] == tasks[index].name
+                assert (
+                    metadata["task_metrics"]
+                    == report["task_metrics"][tasks[index].name]
+                )
+            else:
+                assert metadata["task_metrics"] == report["task_metrics"]
+
+    actual = unpack_head_params(load_params(writer.dir / report["checkpoints"][-1]))
+    jax.tree.map(np.testing.assert_array_equal, actual, last_params)

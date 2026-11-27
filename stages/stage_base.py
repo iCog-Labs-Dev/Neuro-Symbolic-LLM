@@ -609,6 +609,17 @@ def evaluate_checkpoint(
     return results
 
 
+def summarize_continual_losses(loss: np.ndarray) -> dict[str, list[float | None]]:
+    """Summarize validation loss by training step from the completed matrix."""
+    num_tasks = len(loss)
+    return {
+        "mean_seen_loss": [float(mean_seen_loss(loss, t)) for t in range(num_tasks)],
+        # Undefined at t=0 (no earlier task), stored as null.
+        "mean_forgetting": [None]
+        + [float(mean_forgetting(loss, t)) for t in range(1, num_tasks)],
+    }
+
+
 def summarize(
     names: Sequence[str],
     init: Mapping[str, Mapping[str, float]],
@@ -631,10 +642,7 @@ def summarize(
             ]
             for t in range(num_tasks)
         ],
-        "mean_seen_loss": [float(mean_seen_loss(loss, t)) for t in range(num_tasks)],
-        # Undefined at t=0 (no earlier task), stored as null.
-        "mean_forgetting": [None]
-        + [float(mean_forgetting(loss, t)) for t in range(1, num_tasks)],
+        **summarize_continual_losses(loss),
     }
 
 
@@ -1031,6 +1039,33 @@ def log_experiment_header(
     logger.info("-" * 78)
 
 
+def log_continual_summary(
+    logger: logging.Logger,
+    summary: Mapping[str, Any],
+    *,
+    interpretation: str | None = None,
+) -> None:
+    """Log continual-learning metrics once the sequential run is complete."""
+    logger.info("Continual Learning Metrics:")
+    if interpretation:
+        logger.info("  %s", interpretation)
+
+    mean_seen = summary.get("mean_seen_loss", [])
+    if mean_seen:
+        seen_str = ", ".join(f"{v:.4f}" for v in mean_seen)
+        logger.info("  • Mean Seen Loss : [%s] (Final: %.4f)", seen_str, mean_seen[-1])
+
+    forgetting = summary.get("mean_forgetting", [])
+    if forgetting:
+        forg_str = ", ".join("None" if v is None else f"{v:+.4f}" for v in forgetting)
+        final_forg = "None" if forgetting[-1] is None else f"{forgetting[-1]:+.4f}"
+        logger.info("  • Mean Forgetting: [%s] (Final: %s)", forg_str, final_forg)
+
+    backward_transfer = summary.get("backward_transfer_ce")
+    if backward_transfer is not None:
+        logger.info("  • Backward Transfer (CE): %+.4f", backward_transfer)
+
+
 def log_final_summary(
     logger: logging.Logger,
     summary: Mapping[str, Any],
@@ -1079,16 +1114,7 @@ def log_final_summary(
                 )
         logger.info("  " + "-" * 62)
 
-    mean_seen = summary.get("mean_seen_loss", [])
-    forgetting = summary.get("mean_forgetting", [])
-    logger.info("Continual Learning Metrics:")
-    if mean_seen:
-        seen_str = ", ".join(f"{v:.4f}" for v in mean_seen)
-        logger.info("  • Mean Seen Loss : [%s] (Final: %.4f)", seen_str, mean_seen[-1])
-    if forgetting:
-        forg_str = ", ".join("None" if v is None else f"{v:+.4f}" for v in forgetting)
-        final_forg = "None" if forgetting[-1] is None else f"{forgetting[-1]:+.4f}"
-        logger.info("  • Mean Forgetting: [%s] (Final: %s)", forg_str, final_forg)
+    log_continual_summary(logger, summary)
 
     if frozen.get("params_unchanged"):
         logger.info("=" * 78)
@@ -1117,6 +1143,7 @@ __all__ = [
     "initialize_stage",
     "load_configs",
     "load_token_blocks",
+    "log_continual_summary",
     "log_experiment_header",
     "log_final_summary",
     "make_eval_set",
@@ -1126,6 +1153,7 @@ __all__ = [
     "resolve_split",
     "run_sequential",
     "summarize",
+    "summarize_continual_losses",
     "test_domain",
     "validate_checkpoint_params",
 ]

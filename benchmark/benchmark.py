@@ -105,7 +105,7 @@ def effective_condition(
     a2_arm: str | None,
     stage_config_sha256: str,
     runtime_config_sha256: str,
-    runtime_source: str,
+    runtime_source: str | None,
     epochs: int | None,
     source_sha256: str,
     a4_condition: Mapping[str, Any] | None = None,
@@ -511,7 +511,11 @@ INTERNAL_METRIC_SPECS = (
     ("Mean off-diagonal overlap", "a4_mean_off_diagonal_overlap", "lower"),
     ("Bank-key mean absolute cosine", "a4_bank_key_mean_absolute_cosine", "lower"),
     ("Query silhouette", "a4_query_silhouette", "higher"),
-    ("Capacity sensitivity Δ recall @8", "a4_capacity_sensitivity_delta_recall_at_8", "lower"),
+    (
+        "Capacity sensitivity Δ recall @8",
+        "a4_capacity_sensitivity_delta_recall_at_8",
+        "lower",
+    ),
     ("Step mean (ms)", "a4_step_mean_ms", "lower"),
     ("CPU index mean (ms)", "a4_cpu_index_mean_ms", "lower"),
     ("Communication mean (ms)", "a4_communication_mean_ms", "lower"),
@@ -699,11 +703,15 @@ def _a4_symbolic_metrics(
     extracted = {key: _mean_finite(items) for key, items in values.items()}
     details = {key: _mean_finite(items) for key, items in detail.items()}
     if not extracted:
-        return {}, (
-            "No completed metrics/a4 retrieval, representation, or latency "
-            "result.json artifact was found."
-            + (f" {frozen_redundancy_reason}" if frozen_redundancy_reason else "")
-        ), details
+        return (
+            {},
+            (
+                "No completed metrics/a4 retrieval, representation, or latency "
+                "result.json artifact was found."
+                + (f" {frozen_redundancy_reason}" if frozen_redundancy_reason else "")
+            ),
+            details,
+        )
     return extracted, frozen_redundancy_reason, details
 
 
@@ -1820,9 +1828,13 @@ def _command(
         if spec.a4_epochs is not None:
             command.extend(["--epochs", str(spec.a4_epochs)])
         if spec.a4_pairing is not None:
-            command.extend(["--benchmark-pair", str(config.with_suffix(".a3-pair.json"))])
+            command.extend(
+                ["--benchmark-pair", str(config.with_suffix(".a3-pair.json"))]
+            )
         if spec.a4_pairing is not None or spec.a4_data_mode == "runtime":
-            command.extend(["--runtime-config", str(runtime_config or spec.runtime_config)])
+            command.extend(
+                ["--runtime-config", str(runtime_config or spec.runtime_config)]
+            )
         if spec.a4_data_mode == "aligned":
             for field in A4_ALIGNED_FIELDS:
                 value = getattr(spec, field)
@@ -1985,15 +1997,20 @@ def _resolve_a4_warm_start(
         if (
             meta.get("stage") != "A3"
             or meta.get("model") != common["model"]
-            or type(num_layers) is not int
-            or type(hidden_size) is not int
+            or not isinstance(num_layers, int)
+            or isinstance(num_layers, bool)
+            or not isinstance(hidden_size, int)
+            or isinstance(hidden_size, bool)
             or hidden_size < 1
             or architecture.get("num_layers") != num_layers
             or architecture.get("hidden_size") != hidden_size
             or not isinstance(layers, list)
             or not layers
             or any(
-                type(layer) is not int or not 0 <= layer < num_layers for layer in layers
+                not isinstance(layer, int)
+                or isinstance(layer, bool)
+                or not 0 <= layer < num_layers
+                for layer in layers
             )
             or any(
                 training.get(key) != common[key]
@@ -2029,9 +2046,11 @@ def _resolve_a4_warm_start(
             continue
         try:
             checkpoint_sha256 = sha256_file(checkpoint)
-            recorded_sha256 = checkpoint.with_suffix(".npz.sha256").read_text(
-                encoding="utf-8"
-            ).strip()
+            recorded_sha256 = (
+                checkpoint.with_suffix(".npz.sha256")
+                .read_text(encoding="utf-8")
+                .strip()
+            )
         except (OSError, ValueError):
             rejected.append(
                 f"{candidate}: missing or unreadable checkpoint SHA-256 sidecar"
@@ -2220,7 +2239,10 @@ def train_manifest(
         if spec.method == "a4":
             pairing = _resolve_a4_warm_start(_read_json(manifest_path), raw)
             spec = replace(
-                spec, a4_warm_start=pairing["checkpoint"], a4_pairing=pairing, a4_epochs=effective_epochs
+                spec,
+                a4_warm_start=pairing["checkpoint"],
+                a4_pairing=pairing,
+                a4_epochs=effective_epochs,
             )
         config = _materialize(
             spec,
@@ -2235,8 +2257,13 @@ def train_manifest(
             effective_epochs,
             str(current_source["source_sha256"]),
         )
-        if spec.method == "a4" and raw.get("a4_input_sha256", {}) != condition["a4_input_sha256"]:
-            raise RuntimeError(f"{spec.run_id}: A4 input artifacts changed after planning")
+        if (
+            spec.method == "a4"
+            and raw.get("a4_input_sha256", {}) != condition["a4_input_sha256"]
+        ):
+            raise RuntimeError(
+                f"{spec.run_id}: A4 input artifacts changed after planning"
+            )
         config_sha = sha256_file(config)
         previous_run = Path(raw["run_dir"]) if raw.get("run_dir") else None
         if resume and previous_run is not None:
@@ -2302,7 +2329,8 @@ def train_manifest(
             **condition,
             **(
                 {"a4_warm_start": spec.a4_warm_start, "a4_epochs": spec.a4_epochs}
-                if spec.method == "a4" else {}
+                if spec.method == "a4"
+                else {}
             ),
             started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
@@ -2360,7 +2388,11 @@ def train_manifest(
         meta = _read_json(run_dir / "meta.json")
         a4_result_fields = {}
         if spec.method == "a4":
-            expected_mode = "standalone_aligned" if spec.a4_data_mode == "aligned" else "runtime_sequential"
+            expected_mode = (
+                "standalone_aligned"
+                if spec.a4_data_mode == "aligned"
+                else "runtime_sequential"
+            )
             result = _read_json(results)
             if (
                 meta.get("a3_pairing") != spec.a4_pairing
@@ -2368,15 +2400,20 @@ def train_manifest(
                 or meta.get("seed") != spec.seed
                 or meta.get("rank") != spec.rank
                 or meta.get("warm_start_sha256") != condition["a4_warm_start_sha256"]
-                or meta.get("residual_config_sha256") != condition["a4_residual_config_sha256"]
+                or meta.get("residual_config_sha256")
+                != condition["a4_residual_config_sha256"]
                 or result.get("mode") != expected_mode
                 or result.get("seed") != spec.seed
             ):
-                raise RuntimeError(f"{spec.run_id}: A4 results differ from the requested condition")
+                raise RuntimeError(
+                    f"{spec.run_id}: A4 results differ from the requested condition"
+                )
             checkpoints = result["checkpoints"]
             for checkpoint in checkpoints:
                 if not (run_dir / checkpoint).is_file():
-                    raise RuntimeError(f"{spec.run_id}: missing A4 checkpoint {checkpoint}")
+                    raise RuntimeError(
+                        f"{spec.run_id}: missing A4 checkpoint {checkpoint}"
+                    )
             a4_result_fields = {
                 "checkpoints": checkpoints,
                 "validation_scope": result.get("validation_scope"),
@@ -2634,7 +2671,11 @@ def evaluate_manifest(output_dir: Path) -> dict[str, Any]:
                 ),
                 "a4_post_eval_dir": run.get(
                     "a4_post_eval_dir",
-                    str(output_dir / "a4_post_eval" / run.get("planned_run_id", run["run_id"])),
+                    str(
+                        output_dir
+                        / "a4_post_eval"
+                        / run.get("planned_run_id", run["run_id"])
+                    ),
                 ),
             }
             deployed = _load_deployed_metrics(evaluation_run, raw_result)
@@ -2761,7 +2802,9 @@ def _report_metric_value(record: dict[str, Any], metric: str, rank: int) -> list
     if metric in fields:
         value = record.get(fields[metric])
     elif record.get("method") == "a4" and metric in {
-        "domain_kl", "token_accuracy", "residual_direction_redundancy",
+        "domain_kl",
+        "token_accuracy",
+        "residual_direction_redundancy",
     }:
         value = deployed.get("a4", {}).get("symbolic", {}).get(metric)
     elif metric == "residual_compressibility":
@@ -2810,9 +2853,7 @@ def measurement_reason(record: dict[str, Any], metric: str) -> str:
         return "Shared ROCStories validation measures CE/PPL after each task."
     if metric.startswith("a4_"):
         return str(
-            record.get("deployed_evaluation", {})
-            .get("a4", {})
-            .get("symbolic_reason")
+            record.get("deployed_evaluation", {}).get("a4", {}).get("symbolic_reason")
             or "A4 symbolic measurement was not recorded."
         )
     return str(
@@ -2992,7 +3033,9 @@ def _select_headline_cohort(
             and (method != "a3" or record.get("k") == selected_k)
         ]
         method_records[method] = tuple(rows)
-    seed_sets = [{int(row["seed"]) for row in method_records[m]} for m in comparison_methods]
+    seed_sets = [
+        {int(row["seed"]) for row in method_records[m]} for m in comparison_methods
+    ]
     common = set.intersection(*seed_sets) if all(seed_sets) else set()
     matched = []
     for seed in sorted(common):
@@ -3069,7 +3112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
     parser.add_argument("--runtime-source")
-    parser.add_argument("--a4-data-mode", choices=("aligned", "runtime"), default="aligned")
+    parser.add_argument(
+        "--a4-data-mode", choices=("aligned", "runtime"), default="aligned"
+    )
     parser.add_argument("--a4-arms", choices=tuple(A4_ARM_CONFIGS), nargs="+")
     parser.add_argument("--a4-a3-k", type=int, help="Select the paired A3 training K.")
     parser.add_argument("--a4-train-sources", type=Path)
@@ -3093,7 +3138,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if "a4" not in (args.methods or METHODS):
             parser.error("--a4-post-eval requires a4 in --methods")
         if args.a4_probes is None or not args.a4_probes.is_file():
-            parser.error("--a4-probes must be an existing path when --a4-post-eval is set")
+            parser.error(
+                "--a4-probes must be an existing path when --a4-post-eval is set"
+            )
     output_dir = args.output_dir.resolve()
     profiles = {
         "smoke": ([0], [16], [4], ["sequential"]),
@@ -3110,15 +3157,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "a4_data_mode": args.a4_data_mode,
         "a4_arms": args.a4_arms,
         "a4_a3_k": args.a4_a3_k,
-        "a4_train_sources": str(args.a4_train_sources)
-        if args.a4_train_sources
-        else None,
-        "a4_validation_sources": str(args.a4_validation_sources)
-        if args.a4_validation_sources
-        else None,
-        "a4_alignment_labels": str(args.a4_alignment_labels)
-        if args.a4_alignment_labels
-        else None,
+        "a4_train_sources": (
+            str(args.a4_train_sources) if args.a4_train_sources else None
+        ),
+        "a4_validation_sources": (
+            str(args.a4_validation_sources) if args.a4_validation_sources else None
+        ),
+        "a4_alignment_labels": (
+            str(args.a4_alignment_labels) if args.a4_alignment_labels else None
+        ),
         "a4_patterns": str(args.a4_patterns) if args.a4_patterns else None,
         "a4_embeddings": str(args.a4_embeddings) if args.a4_embeddings else None,
         "a4_test_sources": str(args.a4_test_sources) if args.a4_test_sources else None,
@@ -3167,8 +3214,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "eval" and args.a4_post_eval:
         manifest = _read_json(manifest_path)
         for row in manifest.get("runs", []):
-            if (row.get("method") != "a4" or row.get("status") != "complete"
-                or row.get("a4_data_mode", "aligned") != "aligned"):
+            if (
+                row.get("method") != "a4"
+                or row.get("status") != "complete"
+                or row.get("a4_data_mode", "aligned") != "aligned"
+            ):
                 continue
             run_dir = Path(row.get("run_dir", ""))
             if run_dir.is_dir():

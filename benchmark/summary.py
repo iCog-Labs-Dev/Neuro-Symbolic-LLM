@@ -248,7 +248,10 @@ def report_manifest(
         "",
     ]
     if cohort is None or not cohort.matched_seeds:
-        lines += ["No complete matched A1/A2/A3 cohort is available; A4 is reported independently.", ""]
+        lines += [
+            "No complete matched A1/A2/A3 cohort is available; A4 is reported independently.",
+            "",
+        ]
     else:
         lines += [
             f"Selected A3 K: {cohort.selected_k}. Selection rule: {cohort.selection['rule']}",
@@ -303,11 +306,7 @@ def report_manifest(
         destination / "metrics.json",
         {
             "metrics": [
-                key
-                for _, key, _ in (
-                    INTERNAL_METRIC_SPECS
-                    + EXTERNAL_METRIC_SPECS
-                )
+                key for _, key, _ in (INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS)
             ],
             "runs": [
                 {
@@ -317,12 +316,21 @@ def report_manifest(
                         {
                             key: row.get(key)
                             for key in (
-                                "a4_data_mode", "a4_arm", "seed", "rank", "protocol",
-                                "validation_scope", "after_task", "backward_transfer_ce",
-                                "task_epochs", "checkpoints", "frozen_a3_baseline",
+                                "a4_data_mode",
+                                "a4_arm",
+                                "seed",
+                                "rank",
+                                "protocol",
+                                "validation_scope",
+                                "after_task",
+                                "backward_transfer_ce",
+                                "task_epochs",
+                                "checkpoints",
+                                "frozen_a3_baseline",
                             )
                         }
-                        if row.get("method") == "a4" else {}
+                        if row.get("method") == "a4"
+                        else {}
                     ),
                     "params_unchanged": row.get("params_unchanged"),
                     "metrics": {
@@ -338,10 +346,7 @@ def report_manifest(
                                 else measurement_reason(row, key)
                             ),
                         }
-                        for _, key, _ in (
-                            INTERNAL_METRIC_SPECS
-                            + EXTERNAL_METRIC_SPECS
-                        )
+                        for _, key, _ in (INTERNAL_METRIC_SPECS + EXTERNAL_METRIC_SPECS)
                     },
                 }
                 for row in records

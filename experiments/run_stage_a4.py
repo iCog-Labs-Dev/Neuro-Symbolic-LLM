@@ -13,13 +13,14 @@ from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from frozenllm.substrate import FrozenSubstrate
     from stages.stage_A.a4.config import A4Config
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -65,9 +66,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--benchmark-pair", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--data-mode",
-        choices=("runtime", "aligned"),
+        choices=("runtime", "aligned", "sequential-aligned"),
         default="runtime",
-        help="Runtime sequential datasets or legacy aligned source data.",
+        help="Runtime CE, single-task alignment, or sequential ROCStories alignment.",
     )
 
     parser.add_argument(
@@ -103,6 +104,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ):
         parser.add_argument(f"--{name}", type=Path)
     parser.add_argument("--test-sources", type=Path)
+    parser.add_argument(
+        "--task-eval-sources",
+        type=Path,
+        help=(
+            "Override the fixed groups formed from --validation-sources in "
+            "sequential-aligned mode. Provide separate held-out JSONL documents "
+            "with corpus_id, document_id, source_text and task_id (1, 2 or 3)."
+        ),
+    )
     parser.add_argument("--skip-test", action="store_true")
     parser.add_argument(
         "--skip-latency",
@@ -145,13 +155,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--precision", choices=("default", "highest"), default="highest"
     )
     args = parser.parse_args(argv)
+    if args.task_eval_sources is not None and args.data_mode != "sequential-aligned":
+        parser.error("--task-eval-sources requires --data-mode sequential-aligned")
     if args.benchmark_pair is not None and (
         args.warm_start is None
         or not args.benchmark_pair.is_file()
         or not args.runtime_config.is_file()
     ):
-        parser.error("A benchmark pair requires --warm-start, pairing metadata and runtime YAML")
-    if args.data_mode == "aligned":
+        parser.error(
+            "A benchmark pair requires --warm-start, pairing metadata and runtime YAML"
+        )
+    if args.data_mode != "runtime":
         required_sources = (
             "train_sources",
             "validation_sources",
@@ -162,19 +176,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             if getattr(args, name) is None:
                 parser.error(
                     f"--{name.replace('_', '-')} is required "
-                    "in aligned mode"
+                    f"in {args.data_mode} mode"
                 )
 
         if not args.skip_test and args.test_sources is None:
-            parser.error(
-                "--test-sources is required unless --skip-test "
-                "is selected"
-            )
+            parser.error("--test-sources is required unless --skip-test " "is selected")
     else:
         if not args.runtime_config.is_file():
-            parser.error(
-                f"Runtime dataset config not found: {args.runtime_config}"
-            )
+            parser.error(f"Runtime dataset config not found: {args.runtime_config}")
     for name in (
         "batch_size",
         "seq_len",
@@ -280,6 +289,7 @@ def main(
     argv: Sequence[str] | None = None, *, substrate: FrozenSubstrate | None = None
 ) -> int:
     args = parse_args(argv)
+    sequential_alignment = args.data_mode == "sequential-aligned"
     if args.warm_start is None:
         args.warm_start = find_latest_a3_checkpoint()
 
@@ -289,13 +299,26 @@ def main(
         raise FileNotFoundError(f"Pattern bank not found: {args.patterns}")
     if not args.embeddings.is_file():
         raise FileNotFoundError(f"Embedding bank not found: {args.embeddings}")
+    if sequential_alignment:
+        paths = [args.train_sources, args.validation_sources, args.alignment_labels]
+        if args.task_eval_sources is not None:
+            paths.append(args.task_eval_sources)
+        if not args.skip_test:
+            paths.append(args.test_sources)
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(f"Sequential alignment input not found: {path}")
 
     import jax
     import torch
 
     from residual import ResidualAdapter
     from residual.symbolic_head.jax_head import Retriever, SymbolicHead
-    from runtime.data_loader import load_runtime_data, runtime_pairing_fingerprint
+    from runtime.data_loader import (
+        RuntimeData,
+        load_runtime_data,
+        runtime_pairing_fingerprint,
+    )
     from stages.results import RunWriter, default_run_name, load_params, run_metadata
     from stages.stage_A.a3 import A3Model
     from stages.stage_A.a4.checkpoint import restore_a3_weights
@@ -304,7 +327,7 @@ def main(
         load_config,
         load_residual_config,
     )
-    from stages.stage_A.a4.data import load_data
+    from stages.stage_A.a4.data import A4Data, SequentialAlignmentData, load_data
     from stages.stage_A.a4.model import A4Model
     from stages.stage_A.a4.training import train, train_sequential
     from stages.stage_base import configure_logging
@@ -321,6 +344,8 @@ def main(
 
     config = load_config(args.config)
     config = _apply_training_overrides(config, args)
+    if sequential_alignment and (config.key_weight <= 0 or config.value_weight <= 0):
+        raise ValueError("Sequential alignment requires positive key and value weights")
     jax.config.update("jax_default_matmul_precision", args.precision)
     torch.set_num_threads(2)
     torch.manual_seed(config.training.seed)
@@ -411,9 +436,9 @@ def main(
             default_epochs=config.training.epochs,
             epochs_override=args.epochs,
             training_mode="sequential",
-            source_texts=_aligned_source_texts(args)
-            if args.data_mode == "aligned"
-            else None,
+            source_texts=(
+                _aligned_source_texts(args) if args.data_mode == "aligned" else None
+            ),
         )
         if pair is not None and (
             list(runtime_data.task_order) != pair["task_order"]
@@ -426,9 +451,12 @@ def main(
                 "A4 runtime dataset, splits or task order differ from its A3 pair"
             )
 
+    alignment_metadata = {}
+    data: RuntimeData | A4Data | SequentialAlignmentData
     if args.data_mode == "runtime":
         assert runtime_data is not None
         data = runtime_data
+        data_metadata = runtime_data.metadata
 
         # Runtime-only training uses next-token CE.
         # The template bank remains active for retrieval.
@@ -444,12 +472,37 @@ def main(
             ", ".join(data.task_order),
         )
     else:
-        data = load_data(
+        aligned_data = load_data(
             args,
             substrate.tokenizer,
             bank,
             config.training,
         )
+        data = aligned_data
+        data_metadata = aligned_data.provenance
+        if sequential_alignment:
+            tasks = cast(SequentialAlignmentData, aligned_data).tasks
+            alignment_metadata = {
+                "task_order": data_metadata["task_order"],
+                "alignment_counts": data_metadata["alignment_counts"],
+                "task_mapping": data_metadata["task_mapping"],
+                "source_fingerprints": data_metadata["source_fingerprints"],
+                "loss_weights": {
+                    "ce": 1.0,
+                    "key": config.key_weight,
+                    "value": config.value_weight,
+                },
+                "reset_optimizer": config.training.reset_optimizer,
+            }
+            if "continual_evaluation" in data_metadata:
+                alignment_metadata["continual_evaluation"] = data_metadata[
+                    "continual_evaluation"
+                ]
+            log.info(
+                "Loaded %d sequential alignment tasks (%s examples)",
+                len(tasks),
+                f"{sum(len(task.train_blocks) for task in tasks):,}",
+            )
     retriever: Retriever
     with ExitStack() as stack:
         if args.retrieval_backend == "native":
@@ -490,12 +543,7 @@ def main(
             config.training.output_dir, args.run_name or default_run_name("a4")
         ) as writer:
             writer.write_config(config.to_dict())
-            writer.write_json(
-                "data.json",
-                data.metadata
-                if args.data_mode == "runtime"
-                else data.provenance,
-            )
+            writer.write_json("data.json", data_metadata)
             writer.write_json(
                 "meta.json",
                 {
@@ -537,7 +585,10 @@ def main(
                     "seed": config.training.seed,
                     "rank": inherited.adapter.rank,
                     "data_mode": args.data_mode,
-                    "runtime_data": data.metadata if args.data_mode == "runtime" else None,
+                    "runtime_data": (
+                        data_metadata if args.data_mode == "runtime" else None
+                    ),
+                    **alignment_metadata,
                     "substrate_reused": substrate_reused,
                     "layers": list(continuous.layers),
                     "bank_snapshot": bank.input_snapshot_sha256,
@@ -563,7 +614,7 @@ def main(
             training_log.setFormatter(logging.Formatter("%(message)s"))
             logger.addHandler(training_log)
             try:
-                if args.data_mode == "runtime":
+                if args.data_mode != "aligned":
                     results = train_sequential(
                         model,
                         frozen_residual,
@@ -577,14 +628,12 @@ def main(
                     results = train(
                         model,
                         frozen_residual,
-                        data,
+                        cast(A4Data, data),
                         bank,
                         config,
                         writer,
                         max_grad_norm=args.max_grad_norm,
-                        latency_every=(
-                            0 if args.skip_latency else args.latency_every
-                        ),
+                        latency_every=(0 if args.skip_latency else args.latency_every),
                     )
                 if pair is not None:
                     writer.write_json("results.json", {**results, "a3_pairing": pair})

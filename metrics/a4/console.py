@@ -5,12 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 
-def training_row(batch: int, batches: int, metrics: dict[str, Any]) -> str:
-    """Format one training update; PPL is computed from task CE, not total loss."""
+def training_row(batch, batches_per_epoch, metrics):
     ppl = "overflow" if metrics["ppl"] is None else f"{metrics['ppl']:.4f}"
+
     return (
-        f"{f'{batch}/{batches}':>12} {metrics['total']:>14.6f} "
-        f"{metrics['task']:>14.6f} {metrics['symbolic']:>14.6f} {ppl:>12}"
+        f"    Batch {batch}/{batches_per_epoch} | "
+        f"Total loss={metrics['total']:.4f} | "
+        f"CE={metrics['task']:.4f} | "
+        f"Key={metrics['key']:.4f} | "
+        f"Value={metrics['value']:.4f} | "
+        f"PPL={ppl}"
     )
 
 

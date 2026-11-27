@@ -19,10 +19,20 @@ from residual.symbolic_head.alignment import ValuePredictor
 from stages.results import RunWriter
 from stages.stage_A.a4.checkpoint import pack_head_params
 from stages.stage_A.a4.config import TRAINING_STATE_SOURCE, A4Config
-from stages.stage_A.a4.data import A4Data
+from stages.stage_A.a4.data import (
+    HELD_OUT_GROUP_INTERPRETATION,
+    HELD_OUT_GROUP_SCOPE,
+    ROCSTORIES_EVAL_GROUPS,
+    A4Data,
+    SequentialAlignmentData,
+)
 from stages.stage_A.a4.model import A4Model
 from stages.stage_A.a4.objective import AlignmentLabels, objective_at_latents
-from stages.stage_base import make_eval_set
+from stages.stage_base import (
+    log_continual_summary,
+    make_eval_set,
+    summarize_continual_losses,
+)
 
 log = logging.getLogger("stage_a4")
 
@@ -116,7 +126,16 @@ def residual_fingerprint(model: A4Model, params: Any) -> str:
     return digest.hexdigest()
 
 
-def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, config):
+def make_train_step(
+    model,
+    frozen_residual,
+    optimizer,
+    bank_keys,
+    bank_values,
+    config,
+    *,
+    detach_alignment_states=False,
+):
     """Build an A4 optimizer step for runtime-only or supervised training."""
     frozen_residual = jax.tree.map(jax.lax.stop_gradient, frozen_residual)
 
@@ -167,6 +186,7 @@ def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, c
             return total, terms
 
         if alignment_enabled:
+
             def supervised_loss(candidate):
                 return objective_at_latents(
                     model,
@@ -181,21 +201,20 @@ def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, c
                     key_weight=config.key_weight,
                     value_weight=config.value_weight,
                     token_mask=token_mask,
+                    detach_alignment_states=detach_alignment_states,
                 )
 
-            (_, terms), grads = jax.value_and_grad(
-                supervised_loss, has_aux=True
-            )(params)
+            (_, terms), grads = jax.value_and_grad(supervised_loss, has_aux=True)(
+                params
+            )
         else:
-            (_, terms), symbolic_grads = jax.value_and_grad(
-                loss, has_aux=True
-            )(params["symbolic"])
+            (_, terms), symbolic_grads = jax.value_and_grad(loss, has_aux=True)(
+                params["symbolic"]
+            )
 
             grads = {
                 "symbolic": symbolic_grads,
-                "value": jax.tree.map(
-                    jnp.zeros_like, params["value"]
-                ),
+                "value": jax.tree.map(jnp.zeros_like, params["value"]),
             }
 
         updates, next_state = optimizer.update(grads, state, params)
@@ -205,9 +224,7 @@ def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, c
             jnp.stack(
                 [
                     jnp.all(jnp.isfinite(leaf))
-                    for leaf in jax.tree.leaves(
-                        (terms, grads, candidate, next_state)
-                    )
+                    for leaf in jax.tree.leaves((terms, grads, candidate, next_state))
                 ]
             )
         )
@@ -225,15 +242,10 @@ def make_train_step(model, frozen_residual, optimizer, bank_keys, bank_values, c
 
         for name in ("W_sym", "b_sym", "U_out"):
             terms[f"{name}_grad_norm"] = optax.global_norm(
-                [
-                    layer[name]
-                    for layer in grads["symbolic"].values()
-                ]
+                [layer[name] for layer in grads["symbolic"].values()]
             )
 
-        terms["V_pred_grad_norm"] = optax.global_norm(
-            grads["value"]
-        )
+        terms["V_pred_grad_norm"] = optax.global_norm(grads["value"])
 
         return candidate, next_state, terms, finite
 
@@ -368,8 +380,6 @@ def train(
         config,
     )
 
-    log.info("Task 1/1: A4 symbolic-head training")
-
     if timing_enabled:
         log.info(
             "CUDA copy timing: every %d updates after 10-update "
@@ -407,16 +417,12 @@ def train(
     batches_per_epoch = len(data.train) // training.batch_size
     step_times = []
 
-    columns = (
-        f"{'Batch':>12} {'Total loss':>14} {'Task loss':>14} "
-        f"{'Symbolic loss':>14} {'PPL':>12}"
-    )
+    log.info("\nTask 1/1")
 
     for epoch in range(training.epochs):
         epoch_samples = []
 
-        log.info("Epoch %d/%d", epoch + 1, training.epochs)
-        log.info("%s", columns)
+        log.info("  Epoch %d/%d", epoch + 1, training.epochs)
 
         order = np.random.default_rng(training.seed + epoch).permutation(
             len(data.train)
@@ -521,15 +527,13 @@ def train(
 
             if (
                 batch == 1
-                or updates % training.log_every == 0
+                or batch % training.log_every == 0
                 or batch == batches_per_epoch
             ):
                 log.info(
                     "%s",
                     training_row(batch, batches_per_epoch, metrics),
                 )
-
-        log.info("%s", columns)
 
         epoch_communication = _communication_summary(epoch_samples)
 
@@ -686,33 +690,29 @@ def train_sequential(
     max_grad_norm: float = 1.0,
     latency_every: int = 100,
 ) -> dict[str, Any]:
-    """Train A4 sequentially on shared runtime tasks.
-
-    The LLM and A3 residual remain frozen. Only symbolic
-    head parameters are updated using next-token CE.
-    """
+    """Train one symbolic head across runtime or alignment-supervised tasks."""
     del latency_every  # Timing integration can be added later.
 
     training = config.training
 
-    if config.key_weight != 0 or config.value_weight != 0:
+    aligned = isinstance(data, SequentialAlignmentData)
+    if aligned and (config.key_weight <= 0 or config.value_weight <= 0):
+        raise ValueError("Sequential alignment requires positive key and value weights")
+    if not aligned and (config.key_weight != 0 or config.value_weight != 0):
         raise ValueError(
-            "Runtime sequential training requires zero "
-            "key/value alignment weights"
+            "Runtime sequential training requires zero " "key/value alignment weights"
         )
 
     tasks = data.tasks
     if not tasks:
-        raise ValueError("No runtime tasks available")
+        raise ValueError("No sequential tasks available")
 
     # Validate task data before starting expensive model updates.
     for task in tasks:
         blocks = np.asarray(task.train_blocks)
 
         if blocks.ndim != 2:
-            raise ValueError(
-                f"Task {task.name}: expected [samples, seq_len] blocks"
-            )
+            raise ValueError(f"Task {task.name}: expected [samples, seq_len] blocks")
 
         if blocks.shape[1] != training.seq_len:
             raise ValueError(
@@ -720,16 +720,15 @@ def train_sequential(
                 f"{blocks.shape[1]} != {training.seq_len}"
             )
 
-        if len(blocks) < training.batch_size:
+        minimum_batch = 1 if aligned else training.batch_size
+        if len(blocks) < minimum_batch:
             raise ValueError(
                 f"Task {task.name}: insufficient training blocks "
-                f"for batch size {training.batch_size}"
+                f"(requires at least {minimum_batch})"
             )
 
-        if not task.eval_set:
-            raise ValueError(
-                f"Task {task.name}: no validation batches"
-            )
+        if not aligned and not task.eval_set:
+            raise ValueError(f"Task {task.name}: no validation batches")
 
     fingerprint = residual_fingerprint(model, frozen_residual)
     params = init_params(model, training.seed)
@@ -740,12 +739,8 @@ def train_sequential(
     )
     state = optimizer.init(params)
 
-    bank_keys = jnp.asarray(
-        np.stack([record.key_vector for record in bank.records])
-    )
-    bank_values = jnp.asarray(
-        np.stack([record.val_vector for record in bank.records])
-    )
+    bank_keys = jnp.asarray(np.stack([record.key_vector for record in bank.records]))
+    bank_values = jnp.asarray(np.stack([record.val_vector for record in bank.records]))
 
     step = make_train_step(
         model,
@@ -754,19 +749,61 @@ def train_sequential(
         bank_keys,
         bank_values,
         config,
+        detach_alignment_states=aligned,
     )
 
     names = [task.name for task in tasks]
-    shared_validation = data.metadata["validation_scope"] == "shared"
-    eval_sets = (
-        {"shared_validation": tasks[0].eval_set}
-        if shared_validation
-        else {task.name: task.eval_set for task in tasks}
-    )
-    eval_blocks = {
-        name: np.concatenate(batches, axis=0) for name, batches in eval_sets.items()
-    }
-    if not shared_validation:
+    validation_masks, test_masks, alignment_metadata = {}, {}, {}
+    if aligned:
+        task_eval = data.task_eval
+        eval_group_names = ROCSTORIES_EVAL_GROUPS
+        if len(tasks) != len(eval_group_names) or set(task_eval) != set(
+            eval_group_names
+        ):
+            raise ValueError(
+                "Sequential alignment requires three tasks and three fixed held-out groups"
+            )
+        validation_scope = HELD_OUT_GROUP_SCOPE
+        eval_sets = {
+            "shared_validation": (data.validation, data.validation_mask),
+            **{name: task_eval[name] for name in eval_group_names},
+        }
+        eval_blocks = {name: blocks for name, (blocks, _) in eval_sets.items()}
+        eval_batch_counts = dict.fromkeys(eval_sets, training.eval_batches)
+        validation_masks = {name: mask for name, (_, mask) in eval_sets.items()}
+        test_blocks = {} if data.test is None else {"shared_test": data.test}
+        test_masks = {"shared_test": data.test_mask}
+        alignment_metadata = {
+            "data_mode": "sequential-aligned",
+            "task_order": names,
+            "alignment_counts": data.provenance["alignment_counts"],
+            "source_fingerprints": data.provenance["source_fingerprints"],
+            "task_mapping": data.provenance["task_mapping"],
+            "loss_weights": {
+                "ce": 1.0,
+                "key": config.key_weight,
+                "value": config.value_weight,
+            },
+            "reset_optimizer": training.reset_optimizer,
+            "training_state_source": TRAINING_STATE_SOURCE,
+        }
+    else:
+        eval_group_names = tuple(names)
+        validation_scope = data.metadata["validation_scope"]
+        eval_sets = (
+            {"shared_validation": tasks[0].eval_set}
+            if validation_scope == "shared"
+            else {task.name: task.eval_set for task in tasks}
+        )
+        eval_blocks = {
+            name: np.concatenate(batches, axis=0) for name, batches in eval_sets.items()
+        }
+        eval_batch_counts = {name: len(batches) for name, batches in eval_sets.items()}
+
+    shared_validation = validation_scope == "shared"
+    # Aligned groups are separated by source document, and shared validation
+    # can contain those same documents.
+    if not aligned and not shared_validation:
         seen: set[bytes] = set()
         for blocks in eval_blocks.values():
             fingerprints = {row.tobytes() for row in blocks}
@@ -785,7 +822,8 @@ def train_sequential(
                 params,
                 blocks,
                 training,
-                eval_batches=len(eval_sets[name]),
+                token_masks=validation_masks.get(name),
+                eval_batches=eval_batch_counts[name],
             )
             writer.log(
                 "eval",
@@ -794,75 +832,139 @@ def train_sequential(
                 split="validation",
                 **results[name],
             )
+        if aligned:
+            step = (
+                "before training"
+                if after_task < 0
+                else f"after Task {after_task + 1}/{len(tasks)}"
+            )
+            scores = " | ".join(
+                f"{name} CE: {row['loss']:.4f} PPL: {row['ppl']:.2f}"
+                for name, row in results.items()
+            )
+            log.info("  Validation %s | %s", step, scores)
         return results
 
+    if shared_validation and not aligned:
+        log.info("Forgetting metrics: N/A | Shared validation only.")
     initial = evaluate_all(-1)
     history = []
     updates = 0
+    task_metrics = {}
 
     for task_index, task in enumerate(tasks):
-        log.info(
-            "A4 Task %d/%d: %s",
-            task_index + 1,
-            len(tasks),
-            task.name,
-        )
+        log.info("\nTask %d/%d", task_index + 1, len(tasks))
 
-        if task_index > 0 and training.reset_optimizer:
+        optimizer_reset = task_index > 0 and training.reset_optimizer
+        if optimizer_reset:
             state = optimizer.init(params)
 
+        start_updates = updates
+        examples = 0
+        loss_sums = dict.fromkeys(
+            ("task", "key", "value", "total", "gradient_norm"), 0.0
+        )
+        batch_size = training.batch_size
+        num_examples = len(task.train_blocks)
+        # A smaller final batch keeps all labels and can use its own JIT shape.
+        stop = num_examples if aligned else num_examples - batch_size + 1
+        batch_starts = range(0, stop, batch_size)
+        batches_per_epoch = len(batch_starts)
         for epoch in range(task.epochs):
-            rng = np.random.default_rng(
-                training.seed + task_index * 1000 + epoch
+            log.info("  Epoch %d/%d", epoch + 1, task.epochs)
+            seed = (
+                np.random.SeedSequence([training.seed, task_index, epoch])
+                if aligned
+                else training.seed + task_index * 1000 + epoch
             )
-            order = rng.permutation(len(task.train_blocks))
-            batch_size = training.batch_size
+            rng = np.random.default_rng(seed)
+            order = rng.permutation(num_examples)
 
-            for start in range(
-                0,
-                len(order) - batch_size + 1,
-                batch_size,
-            ):
+            for batch, start in enumerate(batch_starts, start=1):
                 indices = order[start : start + batch_size]
-                ids = jnp.asarray(task.train_blocks[indices])
+                inputs = (
+                    tuple(jnp.asarray(value) for value in task.batch_inputs(indices))
+                    if aligned
+                    else (jnp.asarray(task.train_blocks[indices]),)
+                )
 
                 params, state, terms, finite = step(
                     params,
                     state,
-                    ids,
+                    *inputs,
                 )
 
                 jax.block_until_ready((params, terms))
 
                 if not bool(finite):
-                    raise FloatingPointError(
-                        f"Nonfinite A4 update in task {task.name}"
-                    )
+                    raise FloatingPointError(f"Nonfinite A4 update in task {task.name}")
 
                 updates += 1
 
-                if updates % training.log_every == 0:
+                record_metrics = updates % training.log_every == 0
+                log_batch = (
+                    batch == 1
+                    or batch % training.log_every == 0
+                    or batch == batches_per_epoch
+                )
+                if aligned or record_metrics or log_batch:
                     metrics = {
                         name: float(value)
-                        for name, value in terms.items()
+                        for name, value in jax.device_get(terms).items()
                     }
+
+                    metrics["symbolic"] = (
+                        config.key_weight * metrics["key"]
+                        + config.value_weight * metrics["value"]
+                    )
+
+                    ppl: float | None
+                    try:
+                        ppl = math.exp(metrics["task"])
+                    except OverflowError:
+                        ppl = None
+                    log_metrics = {**metrics, "ppl": ppl}
+                if aligned:
+                    examples += len(indices)
+                    for name in loss_sums:
+                        loss_sums[name] += metrics[name]
+
+                if record_metrics:
                     writer.log(
                         "train",
                         domain=task.name,
                         epoch=epoch + 1,
                         step=updates,
-                        **metrics,
+                        **log_metrics,
                     )
+                if log_batch:
                     log.info(
-                        "%s | epoch=%d | step=%d | CE=%.4f",
-                        task.name,
-                        epoch + 1,
-                        updates,
-                        metrics["task"],
+                        "%s",
+                        training_row(batch, batches_per_epoch, log_metrics),
                     )
 
-        results = evaluate_all(task_index)
-        history.append(results)
+        task_checkpoint_metadata = {}
+        if aligned:
+            task_updates = updates - start_updates
+            summary = {
+                "updates": task_updates,
+                "examples_processed": examples,
+                "optimizer_reset": optimizer_reset,
+                "mean_per_update": {
+                    name: total / task_updates if task_updates else None
+                    for name, total in loss_sums.items()
+                },
+            }
+            task_metrics[task.name] = summary
+            writer.log("task_training", domain=task.name, **summary)
+            task_checkpoint_metadata = {
+                **alignment_metadata,
+                "task": task.name,
+                "task_index": task_index,
+                "task_metrics": summary,
+            }
+
+        history.append(evaluate_all(task_index))
 
         writer.save_checkpoint(
             f"task_{task_index}_{task.name}",
@@ -871,6 +973,7 @@ def train_sequential(
             updates=updates,
             bank_snapshot_sha256=bank.input_snapshot_sha256,
             frozen_residual_sha256=fingerprint,
+            **task_checkpoint_metadata,
         )
 
     if residual_fingerprint(model, frozen_residual) != fingerprint:
@@ -880,14 +983,16 @@ def train_sequential(
     if not frozen["params_unchanged"]:
         raise RuntimeError("Frozen LLM changed")
 
+    if not aligned:
+        test_blocks = data.test_blocks
     report = {
         "stage": "A4",
-        "mode": "runtime_sequential",
+        "mode": "sequential_aligned" if aligned else "runtime_sequential",
         "training_state_source": TRAINING_STATE_SOURCE,
         "seed": training.seed,
         "task_order": names,
         "task_epochs": {task.name: task.epochs for task in tasks},
-        "validation_scope": data.metadata["validation_scope"],
+        "validation_scope": validation_scope,
         "updates": updates,
         "initial": initial,
         "after_task": history,
@@ -898,9 +1003,10 @@ def train_sequential(
                 params,
                 blocks,
                 training,
+                token_masks=test_masks.get(name),
                 eval_batches=training.test_batches,
             )
-            for name, blocks in data.test_blocks.items()
+            for name, blocks in test_blocks.items()
         },
         "frozen": frozen,
         "frozen_residual_sha256": fingerprint,
@@ -913,22 +1019,43 @@ def train_sequential(
             "checkpoints/a4-final.npz",
         ],
     }
+    if aligned:
+        report.update(
+            alignment_metadata,
+            task_metrics=task_metrics,
+            continual_evaluation={
+                **data.provenance.get("continual_evaluation", {}),
+                "scope": validation_scope,
+                "interpretation": HELD_OUT_GROUP_INTERPRETATION,
+                "group_order": list(eval_group_names),
+                "shared_generalization_metric": "shared_validation",
+            },
+        )
     if not shared_validation:
-        from stages.stage_base import mean_forgetting
-
-        losses = np.asarray([[row[name]["loss"] for name in names] for row in history])
+        losses = np.asarray(
+            [[row[name]["loss"] for name in eval_group_names] for row in history]
+        )
         report["loss_matrix"] = losses.tolist()
         report["perplexity_matrix"] = [
-            [row[name]["ppl"] for name in names] for row in history
+            [row[name]["ppl"] for name in eval_group_names] for row in history
         ]
-        report["mean_forgetting"] = [
-            None if index == 0 else float(mean_forgetting(losses, index))
-            for index in range(len(history))
-        ]
+        continual_losses = summarize_continual_losses(losses)
+        report["mean_forgetting"] = continual_losses["mean_forgetting"]
+        if aligned:
+            report["mean_seen_loss"] = continual_losses["mean_seen_loss"]
         if len(names) > 1:
+            # Lower final CE on earlier tasks gives positive backward transfer.
             report["backward_transfer_ce"] = float(
                 np.mean(losses.diagonal()[:-1] - losses[-1, :-1])
             )
+        writer.log(
+            "continual_evaluation",
+            after_task=len(tasks) - 1,
+            validation_scope=validation_scope,
+            mean_seen_loss=continual_losses["mean_seen_loss"][-1],
+            mean_forgetting=continual_losses["mean_forgetting"][-1],
+            backward_transfer_ce=report.get("backward_transfer_ce"),
+        )
 
     writer.save_params(
         "a3-frozen",
@@ -942,9 +1069,12 @@ def train_sequential(
         updates=updates,
         bank_snapshot_sha256=bank.input_snapshot_sha256,
         frozen_residual_sha256=fingerprint,
+        **({**alignment_metadata, "task_metrics": task_metrics} if aligned else {}),
     )
 
     writer.write_json("results.json", report)
+    if aligned:
+        log_continual_summary(log, report, interpretation=HELD_OUT_GROUP_INTERPRETATION)
     return report
 
 

@@ -116,7 +116,9 @@ def test_benchmark_requires_explicit_warm_start(tmp_path, capsys):
     assert "requires --warm-start" in capsys.readouterr().err
 
 
-def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
+def test_runner_checks_a3_pairing_and_dispatches_sequential_alignment(
+    tmp_path, monkeypatch
+):
     from contextlib import nullcontext
     from dataclasses import replace
 
@@ -125,7 +127,7 @@ def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
     from experiments import run_stage_a4 as runner
     from runtime import data_loader
     from stages.stage_A import a3
-    from stages.stage_A.a4 import checkpoint, model, training
+    from stages.stage_A.a4 import checkpoint, data, model, training
     from stages.stage_A.a4.config import load_config
     from stages.stage_base import Domain
     from symbolic_memory import bank, jax_bridge, service, storage
@@ -264,6 +266,66 @@ def test_benchmark_runner_records_and_checks_a3_pairing(tmp_path, monkeypatch):
     assert json.loads((out / "meta.json").read_text())["a3_pairing"] == pair
     assert json.loads((out / "results.json").read_text())["a3_pairing"] == pair
 
+    aligned_tasks = tuple(
+        replace(task, name=f"rocstories_task_{task_id}") for task_id in (1, 2, 3)
+    )
+    provenance = {
+        "task_order": [task.name for task in aligned_tasks],
+        "alignment_counts": {
+            task.name: {"examples": len(task.train_blocks)} for task in aligned_tasks
+        },
+        "source_fingerprints": {"sources": "prepared-source"},
+        "task_mapping": "original source task IDs",
+    }
+    aligned_data = SimpleNamespace(tasks=aligned_tasks, provenance=provenance)
+    load_alignment = Mock(return_value=aligned_data)
+    monkeypatch.setattr(data, "load_data", load_alignment)
+    standalone_train = Mock(side_effect=AssertionError("Unexpected standalone trainer"))
+    monkeypatch.setattr(training, "train", standalone_train)
+    train.reset_mock()
+    load_runtime_data.reset_mock()
+    source_args = []
+    for flag in (
+        "--train-sources",
+        "--validation-sources",
+        "--test-sources",
+        "--alignment-labels",
+    ):
+        path = tmp_path / flag.removeprefix("--")
+        if flag != "--alignment-labels":
+            path.touch()
+        source_args.extend((flag, str(path)))
+    sequential_argv = [
+        *argv[2:],
+        "--data-mode",
+        "sequential-aligned",
+        "--runtime-config",
+        str(tmp_path / "unused.yaml"),
+        "--run-name",
+        "supervised",
+        *source_args,
+    ]
+    with pytest.raises(FileNotFoundError, match="Sequential alignment input not found"):
+        runner.main(sequential_argv)
+    load_alignment.assert_not_called()
+    train.assert_not_called()
+    Path(source_args[-1]).touch()
+    assert runner.main(sequential_argv) == 0
+    load_runtime_data.assert_not_called()
+    standalone_train.assert_not_called()
+    load_alignment.assert_called_once()
+    train.assert_called_once()
+    assert train.call_args.args[2] is aligned_data
+    effective = train.call_args.args[4]
+    assert effective.key_weight == effective.value_weight == 1
+    out = tmp_path / "supervised"
+    meta = json.loads((out / "meta.json").read_text())
+    assert json.loads((out / "data.json").read_text()) == provenance
+    assert {key: meta[key] for key in provenance} == provenance
+    assert meta["data_mode"] == "sequential-aligned"
+    assert meta["loss_weights"] == {"ce": 1.0, "key": 1.0, "value": 1.0}
+    assert meta["bank_snapshot"] == "bank"
+
 
 def test_accepts_checkpoint_and_bank_overrides():
     args = parse_args(
@@ -281,8 +343,9 @@ def test_accepts_checkpoint_and_bank_overrides():
     assert args.embeddings == Path("embeddings.jsonl")
 
 
-def test_requires_firing_labels_in_aligned_mode():
-    argv = arguments("--data-mode", "aligned")
+@pytest.mark.parametrize("mode", ["aligned", "sequential-aligned"])
+def test_requires_firing_labels_in_aligned_modes(mode):
+    argv = arguments("--data-mode", mode)
     index = argv.index("--alignment-labels")
     del argv[index : index + 2]
     with pytest.raises(SystemExit):
@@ -332,8 +395,9 @@ def test_rejects_invalid_or_nontraining_options(extra):
         parse_args(arguments(*extra))
 
 
-def test_test_split_is_explicit():
-    argv = arguments("--data-mode", "aligned")
+@pytest.mark.parametrize("mode", ["aligned", "sequential-aligned"])
+def test_test_split_is_explicit(mode):
+    argv = arguments("--data-mode", mode)
     argv.remove("--skip-test")
     with pytest.raises(SystemExit):
         parse_args(argv)

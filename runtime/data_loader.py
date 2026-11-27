@@ -347,7 +347,9 @@ def build_separate_tasks(
             progress.update(1)
 
             if name not in heldout_tasks:
-                _check_split_sources(remaining_sources, train_texts, validation_texts, test_texts)
+                _check_split_sources(
+                    remaining_sources, train_texts, validation_texts, test_texts
+                )
 
             separator = get_separator(
                 tokenizer,
@@ -509,7 +511,9 @@ def build_story_tasks(
         item["test_split"],
     )
 
-    _check_split_sources(remaining_sources, train_stories, validation_stories, test_stories)
+    _check_split_sources(
+        remaining_sources, train_stories, validation_stories, test_stories
+    )
 
     separator = get_separator(
         tokenizer,

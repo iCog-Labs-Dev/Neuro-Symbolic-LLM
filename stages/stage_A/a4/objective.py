@@ -63,6 +63,7 @@ def objective_at_latents(
     key_weight: float = 1.0,
     value_weight: float = 1.0,
     token_mask: jax.Array | None = None,
+    detach_alignment_states: bool = False,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Compute A4 loss using frozen A3 latents.
 
@@ -77,22 +78,15 @@ def objective_at_latents(
     """
 
     if any(
-        not math.isfinite(weight) or weight < 0
-        for weight in (key_weight, value_weight)
+        not math.isfinite(weight) or weight < 0 for weight in (key_weight, value_weight)
     ):
-        raise ValueError(
-            "Alignment weights must be finite and nonnegative"
-        )
+        raise ValueError("Alignment weights must be finite and nonnegative")
 
     expected_layers = set(model.symbolic.layers)
-    expected_values = {
-        f"layer_{layer}" for layer in model.symbolic.layers
-    }
+    expected_values = {f"layer_{layer}" for layer in model.symbolic.layers}
 
     if set(value_params) != expected_values:
-        raise ValueError(
-            "Value parameters must cover every symbolic layer"
-        )
+        raise ValueError("Value parameters must cover every symbolic layer")
 
     # Runtime-only training does not require alignment labels.
     alignment_enabled = key_weight > 0 or value_weight > 0
@@ -109,17 +103,12 @@ def objective_at_latents(
                 positions.ndim != 2
                 or positions.shape[1] != 2
                 or positions.shape[0] == 0
-                or not jnp.issubdtype(
-                    positions.dtype, jnp.integer
-                )
+                or not jnp.issubdtype(positions.dtype, jnp.integer)
                 or indices.shape != (positions.shape[0],)
-                or not jnp.issubdtype(
-                    indices.dtype, jnp.integer
-                )
+                or not jnp.issubdtype(indices.dtype, jnp.integer)
             ):
                 raise ValueError(
-                    "Each labelled position requires one "
-                    "integer template index"
+                    "Each labelled position requires one " "integer template index"
                 )
 
     # Forward pass:
@@ -139,6 +128,7 @@ def objective_at_latents(
     value_loss = jnp.asarray(0.0, dtype=jnp.float32)
 
     if alignment_enabled:
+        assert labels is not None
         predictor = ValuePredictor(
             model.symbolic.hidden_size,
             model.symbolic.key_dim,
@@ -154,43 +144,31 @@ def objective_at_latents(
                 & (positions[:, 1] < input_ids.shape[1])
             )
 
-            batch = jnp.clip(
-                positions[:, 0], 0, input_ids.shape[0] - 1
-            )
-            token = jnp.clip(
-                positions[:, 1], 0, input_ids.shape[1] - 1
-            )
+            batch = jnp.clip(positions[:, 0], 0, input_ids.shape[0] - 1)
+            token = jnp.clip(positions[:, 1], 0, input_ids.shape[1] - 1)
 
             if token_mask is not None:
                 valid = valid & token_mask[batch, token]
 
             hidden = states[layer][batch, token]
+            if detach_alignment_states:
+                # Earlier symbolic heads can affect later hidden states. Keep
+                # alignment gradients local to the supervised projection.
+                hidden = jax.lax.stop_gradient(hidden)
             name = f"layer_{layer}"
 
             aligned = alignment_loss(
-                model.symbolic.project(
-                    symbolic_params[name], hidden
-                ),
-                predictor.apply(
-                    value_params[name], hidden
-                ),
+                model.symbolic.project(symbolic_params[name], hidden),
+                predictor.apply(value_params[name], hidden),
                 bank_keys,
                 bank_values,
                 indices,
             )
 
-            key_loss = key_loss + jnp.where(
-                jnp.all(valid), aligned.key, jnp.nan
-            )
-            value_loss = value_loss + jnp.where(
-                jnp.all(valid), aligned.value, jnp.nan
-            )
+            key_loss = key_loss + jnp.where(jnp.all(valid), aligned.key, jnp.nan)
+            value_loss = value_loss + jnp.where(jnp.all(valid), aligned.value, jnp.nan)
 
-    total = (
-        terms["total"]
-        + key_weight * key_loss
-        + value_weight * value_loss
-    )
+    total = terms["total"] + key_weight * key_loss + value_weight * value_loss
 
     return total, {
         **terms,

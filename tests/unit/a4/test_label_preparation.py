@@ -21,7 +21,11 @@ from scripts.prepare_retrieval_probes import (
     held_out_documents,
     possible_clauses,
 )
-from stages.stage_A.a4.data import load_data, padded_source_blocks
+from stages.stage_A.a4.data import (
+    SequentialAlignmentData,
+    load_data,
+    padded_source_blocks,
+)
 
 
 class Tokenizer:
@@ -352,6 +356,148 @@ def test_occurrence_admission_rejects_mismatched_inputs(prepared, mutation):
         args.validation_sources.write_text(args.train_sources.read_text())
     with pytest.raises(ValueError):
         admit_prepared(prepared)
+
+
+def test_sequential_alignment_partitions_occurrences_by_source_task(prepared):
+    args, bank, manifest = prepared
+    args.data_mode = "sequential-aligned"
+    args.max_train_rows = args.max_train_blocks = 10000
+    args.skip_test = False
+    args.validation_sources.write_text(
+        "\n".join(json.dumps({"source_text": text}) for text in ("4 5", "5 6", "7 8"))
+    )
+    args.test_sources = args.train_sources.with_name("test.jsonl")
+    args.test_sources.write_text(
+        json.dumps({"document_id": "test", "source_text": "6 7"})
+    )
+    expected = [(3431, 424), (3178, 411), (3391, 423)]
+    documents, labels, ids, targets = [], [], [], []
+    for task_id, (examples, count) in enumerate(expected, 1):
+        # Some document IDs are shared across corpora, which requires the full join key.
+        corpus_id = f"corpus-{4 - task_id}"
+        for index in range(count):
+            identity = {"corpus_id": corpus_id, "document_id": str(index)}
+            tokens = [1000 * task_id + index, *range(1, 10)]
+            source_text = " ".join(map(str, tokens))
+            documents.append(
+                {**identity, "task_id": task_id, "source_text": source_text}
+            )
+            positions = range(1, examples // count + 1 + (index < examples % count))
+            prefix_length = len(str(tokens[0])) + 1
+            for position in positions:
+                start = prefix_length + 2 * (position - 1)
+                target = (index + position) % 2
+                labels.append(
+                    {
+                        **identity,
+                        "template_id": bank.records[target].template_id,
+                        "token_index": position,
+                        "window_start": 0,
+                        "window_end": len(tokens),
+                        "source_spans": [
+                            {"start": start, "end": start + 1, "text": str(position)}
+                        ],
+                    }
+                )
+                ids.append([*tokens, 0])
+                targets.append([position, target])
+
+    order = np.random.default_rng(1).permutation(len(labels))
+    ids = np.asarray(ids, dtype=np.int32)[order]
+    targets = np.asarray(targets, dtype=np.int32)[order]
+    mask = ids != 0
+    shuffled_labels = [labels[i] for i in order]
+    args.train_sources.write_text("\n".join(map(json.dumps, documents)))
+    arrays = args.alignment_labels.parent / manifest["arrays_file"]
+    np.savez_compressed(arrays, input_ids=ids, token_mask=mask, targets=targets)
+    manifest.update(
+        seq_len=ids.shape[1],
+        labels=shuffled_labels,
+        arrays_sha256=hashlib.sha256(arrays.read_bytes()).hexdigest(),
+        source_sha256={
+            "sources": hashlib.sha256(args.train_sources.read_bytes()).hexdigest()
+        },
+    )
+    args.alignment_labels.write_text(json.dumps(manifest))
+    training = SimpleNamespace(seq_len=ids.shape[1], batch_size=1, epochs=2)
+    data = load_data(args, Tokenizer(), bank, training)
+
+    assert isinstance(data, SequentialAlignmentData)
+    assert data.test_mask.sum() == 2
+    assert data.validation_mask.sum() == 6
+    assert sum(len(task.train_blocks) for task in data.tasks) == 10000
+    assert (
+        data.provenance["source_fingerprints"]["alignment_arrays"]
+        == manifest["arrays_sha256"]
+    )
+    for task_id, ((examples, count), task) in enumerate(
+        zip(expected, data.tasks, strict=True), 1
+    ):
+        assert task.name == f"rocstories_task_{task_id}"
+        assert task.epochs == 2
+        assert data.provenance["alignment_counts"][task.name] == {
+            "task_id": task_id,
+            "examples": examples,
+            "source_documents": count,
+        }
+        rows = np.flatnonzero(ids[:, 0] // 1000 == task_id)
+        assert len(rows) == examples
+        assert task.labels == tuple(shuffled_labels[i] for i in rows)
+        np.testing.assert_array_equal(task.train_blocks, ids[rows])
+        np.testing.assert_array_equal(task.train_mask, mask[rows])
+        np.testing.assert_array_equal(task.targets, targets[rows])
+        selected = np.array([examples - 1, 0, 1])
+        batch_ids, positions, bank_indices, token_mask = task.batch_inputs(selected)
+        np.testing.assert_array_equal(batch_ids, ids[rows[selected]])
+        np.testing.assert_array_equal(token_mask, mask[rows[selected]])
+        np.testing.assert_array_equal(positions[:, 0], np.arange(len(selected)))
+        np.testing.assert_array_equal(positions[:, 1], targets[rows[selected], 0])
+        np.testing.assert_array_equal(bank_indices, targets[rows[selected], 1])
+
+
+@pytest.mark.parametrize(
+    "mutation,match",
+    [
+        ("contract", "alignment-occurrences-v2"),
+        ("identity", "require a source identity"),
+        ("unknown_document", "unknown source"),
+        ("duplicate", "Duplicate occurrence"),
+        ("task_id", "Invalid ROCStories task ID"),
+        ("target", "target index is outside the bank"),
+        ("missing_task", "exactly one of the three ROCStories tasks"),
+    ],
+)
+def test_sequential_alignment_rejects_invalid_provenance(prepared, mutation, match):
+    args, bank, manifest = prepared
+    args.data_mode = "sequential-aligned"
+    row = json.loads(args.train_sources.read_text())
+    row["task_id"] = True if mutation == "task_id" else 1
+    args.train_sources.write_text(json.dumps(row))
+    manifest["source_sha256"]["sources"] = hashlib.sha256(
+        args.train_sources.read_bytes()
+    ).hexdigest()
+
+    if mutation == "contract":
+        manifest["contract_version"] = "alignment-labels-v1"
+    if mutation == "identity":
+        del manifest["labels"][0]["corpus_id"]
+    if mutation == "unknown_document":
+        manifest["labels"][0]["document_id"] = "unknown"
+    if mutation in {"duplicate", "target"}:
+        arrays = args.alignment_labels.parent / manifest["arrays_file"]
+        with np.load(arrays, allow_pickle=False) as archive:
+            values = dict(archive)
+        if mutation == "duplicate":
+            manifest["labels"][1] = manifest["labels"][0]
+            values["targets"][1] = values["targets"][0]
+        else:
+            values["targets"][0, 1] = 2
+        np.savez_compressed(arrays, **values)
+        manifest["arrays_sha256"] = hashlib.sha256(arrays.read_bytes()).hexdigest()
+
+    args.alignment_labels.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match=match):
+        load_data(args, Tokenizer(), bank, SimpleNamespace(seq_len=4, batch_size=1))
 
 
 def document(name, text):

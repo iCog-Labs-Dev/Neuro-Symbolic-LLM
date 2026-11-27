@@ -408,7 +408,11 @@ def build_routed_extraction_prompt(
 
     input_section = general.text[input_section_match.end() :]
     combined = (
-        discourse_guidance + "\n\n" + general_instructions.rstrip() + "\n\n" + """
+        discourse_guidance
+        + "\n\n"
+        + general_instructions.rstrip()
+        + "\n\n"
+        + """
     ## FINAL COMBINED EXTRACTION REQUIREMENTS
 
     You must perform BOTH stages in this single generation.
@@ -467,7 +471,11 @@ def build_routed_extraction_prompt(
 
     Do not return only discourse assertions.
     Do not return a separate DiscourseExtraction object.
-    """ + "\n\n" + input_heading + "\n" + input_section
+    """
+        + "\n\n"
+        + input_heading
+        + "\n"
+        + input_section
     )
 
     # Preserve the input heading when a routed prompt splits instructions from input.
